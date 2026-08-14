@@ -100,6 +100,9 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 				if wait <= 0 {
 					wait = s.waitTick()
 				}
+				if wait > workClaimRenewalInterval {
+					wait = workClaimRenewalInterval
+				}
 				if serr := s.sleep(ctx, wait); serr != nil {
 					return report, serr
 				}
@@ -134,6 +137,9 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 				if wait <= 0 {
 					wait = s.waitTick()
 				}
+				if wait > workClaimRenewalInterval {
+					wait = workClaimRenewalInterval
+				}
 				if serr := s.sleep(ctx, wait); serr != nil {
 					return report, serr
 				}
@@ -149,7 +155,11 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 			if _, nerr := s.Next(ctx, repo, pr); nerr != nil {
 				return report, nerr
 			}
-			if serr := s.sleep(ctx, s.waitTick()); serr != nil {
+			delay := s.waitTick()
+			if delay > workClaimRenewalInterval {
+				delay = workClaimRenewalInterval
+			}
+			if serr := s.sleep(ctx, delay); serr != nil {
 				return report, serr
 			}
 			continue

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // leader marks an autoreview daemon as live, which is what tells the waiter
@@ -96,6 +97,20 @@ type refAdvancingStore struct {
 	updates int
 }
 
+type throttledLoadStore struct {
+	StateStore
+	err   error
+	loads int
+}
+
+func (s *throttledLoadStore) Load(ctx context.Context) (State, Revision, error) {
+	s.loads++
+	if s.loads == 1 {
+		return State{}, Revision{}, s.err
+	}
+	return s.StateStore.Load(ctx)
+}
+
 func (s *refAdvancingStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
 	st, err := s.StateStore.Update(ctx, mutate)
 	if err == nil {
@@ -164,6 +179,34 @@ func TestWaitRenewsClaimBeforeLongStateWatch(t *testing.T) {
 	}
 
 	if _, err := f.svc.WaitForAction(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop the waiter")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
+	}
+}
+
+func TestWaitRenewsClaimBeforeLongThrottleDelay(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	throttled := &throttledLoadStore{
+		StateStore: f.store,
+		err: &ghapi.RateLimitError{
+			Kind: "primary", Until: time.Now().Add(2 * workClaimRenewalInterval),
+		},
+	}
+	f.svc.store = throttled
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.WaitForAction(ctx, "owner/repo", 607); err == nil {
 		t.Fatal("expected cancellation to stop the waiter")
 	}
 	if slept != workClaimRenewalInterval {
@@ -311,6 +354,7 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Minute))
 	f.setLocalWork(false, "")
+	f.svc.cfg.PollInterval = 3 * time.Hour
 
 	// A daemon holds the lease, but has never heard of this PR.
 	f.leader(f.clk.now().Add(time.Hour))
@@ -321,7 +365,9 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	// Idle exactly once so the test cannot hang if the fix regresses.
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
-	f.svc.sleepFn = func(context.Context, time.Duration) error {
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
 		cancel()
 		return context.Canceled
 	}
@@ -332,6 +378,9 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 1 {
 		t.Errorf("the untracked head must get its review requested, posted %d", got)
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
 	}
 }
 

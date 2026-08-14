@@ -124,8 +124,8 @@ func (s *Service) workClaimOwner() (string, string) {
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = real
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
 	}
 	session := firstWorkOwnerValue(
 		os.Getenv("CRQ_WORK_OWNER"),

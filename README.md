@@ -466,8 +466,9 @@ fleet lease while the active daemon maintains it.
 
 Interactive `next`, `wait`, and `loop` calls also take a short-lived PR work claim. Autofix dispatch
 checks it in the same compare-and-swap update that grants its own session claim, so whichever path
-starts first owns the fix and the other waits. Interactive claims renew on each call, expire after
-two hours if the caller disappears, and release automatically at `done` or `blocked`. Run `crq
+starts first owns the fix. Plain `crq next` returns a conflict or wait action to the losing caller;
+commands that explicitly wait block until the claim is available. Interactive claims renew on each
+call, expire after two hours if the caller disappears, and release automatically at `done` or `blocked`. Run `crq
 unclaim [<repo> <pr>]` when intentionally abandoning the loop sooner. Claim creation fails closed if
 a recently active autofix host is too old to honour this guarantee; upgrade that daemon first.
 

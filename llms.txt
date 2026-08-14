@@ -264,8 +264,9 @@ partial scan for a clean one; a daemon pass logs the failure and carries on to t
 
 That dispatch claim is mutually exclusive with the interactive work claim. If an agent has already
 called `next`, `wait`, or `loop`, autofix skips the PR. If autofix won first, the interactive caller
-waits instead of editing concurrently. Claim creation fails closed when a recently active autofix
-host runs an older binary that does not understand work claims; upgrade that daemon first.
+receives a conflict or wait action from plain `crq next`; commands that explicitly wait block instead
+of editing concurrently. Claim creation fails closed when a recently active autofix host runs an
+older binary that does not understand work claims; upgrade that daemon first.
 
 A PR whose head branch lives in a FORK is reviewed like any other but not dispatched: the session
 would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set

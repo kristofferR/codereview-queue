@@ -38,6 +38,15 @@ func TestWorkClaimReleaseIsOwnerScopedUnlessForced(t *testing.T) {
 	if _, ok := st.WorkClaim("owner/repo", 12, now); !ok {
 		t.Fatal("failed release removed the claim")
 	}
+	if !st.ReleaseWorkClaim("owner/repo", 12, "session-a", false) {
+		t.Fatal("owner could not release its own work claim")
+	}
+	if _, ok := st.WorkClaim("owner/repo", 12, now); ok {
+		t.Fatal("owner release left the claim behind")
+	}
+	st.SetWorkClaim("owner/repo", 12, WorkClaim{
+		Owner: "session-a", ClaimedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
 	if !st.ReleaseWorkClaim("owner/repo", 12, "", true) {
 		t.Fatal("forced operator release did not remove the claim")
 	}

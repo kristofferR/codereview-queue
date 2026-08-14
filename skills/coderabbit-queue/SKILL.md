@@ -215,9 +215,10 @@ Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<he
 and the status line.
 
 Interactive `next`, `wait`, and `loop` calls and unattended dispatch are mutually exclusive per PR.
-Whichever side wins the shared CAS works; the other waits. Claim creation refuses to promise this
-when a recently active autofix host runs a binary too old to honour work claims, so upgrade every
-reported autofix host when that error appears.
+Whichever side wins the shared CAS works. Plain `crq next` returns a conflict or wait action to the
+losing caller; commands that explicitly wait block until the claim is available. Claim creation
+refuses to promise this when a recently active autofix host runs a binary too old to honour work
+claims, so upgrade every reported autofix host when that error appears.
 ## Holding a PR
 
 To stop crq reviewing a PR — a draft you are still shaping, a branch waiting on a decision:

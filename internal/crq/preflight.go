@@ -59,10 +59,14 @@ type PreflightReport struct {
 	CredentialsOverridden bool `json:"credentials_overridden,omitempty"`
 	// Quota reports whether the account block this run observed was shared with
 	// crq's queue, and why not when it was not.
-	Quota      *CLIQuotaResult `json:"quota,omitempty"`
-	ExitCode   int             `json:"exit_code"`
-	CheckedAt  time.Time       `json:"checked_at"`
-	DurationMS int64           `json:"duration_ms"`
+	Quota *CLIQuotaResult `json:"quota,omitempty"`
+	// SkipReason/BlockedUntil explain a successful no-op when the shared queue
+	// already knows the CodeRabbit account cannot accept another review.
+	SkipReason   string     `json:"skip_reason,omitempty"`
+	BlockedUntil *time.Time `json:"blocked_until,omitempty"`
+	ExitCode     int        `json:"exit_code"`
+	CheckedAt    time.Time  `json:"checked_at"`
+	DurationMS   int64      `json:"duration_ms"`
 }
 
 type PreflightStatus struct {
@@ -84,6 +88,41 @@ type PreflightFinding struct {
 	Suggestions         []string `json:"suggestions,omitempty"`
 	Fingerprint         string   `json:"fingerprint,omitempty"`
 	Source              string   `json:"source"`
+}
+
+// SkipBlockedPreflight reports whether a local review should be skipped because
+// crq's shared state already holds a live CodeRabbit account-quota block.
+//
+// Reading the state is deliberately separate from Preflight: the local command
+// must still work without crq configuration or GitHub access, so callers can
+// treat a state-read failure as a cache miss and run the CLI normally. Explicit
+// credentials bypass the shared block because they may select another account.
+func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOptions) (*PreflightReport, error) {
+	if carriesCredentials(opts.ExtraArgs) {
+		return nil, nil
+	}
+	start := time.Now()
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock()
+	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
+		return nil, nil
+	}
+	until := state.Account.BlockedUntil.UTC()
+	return &PreflightReport{
+		Status:       "skipped",
+		Tool:         "coderabbit-cli",
+		Command:      redactSecrets(append([]string{"coderabbit-cli"}, coderabbitArgs(opts)...)),
+		Statuses:     []PreflightStatus{},
+		Findings:     []PreflightFinding{},
+		SkipReason:   "shared CodeRabbit account quota is blocked",
+		BlockedUntil: &until,
+		ExitCode:     0,
+		CheckedAt:    now,
+		DurationMS:   time.Since(start).Milliseconds(),
+	}, nil
 }
 
 func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int, error) {

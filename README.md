@@ -447,6 +447,10 @@ crq version               # print the version
 crq help [command]        # help, optionally for one command
 ```
 
+`crq preflight` avoids a doomed local review when shared state already records a live CodeRabbit
+account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocked_until`. If shared
+state cannot be read, it falls back to running the local CLI normally.
+
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
 the exit code. **`crq loop` exit codes:** `0` converged, no
 actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in

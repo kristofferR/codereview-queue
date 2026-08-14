@@ -331,6 +331,11 @@ If the official CodeRabbit CLI is installed, agents can run a normalized local p
 crq preflight --type uncommitted
 ```
 
+If shared state already records a live CodeRabbit account block, the command exits 0 with
+`status: "skipped"`, `.skip_reason`, and `.blocked_until` instead of making a request that cannot
+succeed. Treat that as a satisfied preflight requirement and continue the PR workflow. If shared
+state cannot be read, crq runs the local review normally.
+
 Use that only to review local git changes before pushing. It does not replace `crq next`, which
 coordinates queued GitHub PR review triggers and extracts GitHub PR feedback.
 

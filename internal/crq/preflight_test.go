@@ -81,3 +81,91 @@ func TestPreflightFindingFallsBackToComment(t *testing.T) {
 		t.Fatal("expected inferred severity")
 	}
 }
+
+func TestSkipBlockedPreflightUsesSharedQuota(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	until := now.Add(37 * time.Minute)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &until
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	service.now = func() time.Time { return now }
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{
+		ReviewType: "uncommitted",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report == nil {
+		t.Fatal("active shared block must skip local preflight")
+	}
+	if report.Status != "skipped" || report.ExitCode != 0 {
+		t.Fatalf("skip report = %+v, want successful skipped status", report)
+	}
+	if report.BlockedUntil == nil || !report.BlockedUntil.Equal(until) {
+		t.Errorf("blocked_until = %v, want %s", report.BlockedUntil, until)
+	}
+	if report.SkipReason == "" {
+		t.Error("skip report must explain why the CLI was not run")
+	}
+	if len(report.Command) == 0 || report.Command[len(report.Command)-1] != "uncommitted" {
+		t.Errorf("command = %v, want the skipped command described", report.Command)
+	}
+	if report.Findings == nil || report.Statuses == nil {
+		t.Fatalf("JSON arrays must remain non-nil: %+v", report)
+	}
+}
+
+func TestSkipBlockedPreflightRunsWhenBlockExpired(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Second)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &expired
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	service.now = func() time.Time { return now }
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Fatalf("expired shared block must run local preflight, got %+v", report)
+	}
+}
+
+func TestSkipBlockedPreflightRunsWithExplicitCredentials(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &until
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	service.now = func() time.Time { return now }
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{
+		ExtraArgs: []string{"--api-key", "different-account"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Fatalf("explicit credentials may select another account and must run, got %+v", report)
+	}
+}

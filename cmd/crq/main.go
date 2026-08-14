@@ -1573,7 +1573,7 @@ Options:
   --bin <path-or-name>              CodeRabbit CLI binary; defaults to cr/coderabbit
 
 Exit codes:
-  0   clean/no local findings
+  0   clean/no local findings, or skipped because shared quota is blocked
   10  local findings returned in .findings[]
   1   setup, auth, CLI, or parsing error
   2   come back later: a timeout, or the CodeRabbit account is rate-limited
@@ -1585,6 +1585,10 @@ comment on the calibration PR, though the state write itself is a GitHub call â€
 and .quota says whether it did. It only ever EXTENDS a standing block, and only
 when the CLI attributes the limit to the organisation crq queues for; otherwise
 .quota.reason says why not. Read .retry_after rather than re-running.
+
+When shared state already holds a live account block, crq skips the doomed CLI
+request and exits 0 with status "skipped", .skip_reason and .blocked_until. If
+shared state cannot be read, preflight runs normally.
 
 Use crq loop for queued GitHub PR reviews.
 `)
@@ -1658,7 +1662,7 @@ func preflight(ctx context.Context, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	report, code, err := crq.Preflight(ctx, crq.PreflightOptions{
+	opts := crq.PreflightOptions{
 		Binary:     *binary,
 		ReviewType: *reviewType,
 		Base:       *base,
@@ -1667,7 +1671,12 @@ func preflight(ctx context.Context, args []string) int {
 		Light:      *light,
 		Timeout:    *timeout,
 		ExtraArgs:  fs.Args(),
-	})
+	}
+	if report := skipBlockedPreflight(ctx, opts); report != nil {
+		printJSON(report)
+		return 0
+	}
+	report, code, err := crq.Preflight(ctx, opts)
 	// Before printing: a local block is evidence about the SHARED account quota,
 	// so hand it to the queue rather than letting it die in this process. Local
 	// preflight must keep working with no crq config and no GitHub token, so this
@@ -1678,6 +1687,31 @@ func preflight(ctx context.Context, args []string) int {
 		fatal(err)
 	}
 	return code
+}
+
+// skipBlockedPreflight is a best-effort read of crq's shared account quota. A
+// configured live block makes another local CodeRabbit request both wasteful
+// and guaranteed to fail, so it is a successful skip. Missing configuration,
+// credentials, or GitHub access remain cache misses: local preflight keeps its
+// standalone behavior and runs normally.
+func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.PreflightReport {
+	cfg, err := crq.LoadConfig()
+	if err != nil || cfg.RequireState() != nil {
+		return nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
+	defer cancel()
+	gh, err := ghapi.NewGitHub(readCtx)
+	if err != nil {
+		return nil
+	}
+	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	service := crq.NewService(cfg, gh, store, stderrLogger{})
+	report, err := service.SkipBlockedPreflight(readCtx, opts)
+	if err != nil {
+		return nil
+	}
+	return report
 }
 
 // shareCLIQuota records a CLI-reported account block in crq's shared state.

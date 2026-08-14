@@ -224,6 +224,29 @@ func TestOneRoundPerPR(t *testing.T) {
 	}
 }
 
+func TestSupersedeMigratesLegacyCoAnswerAsActivity(t *testing.T) {
+	s := New()
+	first, err := s.NewRound("owner/repo", 8, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(time.Second)
+	first.setCo("cursor[bot]", CoBotRound{AnsweredAt: &answered})
+	s.PutRound(*first)
+
+	next, err := s.Supersede("owner/repo", 8, "00fedcba9", t0.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := next.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("supersede did not migrate legacy answer as durable activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("supersede carried head-scoped legacy answer: %+v", co)
+	}
+}
+
 func TestSlotRoundStaleness(t *testing.T) {
 	s := New()
 	r := newFired(t, &s)

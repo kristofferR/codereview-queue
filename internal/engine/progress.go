@@ -60,13 +60,14 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	}
 	firedAt := r.FiredAt.UTC()
 	completion := Completion(r, obs, p)
+	declined := primaryDeclinedRound(obs, p, firedAt)
 
-	// A reviewing round past its wait deadline whose primary review already
-	// stands: a gating co-bot (Codex) has gone silent too long, so give up on it —
-	// the primary review stands, and re-firing a head the primary already reviewed
+	// A reviewing round past its wait deadline whose primary review or proven
+	// re-review decline already stands: a gating co-bot (Codex) has gone silent
+	// too long, so give up on it. Re-firing a head the primary already answered
 	// would spam. Checked before the review loop below, which would otherwise hold
-	// a co-review wait open forever on the primary review's ack. A reviewing round
-	// with NO primary review is deliberately left to the fall-through (KeepWaiting):
+	// a co-review wait open forever on the primary's ack. A reviewing round with
+	// NO primary evidence is deliberately left to the fall-through (KeepWaiting):
 	// the loop bounds and times out its own wait (exit 2), so an expired deadline
 	// never resets or re-fires the same head.
 	//
@@ -80,6 +81,9 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) {
 		if primaryReviewedHead(r, obs, p) {
 			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+		}
+		if declined {
+			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary re-review decline stands"}
 		}
 		if PrimaryReviewUnavailable(obs, p, r.Head) {
 			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; no primary review is coming for this head"}
@@ -127,8 +131,6 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		}
 		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
 	}
-	declined := primaryDeclinedRound(obs, p, firedAt)
-
 	// Convergence and slot release answer different questions. A repository may
 	// leave the primary out of its required set (required Codex only), and then
 	// completion is done the moment that co-reviewer answers — while the
@@ -228,7 +230,11 @@ func PrimaryAckPending(r state.Round, obs Observation, p Policy) bool {
 	if r.Phase != state.PhaseFired || r.FiredAt == nil || r.CoOnly {
 		return false
 	}
-	_, acked := primaryAck(r, obs, p, r.FiredAt.UTC())
+	firedAt := r.FiredAt.UTC()
+	if primaryDeclinedRound(obs, p, firedAt) {
+		return false
+	}
+	_, acked := primaryAck(r, obs, p, firedAt)
 	return !acked
 }
 

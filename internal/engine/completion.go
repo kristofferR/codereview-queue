@@ -33,9 +33,10 @@ type CompletionStatus struct {
 //     word alone.
 //  4. The completion-reply fallback: a completion or declined re-review reply
 //     pairs to this round's command and stands in for a no-findings re-review —
-//     only if the bot has ANY prior submitted review, the pairing is
-//     chronologically sound, and no in-progress/rate-limited/paused/failed
-//     top-summary state contradicts it (the c22eb4b/e2aa2f0 gates).
+//     only if the bot has a submitted review predating that command, the
+//     pairing is chronologically sound, and no in-progress/rate-limited/
+//     paused/failed top-summary state contradicts it (the c22eb4b/e2aa2f0
+//     gates).
 func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	reviewedBy := map[string]bool{}
 	for _, bot := range p.RequiredBots {
@@ -211,14 +212,12 @@ func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.
 // pair chronologically with the earliest unanswered command, submitted reviews
 // consume the command they answered, and a completion (including an explicit
 // refusal to re-review commits the bot says it already covered) only stands
-// when the bot has a prior submitted review and no nonterminal or failed
-// top-summary state contradicts it.
+// when the bot has a submitted review predating the paired command and no
+// nonterminal or failed top-summary state contradicts it.
 func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool {
-	if !botHasAnyReview(obs.Reviews, p.Bot) {
-		return false
-	}
 	for _, reply := range commandReplies(obs, p) {
-		if reply.completion && notBefore(reply.commandAt, firedAt) &&
+		if reply.completion && botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
+			notBefore(reply.commandAt, firedAt) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvFailed) {
 			return true
@@ -233,11 +232,9 @@ func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool 
 // completionReplyForRound: a first-ever instant acknowledgement can arrive
 // while the real review is still queued, and must not release the slot.
 func primaryDeclinedRound(obs Observation, p Policy, firedAt time.Time) bool {
-	if !botHasAnyReview(obs.Reviews, p.Bot) {
-		return false
-	}
 	for _, reply := range commandReplies(obs, p) {
-		if reply.declined && notBefore(reply.commandAt, firedAt) &&
+		if reply.declined && botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
+			notBefore(reply.commandAt, firedAt) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
 			return true
 		}
@@ -291,11 +288,9 @@ func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
 	if r.CommandID == 0 {
 		return false
 	}
-	if !botHasAnyReview(obs.Reviews, p.Bot) {
-		return false
-	}
 	for _, reply := range commandReplies(obs, p) {
 		if reply.commandID == r.CommandID && reply.completion &&
+			botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
 			notBefore(reply.commandAt, cutoff) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
 			return true
@@ -304,9 +299,9 @@ func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
 	return false
 }
 
-func botHasAnyReview(reviews []ReviewSeen, bot string) bool {
+func botReviewedBefore(reviews []ReviewSeen, bot string, before time.Time) bool {
 	for _, review := range reviews {
-		if sameBot(review.Bot, bot) {
+		if sameBot(review.Bot, bot) && !review.SubmittedAt.IsZero() && review.SubmittedAt.Before(before) {
 			return true
 		}
 	}

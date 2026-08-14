@@ -338,6 +338,18 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
 	}
+	// A proven decline is also final primary evidence. Once the co-review
+	// deadline passes, retaining this reviewing round would starve every later
+	// reviewing round behind it.
+	declined := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "000011122", SubmittedAt: t0.Add(-time.Hour)}},
+		Events: []dialect.BotEvent{
+			{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001, CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)},
+			{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1002, AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)},
+		}}
+	if tr := Progress(reviewing(), state.AccountQuota{}, declined, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("proven primary decline past the deadline must complete, got %+v", tr)
+	}
 	// Before the deadline the bound must not fire: keep waiting on the co-bot —
 	// KeepWaiting, not a re-emitted OutReviewing, so the sweep doesn't write the
 	// same state and re-sync the dashboard on every pump.
@@ -477,10 +489,25 @@ func TestDeclinedRereviewCompletesOnlyWithPriorReview(t *testing.T) {
 		t.Fatalf("an unproven refusal released the fire slot: %+v", tr)
 	}
 
+	// A delayed review of the old head does not retroactively prove that the
+	// earlier refusal was a re-review response. The proof must already exist
+	// when this command is posted.
+	obs.Reviews = []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 9,
+		Commit: "000011122", SubmittedAt: t0.Add(10 * time.Second)}}
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a review submitted after the refusal's command must not validate it: %+v", got)
+	}
+	if !PrimaryAckPending(r, obs, policy) {
+		t.Fatal("an unproven refusal must keep the loop's fire-slot hold")
+	}
+
 	obs.Reviews = []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 9,
 		Commit: "000011122", SubmittedAt: t0.Add(-time.Hour)}}
 	if got := Completion(r, obs, policy); !got.Done {
 		t.Fatalf("a paired refusal on a re-review must complete the head: %+v", got)
+	}
+	if PrimaryAckPending(r, obs, policy) {
+		t.Fatal("a proven refusal must acknowledge the loop's fire-slot hold")
 	}
 	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
 	if tr.Outcome != OutComplete || tr.Reason != "re-review declined" {

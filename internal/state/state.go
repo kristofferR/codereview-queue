@@ -1149,10 +1149,16 @@ func (s *State) Supersede(repo string, pr int, head string, now time.Time) (*Rou
 		return next, err
 	}
 	for login, co := range previous.CoBots {
-		if co.SeenActiveAt == nil {
+		seenAt := co.SeenActiveAt
+		if seenAt == nil {
+			// Rounds written before SeenActiveAt existed still carry the
+			// head-scoped observation that originally proved activity.
+			seenAt = co.AnsweredAt
+		}
+		if seenAt == nil {
 			continue
 		}
-		seen := co.SeenActiveAt.UTC()
+		seen := seenAt.UTC()
 		next.setCo(login, CoBotRound{SeenActiveAt: &seen})
 	}
 	s.PutRound(*next)

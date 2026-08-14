@@ -2,10 +2,33 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+type retryWorkClaimStore struct {
+	StateStore
+	cfg Config
+	now time.Time
+}
+
+func (s retryWorkClaimStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(s.cfg)
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(s.cfg)
+	second.SetWorkClaim("owner/repo", 18, WorkClaim{
+		Owner: "session-b", By: "linux:other", ClaimedAt: s.now,
+		ExpiresAt: s.now.Add(WorkClaimTTL),
+	})
+	if err := mutate(&second); err != nil && !errors.Is(err, ErrNoChange) {
+		return State{}, err
+	}
+	return second, nil
+}
 
 func workClaimService(t *testing.T, store StateStore, cfg Config, owner, by string, now time.Time) *Service {
 	t.Helper()
@@ -120,6 +143,21 @@ func TestInteractiveClaimRenewsForItsOwnerAndBlocksAnother(t *testing.T) {
 	}
 }
 
+func TestInteractiveClaimResetsOutcomeOnCASRetry(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := firingConfig()
+	store := retryWorkClaimStore{cfg: cfg, now: now}
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+
+	claim, err := manual.claimInteractiveWork(context.Background(), "owner/repo", 18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.acquired || !strings.Contains(claim.reason, "linux:other") {
+		t.Fatalf("claim after retry = %+v, want competing owner conflict", claim)
+	}
+}
+
 func TestInteractiveClaimRefusesLaggingAutofixHost(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -137,6 +175,29 @@ func TestInteractiveClaimRefusesLaggingAutofixHost(t *testing.T) {
 
 	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
 	_, err = manual.claimInteractiveWork(ctx, "owner/repo", 15)
+	if err == nil || !strings.Contains(err.Error(), "old-linux") {
+		t.Fatalf("lagging host error = %v", err)
+	}
+}
+
+func TestInteractiveClaimRefusesLaggingAutofixHostWhileRepositoryIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	_, err := store.Update(ctx, func(st *State) error {
+		st.SetAutofixSwitch("owner/repo", RepoAutofixSwitch{Enabled: false})
+		st.SetHostReport(HostReport{
+			Host: "old-linux", Caps: CapsWorkClaims - 1, Roles: []string{"autofix"},
+		}, now)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	_, err = manual.claimInteractiveWork(ctx, "owner/repo", 19)
 	if err == nil || !strings.Contains(err.Error(), "old-linux") {
 		t.Fatalf("lagging host error = %v", err)
 	}

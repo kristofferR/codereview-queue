@@ -51,6 +51,7 @@ func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int)
 	dispatchToken := s.dispatchToken()
 	outcome := workClaimOutcome{}
 	_, err := s.store.Update(ctx, func(st *State) error {
+		outcome = workClaimOutcome{}
 		// The unattended fix session uses `crq next` as its pre-push oracle. It
 		// already won exclusion through this exact dispatch token, so treating it
 		// as a competing interactive caller would deadlock it on its own claim.
@@ -70,11 +71,9 @@ func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int)
 			outcome.until = now.Add(DispatchTTL)
 			return ErrNoChange
 		}
-		if st.AutofixEnabled(repo) {
-			if lagging := laggingAutofixHosts(*st, now); len(lagging) > 0 {
-				return fmt.Errorf("cannot safely claim interactive work while autofix host(s) %s run a version that ignores work claims; upgrade those daemons first",
-					strings.Join(lagging, ", "))
-			}
+		if lagging := laggingAutofixHosts(*st, now); len(lagging) > 0 {
+			return fmt.Errorf("cannot safely claim interactive work while autofix host(s) %s run a version that ignores work claims; upgrade those daemons first",
+				strings.Join(lagging, ", "))
 		}
 		claimedAt := now
 		if existing, ok := st.WorkClaim(repo, pr, now); ok && existing.Owner == owner {
@@ -277,7 +276,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 	default:
 	}
-	if loopErr == nil && (report.Converged || report.Status == "held" || report.Status == "skipped") {
+	if loopErr == nil && code != 10 {
 		if releaseErr := s.releaseInteractiveWork(ctx, repo, pr); releaseErr != nil {
 			loopErr = releaseErr
 			code = 1

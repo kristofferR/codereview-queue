@@ -139,6 +139,15 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 		Findings:  []PreflightFinding{},
 		CheckedAt: start.UTC(),
 	}
+	// The caller may have spent its deadline reading shared state before
+	// starting the CLI. Preserve the documented timeout result in that case.
+	if err := ctx.Err(); err != nil {
+		report.Status = "error"
+		report.Error = err.Error()
+		report.ExitCode = 2
+		report.DurationMS = time.Since(start).Milliseconds()
+		return report, 2, err
+	}
 	binary, err := coderabbitBinary(opts.Binary)
 	if err != nil {
 		report.Status = "error"

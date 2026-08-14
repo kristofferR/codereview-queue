@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +62,20 @@ func TestPreflightParseFailureReportsExitOne(t *testing.T) {
 	}
 	if report.Status != "error" || err == nil {
 		t.Fatalf("expected an error report, got status=%q err=%v", report.Status, err)
+	}
+}
+
+func TestPreflightExpiredContextReportsTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	report, code, err := Preflight(ctx, PreflightOptions{})
+	if code != 2 || report.ExitCode != 2 {
+		t.Fatalf("expected exit code 2 for an expired context, got code=%d report.ExitCode=%d (err=%v)", code, report.ExitCode, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
 }
 

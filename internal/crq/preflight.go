@@ -97,7 +97,7 @@ type PreflightFinding struct {
 // must still work without crq configuration or GitHub access, so callers can
 // treat a state-read failure as a cache miss and run the CLI normally. Explicit
 // credentials bypass the shared block because they may select another account.
-func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOptions) (*PreflightReport, error) {
+func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOptions, cliOrg func() string) (*PreflightReport, error) {
 	if carriesCredentials(opts.ExtraArgs) {
 		return nil, nil
 	}
@@ -111,6 +111,9 @@ func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOption
 	}
 	now := s.clock()
 	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
+		return nil, nil
+	}
+	if cliOrg == nil || !cliOrgMatches(s.cfg.WithFleet(state.Fleet), cliOrg()) {
 		return nil, nil
 	}
 	until := state.Account.BlockedUntil.UTC()

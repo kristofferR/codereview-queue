@@ -588,7 +588,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 8
+const WriterCaps = 9
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -623,6 +623,12 @@ const CapsFleetDefaults = 4
 // inheritance, so the dashboard must name it before claiming the saved answer
 // applies fleet-wide.
 const CapsSolver = 8
+
+// CapsPreflightSkipBlocked is the capability that makes the shared
+// CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local
+// CLI even when the fleet has recorded an account block, so operators need to
+// see them before relying on the shared skip.
+const CapsPreflightSkipBlocked = 9
 
 // CapsDispatchClarification is the capability that makes a head-scoped
 // clarification marker terminal for autofix dispatch. Older watchers preserve

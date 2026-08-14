@@ -86,6 +86,7 @@ func TestSkipBlockedPreflightUsesSharedQuota(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	until := now.Add(37 * time.Minute)
 	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
 	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
@@ -99,7 +100,7 @@ func TestSkipBlockedPreflightUsesSharedQuota(t *testing.T) {
 
 	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{
 		ReviewType: "uncommitted",
-	})
+	}, func() string { return "owner" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +128,7 @@ func TestSkipBlockedPreflightRunsWhenBlockExpired(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	expired := now.Add(-time.Second)
 	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
 	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
@@ -138,7 +140,7 @@ func TestSkipBlockedPreflightRunsWhenBlockExpired(t *testing.T) {
 	service := NewService(cfg, newFakeGitHub(), store, nil)
 	service.now = func() time.Time { return now }
 
-	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{})
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{}, func() string { return "owner" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +153,7 @@ func TestSkipBlockedPreflightRunsWithExplicitCredentials(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	until := now.Add(time.Hour)
 	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
 	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
@@ -164,7 +167,7 @@ func TestSkipBlockedPreflightRunsWithExplicitCredentials(t *testing.T) {
 
 	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{
 		ExtraArgs: []string{"--api-key", "different-account"},
-	})
+	}, func() string { return "owner" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,11 +196,36 @@ func TestSkipBlockedPreflightHonorsFleetSetting(t *testing.T) {
 	service := NewService(cfg, newFakeGitHub(), store, nil)
 	service.now = func() time.Time { return now }
 
-	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{})
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{}, func() string { return "owner" })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report != nil {
 		t.Fatalf("fleet-disabled skip setting must run local preflight, got %+v", report)
+	}
+}
+
+func TestSkipBlockedPreflightRunsForAnotherCLIAccount(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.PreflightSkipBlocked = true
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &until
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	service.now = func() time.Time { return now }
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{}, func() string { return "another-org" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Fatalf("a shared block for another CLI account must run local preflight, got %+v", report)
 	}
 }

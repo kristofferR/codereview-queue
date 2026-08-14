@@ -63,6 +63,9 @@ const (
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
 	// CapsSolver is the capability a host needs to honour solver settings.
 	CapsSolver = crqstate.CapsSolver
+	// CapsPreflightSkipBlocked is the capability a host needs to honour the
+	// shared blocked-preflight policy.
+	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked
 	// WriterCaps is what THIS binary understands, recorded in each host's
 	// self-report so a fleet can see why a host ignores a setting.
 	WriterCaps = crqstate.WriterCaps

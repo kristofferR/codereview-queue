@@ -127,7 +127,11 @@ func (s *Service) fleetViewOf(st State) FleetView {
 		// autoreview leader lease nor the fire slot. Include its role report or
 		// an old watcher can ignore an autofix-off switch while this page says
 		// every acting host understands the record.
-		view.Lagging = st.LaggingRoleWriters(CapsFleetDefaults, s.clock().UTC(), "autofix")
+		caps := CapsFleetDefaults
+		if fleetGoverns(st.Fleet, "CRQ_PREFLIGHT_SKIP_BLOCKED") {
+			caps = CapsPreflightSkipBlocked
+		}
+		view.Lagging = st.LaggingRoleWriters(caps, s.clock().UTC(), "autofix")
 	}
 	return view
 }

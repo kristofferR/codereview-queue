@@ -548,6 +548,23 @@ func TestFleetSettingsNamesLaggingAutofixWatchers(t *testing.T) {
 	}
 }
 
+func TestFleetSettingsNamesHostsThatIgnoreBlockedPreflightPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	st := DefaultState(cfg)
+	st.SetFleetDefaults(FleetDefaults{Env: map[string]string{"CRQ_PREFLIGHT_SKIP_BLOCKED": "1"}}, "operator", now)
+	st.SetHostReport(HostReport{
+		Host: "old-watcher", Caps: CapsPreflightSkipBlocked - 1, Roles: []string{"autofix"},
+	}, now)
+
+	view := svc.fleetViewOf(st)
+	if len(view.Lagging) != 1 || view.Lagging[0] != "old-watcher" {
+		t.Fatalf("lagging = %v, want the autofix watcher that ignores the blocked-preflight policy", view.Lagging)
+	}
+}
+
 // A fleet default reaches the repositories that follow the fleet, and a
 // repository somebody turned off follows nothing. It has both an enrollment
 // record and completed rounds, so it used to reach the requeue set twice over —

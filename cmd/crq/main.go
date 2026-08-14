@@ -1673,16 +1673,21 @@ func preflight(ctx context.Context, args []string) int {
 		Timeout:    *timeout,
 		ExtraArgs:  fs.Args(),
 	}
-	if report := skipBlockedPreflight(ctx, opts); report != nil {
+	preflightCtx, cancel := context.WithCancel(ctx)
+	if *timeout > 0 {
+		preflightCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	if report := skipBlockedPreflight(preflightCtx, opts); report != nil {
 		printJSON(report)
 		return 0
 	}
-	report, code, err := crq.Preflight(ctx, opts)
+	report, code, err := crq.Preflight(preflightCtx, opts)
 	// Before printing: a local block is evidence about the SHARED account quota,
 	// so hand it to the queue rather than letting it die in this process. Local
 	// preflight must keep working with no crq config and no GitHub token, so this
 	// is best-effort and its outcome is reported rather than enforced.
-	report.Quota = shareCLIQuota(ctx, report)
+	report.Quota = shareCLIQuota(preflightCtx, report)
 	printJSON(report)
 	if err != nil {
 		fatal(err)
@@ -1708,7 +1713,13 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.P
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
-	report, err := service.SkipBlockedPreflight(readCtx, opts)
+	binary := opts.Binary
+	if strings.TrimSpace(binary) == "" {
+		binary = os.Getenv("CRQ_CODERABBIT_BIN")
+	}
+	report, err := service.SkipBlockedPreflight(readCtx, opts, func() string {
+		return codeRabbitOrg(readCtx, binary)
+	})
 	if err != nil {
 		return nil
 	}

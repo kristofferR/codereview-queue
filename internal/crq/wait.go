@@ -170,6 +170,9 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		if refErr != nil {
 			deadline = now.Add(s.waitTick())
 		}
+		if renewal := now.Add(workClaimRenewalInterval); renewal.Before(deadline) {
+			deadline = renewal
+		}
 		if _, _, err := s.watchStateRef(ctx, lastRef, deadline); err != nil {
 			return report, err
 		}

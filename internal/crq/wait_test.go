@@ -141,6 +141,36 @@ func TestWaitSamplesStateRefAfterRenewingItsClaim(t *testing.T) {
 	}
 }
 
+func TestWaitRenewsClaimBeforeLongStateWatch(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 606, "eeeeeeeee1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.cfg.FeedbackWaitTimeout = 6 * time.Hour
+	f.svc.cfg.LeaderTTL = 3 * time.Hour
+	f.svc.cfg.PollInterval = 3 * time.Hour
+	f.next(repo, pr)
+	f.leader(f.clk.now().Add(3 * time.Hour))
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.WaitForAction(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop the waiter")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
+	}
+}
+
 // The waiter returns the moment there is something to act on, and returns the
 // same instruction crq next would — they share one decision function precisely
 // so the blocking and non-blocking forms cannot disagree.

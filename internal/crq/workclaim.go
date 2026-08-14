@@ -118,6 +118,9 @@ func (s *Service) workClaimOwner() (string, string) {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
+	if root, err := gitDir(context.Background(), dir, "rev-parse", "--show-toplevel"); err == nil {
+		dir = root
+	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
@@ -244,25 +247,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		defer close(heartbeatDone)
 		ticker := time.NewTicker(workClaimRenewalInterval)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-loopCtx.Done():
-				return
-			case <-ticker.C:
-				renewed, renewErr := s.claimInteractiveWork(loopCtx, repo, pr)
-				if renewErr == nil && !renewed.acquired {
-					renewErr = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
-				}
-				if renewErr != nil {
-					select {
-					case heartbeatErr <- renewErr:
-					default:
-					}
-					cancel()
-					return
-				}
-			}
-		}
+		s.heartbeatWorkClaim(loopCtx, repo, pr, ticker.C, heartbeatErr, cancel)
 	}()
 
 	report, code, loopErr := s.loopClaimed(loopCtx, repo, pr)
@@ -283,4 +268,37 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 	}
 	return report, code, loopErr
+}
+
+func (s *Service) heartbeatWorkClaim(
+	ctx context.Context,
+	repo string,
+	pr int,
+	ticks <-chan time.Time,
+	heartbeatErr chan<- error,
+	cancel context.CancelFunc,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			renewed, err := s.claimInteractiveWork(ctx, repo, pr)
+			if err == nil && !renewed.acquired {
+				err = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
+			}
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+				return
+			}
+			select {
+			case heartbeatErr <- err:
+			default:
+			}
+			cancel()
+			return
+		}
+	}
 }

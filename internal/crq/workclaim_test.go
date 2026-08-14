@@ -3,7 +3,10 @@ package crq
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -12,6 +15,18 @@ type retryWorkClaimStore struct {
 	StateStore
 	cfg Config
 	now time.Time
+}
+
+type cancelingWorkClaimStore struct {
+	StateStore
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *cancelingWorkClaimStore) Update(ctx context.Context, _ func(*State) error) (State, error) {
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return State{}, ctx.Err()
 }
 
 func (s retryWorkClaimStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
@@ -155,6 +170,58 @@ func TestInteractiveClaimResetsOutcomeOnCASRetry(t *testing.T) {
 	}
 	if claim.acquired || !strings.Contains(claim.reason, "linux:other") {
 		t.Fatalf("claim after retry = %+v, want competing owner conflict", claim)
+	}
+}
+
+func TestFallbackWorkOwnerUsesCheckoutRoot(t *testing.T) {
+	t.Setenv("CRQ_WORK_OWNER", "")
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+	root := t.TempDir()
+	if _, err := gitDir(context.Background(), root, "init", "--quiet"); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "internal", "crq")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := firingConfig()
+	cfg.Host = "test-host"
+	cfg.WorkDir = root
+	rootOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner()
+	cfg.WorkDir = nested
+	nestedOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner()
+	if nestedOwner != rootOwner {
+		t.Fatalf("nested owner %q, want checkout owner %q", nestedOwner, rootOwner)
+	}
+}
+
+func TestHeartbeatIgnoresCancellationDuringNormalShutdown(t *testing.T) {
+	cfg := firingConfig()
+	store := &cancelingWorkClaimStore{
+		StateStore: NewMemoryStore(cfg),
+		started:    make(chan struct{}),
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.workOwnerFn = func() (string, string) { return "session-a", "mac:feature" }
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time, 1)
+	errs := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 20, ticks, errs, cancel)
+	}()
+
+	ticks <- time.Now()
+	<-store.started
+	cancel()
+	<-done
+	select {
+	case err := <-errs:
+		t.Fatalf("normal shutdown published heartbeat error: %v", err)
+	default:
 	}
 }
 

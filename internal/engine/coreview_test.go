@@ -89,6 +89,11 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	seen := state.Round{Head: head, CoBots: map[string]state.CoBotRound{
 		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
 	}}
+	queuedAt := now.Add(-2 * time.Hour)
+	firedAt := now.Add(-30 * time.Minute)
+	firedAfterUnable := seen
+	firedAfterUnable.EnqueuedAt = queuedAt
+	firedAfterUnable.FiredAt = &firedAt
 
 	cases := []struct {
 		name           string
@@ -136,6 +141,9 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 		{name: "selfheal respects an unable notice after carried activity", cp: policy(TriggerSelfHeal), round: seen,
 			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
 				CreatedAt: staleAnchor.Add(time.Minute), UpdatedAt: staleAnchor.Add(time.Minute)}}}, anchor: staleAnchor, want: false},
+		{name: "selfheal preserves an unable notice received before the primary fired", cp: policy(TriggerSelfHeal), round: firedAfterUnable,
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: queuedAt.Add(time.Minute), UpdatedAt: queuedAt.Add(time.Minute)}}}, anchor: firedAt, want: false},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
 		{name: "selfheal needs an anchor", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), want: false},
 		{

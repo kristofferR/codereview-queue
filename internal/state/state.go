@@ -1143,8 +1143,13 @@ func (s *State) carryArchivedCoActivity(next *Round) {
 			if seenAt == nil {
 				continue
 			}
+			current := next.Co(login)
+			if current.SeenActiveAt != nil {
+				continue
+			}
 			seen := seenAt.UTC()
-			next.setCo(login, CoBotRound{SeenActiveAt: &seen})
+			current.SeenActiveAt = &seen
+			next.setCo(login, current)
 		}
 		return
 	}
@@ -2109,17 +2114,21 @@ func (s *State) Normalize(now time.Time) {
 		s.FireSlot = nil
 		s.ClearSlotHold()
 	}
-	for key, r := range s.Rounds {
-		r.foldLegacyCodex()
-		r.inferCoOnly()
-		s.Rounds[key] = r
-	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
+	}
+	for key, r := range s.Rounds {
+		r.foldLegacyCodex()
+		r.inferCoOnly()
+		// During a rolling upgrade, an older writer can archive a round while
+		// preserving SeenActiveAt as an unknown member, then create its
+		// replacement without copying it. Repair that replacement on load.
+		s.carryArchivedCoActivity(&r)
+		s.Rounds[key] = r
 	}
 }
 

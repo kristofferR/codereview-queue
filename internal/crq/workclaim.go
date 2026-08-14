@@ -20,8 +20,9 @@ import (
 // interrupted agent cannot permanently keep a PR away from autofix. Every
 // interactive next/wait/loop call renews it.
 const (
-	WorkClaimTTL          = 2 * time.Hour
-	workClaimReleaseLimit = 30 * time.Second
+	WorkClaimTTL             = 2 * time.Hour
+	workClaimRenewalInterval = WorkClaimTTL / 3
+	workClaimReleaseLimit    = 30 * time.Second
 )
 
 type workClaimOutcome struct {
@@ -173,6 +174,9 @@ func (s *Service) releaseInteractiveWork(ctx context.Context, repo string, pr in
 func (s *Service) UnclaimWork(ctx context.Context, repo string, pr int) (WorkClaimResult, error) {
 	repo = NormalizeRepo(repo)
 	result := WorkClaimResult{Repo: repo, PR: pr}
+	if s.cfg.DryRun {
+		return result, nil
+	}
 	_, err := s.store.Update(ctx, func(st *State) error {
 		if !st.ReleaseWorkClaim(repo, pr, "", true) {
 			return ErrNoChange
@@ -239,7 +243,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
-		ticker := time.NewTicker(WorkClaimTTL / 3)
+		ticker := time.NewTicker(workClaimRenewalInterval)
 		defer ticker.Stop()
 		for {
 			select {

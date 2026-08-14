@@ -294,6 +294,32 @@ func TestNextNeverSchedulesAHotLoop(t *testing.T) {
 	}
 }
 
+func TestNextWaitingRenewsClaimBeforeLongRecheck(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 508, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.cfg.PollInterval = 3 * time.Hour
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.NextWaiting(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop next --wait")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
+	}
+}
+
 func TestNextReportsAdministrativeHoldAfterFixFirst(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

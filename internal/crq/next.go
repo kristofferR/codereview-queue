@@ -332,7 +332,10 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 				if wait <= 0 {
 					wait = s.cfg.PollInterval
 				}
-				if serr := ghapi.SleepCtx(ctx, wait); serr != nil {
+				if wait > workClaimRenewalInterval {
+					wait = workClaimRenewalInterval
+				}
+				if serr := s.sleep(ctx, wait); serr != nil {
 					return report, serr
 				}
 				continue
@@ -348,11 +351,14 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 			if delay <= 0 {
 				delay = s.cfg.PollInterval
 			}
+			if delay > workClaimRenewalInterval {
+				delay = workClaimRenewalInterval
+			}
 			if s.log != nil {
 				s.log.Printf("%s#%d %s — %s; rechecking at %s",
 					repo, pr, report.Action, report.Reason, report.RecheckAfter.Format(time.RFC3339))
 			}
-			if serr := ghapi.SleepCtx(ctx, delay); serr != nil {
+			if serr := s.sleep(ctx, delay); serr != nil {
 				return report, serr
 			}
 		default:

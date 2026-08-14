@@ -141,3 +141,42 @@ func TestInteractiveClaimRefusesLaggingAutofixHost(t *testing.T) {
 		t.Fatalf("lagging host error = %v", err)
 	}
 }
+
+func TestUnclaimWorkDryRunDoesNotReleaseClaim(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const (
+		repo = "owner/repo"
+		pr   = 17
+	)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	if claim, err := manual.claimInteractiveWork(ctx, repo, pr); err != nil || !claim.acquired {
+		t.Fatalf("interactive claim = %+v, %v", claim, err)
+	}
+
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DryRun = true
+	dry := workClaimService(t, store, cfg, "session-b", "linux:other", now)
+	result, err := dry.UnclaimWork(ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Released {
+		t.Fatal("dry-run unclaim reported releasing the claim")
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run unclaim changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+	if _, ok := after.WorkClaim(repo, pr, now); !ok {
+		t.Fatal("dry-run unclaim removed the interactive claim")
+	}
+}

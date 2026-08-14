@@ -458,6 +458,36 @@ func TestRateLimitBeatsAlreadyReviewedAck(t *testing.T) {
 	}
 }
 
+// A changed head can receive a final refusal instead of another submitted
+// review. It is safe to accept only as a paired re-review response: the prior
+// review proves this is not the first-round instant-ack case that can precede a
+// real review still queued behind it.
+func TestDeclinedRereviewCompletesOnlyWithPriorReview(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
+	declined := dialect.BotEvent{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)}
+	obs := Observation{Head: r.Head, Open: true, Events: []dialect.BotEvent{command, declined}}
+
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a refusal with no prior review must not hide a queued first review: %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy); tr.Outcome != KeepWaiting {
+		t.Fatalf("an unproven refusal released the fire slot: %+v", tr)
+	}
+
+	obs.Reviews = []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 9,
+		Commit: "000011122", SubmittedAt: t0.Add(-time.Hour)}}
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("a paired refusal on a re-review must complete the head: %+v", got)
+	}
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
+	if tr.Outcome != OutComplete || tr.Reason != "re-review declined" {
+		t.Fatalf("a proven refusal must complete instead of timing out blocked: %+v", tr)
+	}
+}
+
 // TestPreFireReviewOfHeadCompletes ports botsReviewedHead: a required bot's
 // review of the head counts even when it landed before the round was fired.
 func TestPreFireReviewOfHeadCompletes(t *testing.T) {
@@ -512,6 +542,13 @@ func TestCommandHasCompletionReply(t *testing.T) {
 		dialect.BotEvent{Kind: dialect.EvInProgress, Bot: "coderabbitai[bot]", CommentID: 900, CreatedAt: t0.Add(-time.Hour), UpdatedAt: t0.Add(9 * time.Second)})
 	if CommandHasCompletionReply(Observation{Events: withProcessing}, policy, 1001) {
 		t.Fatal("an in-progress summary after the reply must reopen the command")
+	}
+	declined := append([]dialect.BotEvent{base[0]}, dialect.BotEvent{
+		Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1003,
+		AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second),
+	})
+	if !CommandHasCompletionReply(Observation{Events: declined}, policy, 1001) {
+		t.Fatal("a command answered by a declined re-review must not be re-adopted")
 	}
 }
 
@@ -1134,6 +1171,8 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
 	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
 		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
+	declined := dialect.BotEvent{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1004,
+		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
 	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "0000000099", SubmittedAt: t0.Add(-time.Hour)}
 
 	cases := []struct {
@@ -1146,6 +1185,12 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 			name: "completion reply with a prior review",
 			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
 				Events: []dialect.BotEvent{command, completion}},
+			want: FireDedupe,
+		},
+		{
+			name: "declined re-review with a prior review",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, declined}},
 			want: FireDedupe,
 		},
 		{

@@ -127,6 +127,7 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		}
 		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
 	}
+	declined := primaryDeclinedRound(obs, p, firedAt)
 
 	// Convergence and slot release answer different questions. A repository may
 	// leave the primary out of its required set (required Codex only), and then
@@ -143,6 +144,15 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	}
 
 	if r.Phase == state.PhaseFired {
+		// A proven re-review refusal is the final answer for the metered
+		// command. Release the slot immediately, but keep waiting when another
+		// configured reviewer still owes evidence for this head.
+		if declined {
+			if completion.Done {
+				return Transition{Outcome: OutComplete, Reason: "re-review declined"}
+			}
+			return Transition{Outcome: OutReviewing, Reason: "re-review declined; awaiting remaining bots"}
+		}
 		if reason, acked := primaryAck(r, obs, p, firedAt); acked {
 			if completion.Done {
 				return Transition{Outcome: OutComplete, Reason: "feedback complete"}
@@ -173,10 +183,11 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 // and how — the condition that releases the fire slot.
 //
 // A bare reaction acknowledges it; so does any other comment of the bot's in the
-// round window — but an account-block/paused/already-reviewed notice is not an
-// ack (v2), and neither is the in-progress summary of a PREVIOUS round edit...
+// round window — but an account-block/paused/unproven already-reviewed notice is
+// not an ack, and neither is the in-progress summary of a PREVIOUS round edit...
 // which it cannot be: UpdatedAt gates the window. An in-progress summary IS an
-// ack that reviewing started.
+// ack that reviewing started. Progress handles a proven declined re-review
+// before calling this helper.
 func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (string, bool) {
 	if obs.Reacted {
 		return "bot reacted", true

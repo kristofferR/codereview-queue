@@ -31,11 +31,11 @@ type CompletionStatus struct {
 //     (coReviewersSatisfied): if a co-bot gates or participates in this
 //     round, its silence must not let the round converge on CodeRabbit's
 //     word alone.
-//  4. The completion-reply fallback: a "Review finished." reply pairs to this
-//     round's command and stands in for a no-findings re-review — only if the
-//     bot has ANY prior submitted review, the pairing is chronologically
-//     sound, and no in-progress/rate-limited/paused/failed top-summary state
-//     contradicts it (the c22eb4b/e2aa2f0 gates).
+//  4. The completion-reply fallback: a completion or declined re-review reply
+//     pairs to this round's command and stands in for a no-findings re-review —
+//     only if the bot has ANY prior submitted review, the pairing is
+//     chronologically sound, and no in-progress/rate-limited/paused/failed
+//     top-summary state contradicts it (the c22eb4b/e2aa2f0 gates).
 func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	reviewedBy := map[string]bool{}
 	for _, bot := range p.RequiredBots {
@@ -208,8 +208,9 @@ func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.
 }
 
 // completionReplyForRound ports v2's completionReplyForFiredCommand: replies
-// pair chronologically with the earliest unanswered command, submitted
-// reviews consume the command they answered, and a completion only stands
+// pair chronologically with the earliest unanswered command, submitted reviews
+// consume the command they answered, and a completion (including an explicit
+// refusal to re-review commits the bot says it already covered) only stands
 // when the bot has a prior submitted review and no nonterminal or failed
 // top-summary state contradicts it.
 func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool {
@@ -226,14 +227,32 @@ func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool 
 	return false
 }
 
+// primaryDeclinedRound is the narrower completion-reply case Progress needs to
+// release the metered fire slot with an honest reason. The prior-review and
+// contradictory-state gates are deliberately identical to
+// completionReplyForRound: a first-ever instant acknowledgement can arrive
+// while the real review is still queued, and must not release the slot.
+func primaryDeclinedRound(obs Observation, p Policy, firedAt time.Time) bool {
+	if !botHasAnyReview(obs.Reviews, p.Bot) {
+		return false
+	}
+	for _, reply := range commandReplies(obs, p) {
+		if reply.declined && notBefore(reply.commandAt, firedAt) &&
+			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
+			return true
+		}
+	}
+	return false
+}
+
 // CommandHasCompletionReply reports whether the specific command comment was
-// answered by a completion reply with no in-progress/rate-limited/paused top
-// summary contradicting it since. It ports v2's reviewCommandHasCompletionReply
-// (the adoption guard: a command already answered by a completion reply belongs
-// to a finished round and must not be re-adopted as a fresh fire). Unlike the
-// convergence fallback it does not require a prior submitted review or gate on
-// a failed summary — adoption only asks "was this exact command already spoken
-// for".
+// answered by a completion or declined re-review reply with no
+// in-progress/rate-limited/paused top summary contradicting it since. It ports
+// v2's reviewCommandHasCompletionReply (the adoption guard: a command already
+// answered by a final reply belongs to a finished round and must not be
+// re-adopted as a fresh fire). Unlike the convergence fallback it does not
+// require a prior submitted review or gate on a failed summary — adoption only
+// asks "was this exact command already spoken for".
 func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool {
 	if commandID == 0 {
 		return false
@@ -315,6 +334,7 @@ type commandReply struct {
 	commandID  int64
 	commandAt  time.Time
 	completion bool
+	declined   bool
 }
 
 // commandReplies folds the classified event stream (plus submitted reviews)
@@ -376,7 +396,8 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 			out = append(out, commandReply{
 				commandID:  cmd.id,
 				commandAt:  cmd.at,
-				completion: ev.ev.Kind == dialect.EvCompletion,
+				completion: ev.ev.Kind == dialect.EvCompletion || ev.ev.Kind == dialect.EvAlreadyReviewed,
+				declined:   ev.ev.Kind == dialect.EvAlreadyReviewed,
 			})
 		}
 	}

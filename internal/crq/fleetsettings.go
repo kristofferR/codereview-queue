@@ -128,7 +128,7 @@ func (s *Service) fleetViewOf(st State) FleetView {
 		// an old watcher can ignore an autofix-off switch while this page says
 		// every acting host understands the record.
 		caps := CapsFleetDefaults
-		if fleetGoverns(st.Fleet, "CRQ_PREFLIGHT_SKIP_BLOCKED") {
+		if fleetGoverns(st.Fleet, "CRQ_PREFLIGHT_SKIP_BLOCKED") && cfg.PreflightSkipBlocked {
 			caps = CapsPreflightSkipBlocked
 		}
 		view.Lagging = st.LaggingRoleWriters(caps, s.clock().UTC(), "autofix")

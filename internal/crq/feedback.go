@@ -592,13 +592,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		return FeedbackReport{}, 1, err
 	}
 	// A hold ends the loop wherever it is reported. It is administrative and
-	// indefinite: entering the feedback poll would wait out a whole second
-	// timeout for a review that will not be requested until a person lifts it.
+	// indefinite for this run: entering the feedback poll would wait out a whole
+	// second timeout for a review that will not be requested until a person lifts
+	// it or the daemon observes that the pull request merged.
 	//
 	// Code 0, not 2. The exit codes are frozen with 2 meaning an ELAPSED wait,
 	// so returning it for a hold tells a caller scripted against that contract
-	// to retry something only a person ends. Terminal like "skipped"; the status
-	// is what tells them which.
+	// to retry something only an unhold or merge cleanup ends. Terminal like
+	// "skipped"; the status is what tells them which.
 	if waitResult.Action == "held" {
 		return FeedbackReport{
 			Status: "held", Repo: NormalizeRepo(repo), PR: pr,

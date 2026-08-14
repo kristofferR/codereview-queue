@@ -4,17 +4,20 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // HoldResult reports a PR's hold state after a change.
 type HoldResult struct {
-	Repo   string `json:"repo"`
-	PR     int    `json:"pr"`
-	Held   bool   `json:"held"`
-	Reason string `json:"reason,omitempty"`
-	By     string `json:"by,omitempty"`
+	Repo       string `json:"repo"`
+	PR         int    `json:"pr"`
+	Held       bool   `json:"held"`
+	Reason     string `json:"reason,omitempty"`
+	By         string `json:"by,omitempty"`
+	CommentURL string `json:"comment_url,omitempty"`
+	Warning    string `json:"warning,omitempty"`
 	// At is a pointer because time.Time is a struct: omitempty never omits one,
 	// so an unhold response used to carry "at":"0001-01-01T00:00:00Z".
 	At *time.Time `json:"at,omitempty"`
@@ -28,12 +31,8 @@ func (s *Service) Holds(ctx context.Context) ([]HoldResult, error) {
 	}
 	out := make([]HoldResult, 0, len(st.Holds))
 	for key, h := range st.Holds {
-		repo, number, ok := strings.Cut(key, "#")
+		repo, pr, ok := parseHoldKey(key)
 		if !ok {
-			continue
-		}
-		pr := 0
-		if _, err := fmt.Sscanf(number, "%d", &pr); err != nil {
 			continue
 		}
 		at := h.At
@@ -41,6 +40,22 @@ func (s *Service) Holds(ctx context.Context) ([]HoldResult, error) {
 	}
 	sortHolds(out)
 	return out, nil
+}
+
+func parseHoldKey(key string) (repo string, pr int, ok bool) {
+	repo, number, ok := strings.Cut(key, "#")
+	if !ok || repo == "" {
+		return "", 0, false
+	}
+	pr, err := strconv.Atoi(number)
+	if err != nil || pr <= 0 {
+		return "", 0, false
+	}
+	return repo, pr, true
+}
+
+func holdComment(repo string, pr int, reason string) string {
+	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", reason, repo, pr)
 }
 
 // sortHolds orders by repo then PR, so a listing is stable rather than however

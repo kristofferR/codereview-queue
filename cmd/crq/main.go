@@ -1439,7 +1439,9 @@ already looks, so there is no window between the halves.
 
 A hold does not cancel a review already in flight — that one is bought, and its
 findings are still worth having. It stops the next one. The reason is required:
-it is the note to whoever finds the PR stopped. A live autoreview daemon that
+it is posted on the pull request and shown wherever crq reports the hold. Merged
+pull requests are removed from the held list automatically; merely closed pull
+requests stay held in case they are reopened. A live autoreview daemon that
 advertises hold support is required, so its lease keeps an older standby out.
 `)
 	case "tidy":

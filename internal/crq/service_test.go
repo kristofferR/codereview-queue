@@ -22,6 +22,7 @@ type fakeGitHub struct {
 	pulls           map[string]ghapi.Pull
 	pullReads       map[string]int
 	pullErrOnRead   map[string]int
+	pullErrs        map[string]error
 	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
 	reviews         map[string][]ghapi.Review
@@ -104,6 +105,7 @@ func newFakeGitHub() *fakeGitHub {
 		pulls:           map[string]ghapi.Pull{},
 		pullReads:       map[string]int{},
 		pullErrOnRead:   map[string]int{},
+		pullErrs:        map[string]error{},
 		commits:         map[string]ghapi.Commit{},
 		commitErrs:      map[string]error{},
 		reviews:         map[string][]ghapi.Review{},
@@ -169,6 +171,9 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull
 	f.pullReads[key]++
 	if f.pullErrOnRead[key] == f.pullReads[key] {
 		return ghapi.Pull{}, errors.New("injected pull read failure")
+	}
+	if err := f.pullErrs[key]; err != nil {
+		return ghapi.Pull{}, err
 	}
 	pull, ok := f.pulls[key]
 	if !ok {
@@ -1874,7 +1879,8 @@ func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Code 0, not 2: 2 is frozen as the elapsed-wait result, and a hold ends
-	// only when a person lifts it. The status is what names the outcome.
+	// only when a person lifts it or the daemon observes a merge. The status is
+	// what names the outcome.
 	if code != 0 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
 		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
 	}
@@ -2237,7 +2243,7 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 }
 
-func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
+func TestPumpDropsMergedPRWhileHeld(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
@@ -2258,8 +2264,8 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
-		t.Fatalf("expected held closed PR cleanup, got %#v", pumped)
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("expected merged hold cleanup, got %#v", pumped)
 	}
 	if containsActiveRound(store, t, "owner/repo", 12) {
 		t.Fatal("closed PR should not remain active merely because it is held")
@@ -2267,6 +2273,9 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); held {
+		t.Fatal("merged PR remained in the held list")
 	}
 	found := false
 	for _, archived := range st.Archive {
@@ -2280,7 +2289,7 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	}
 }
 
-func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
+func TestDryRunReportsMergedHeldPRWithoutMutatingState(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.DryRun = true
@@ -2301,8 +2310,8 @@ func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
-		t.Fatalf("dry-run should report held closed PR cleanup, got %#v", pumped)
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("dry-run should report merged hold cleanup, got %#v", pumped)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -2310,6 +2319,95 @@ func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
 	}
 	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseQueued {
 		t.Fatalf("dry-run mutated held round: %#v", round)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("dry-run removed the hold")
+	}
+}
+
+func TestPumpRemovesMergedHoldWithoutARound(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 62, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("merged standalone hold cleanup = %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 62); held {
+		t.Fatal("merged PR's standalone hold was not removed")
+	}
+}
+
+func TestPumpKeepsClosedUnmergedPRHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed"}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "may be reopened", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "idle" {
+		t.Fatalf("closed unmerged hold changed pump result: %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("closed unmerged PR lost the hold needed if it is reopened")
+	}
+}
+
+func TestMergedHoldSweepPropagatesGitHubThrottle(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey("owner/repo", 12)] = &ghapi.RateLimitError{Kind: "primary"}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Pump(ctx); !ghapi.IsThrottled(err) {
+		t.Fatalf("Pump error = %v, want GitHub throttle for daemon backoff", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("failed merged-state read removed the hold")
 	}
 }
 

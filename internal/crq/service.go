@@ -59,6 +59,10 @@ type Service struct {
 	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
 	// there); in-memory only, single-writer (the pump caller).
 	lastParkedSweep string
+	// lastHeldSweep similarly rotates the bounded merged-hold cleanup. Holds can
+	// outlive rounds, so they need their own sweep rather than piggybacking on
+	// the review queue.
+	lastHeldSweep string
 	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
 	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
 	// single-writer (the watch caller).
@@ -185,6 +189,18 @@ func (s *Service) hold(
 		return HoldResult{}, err
 	}
 	s.sync(ctx, state)
+	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, holdComment(repo, pr, reason))
+	if commentErr != nil {
+		// The hold is the safety boundary and has already committed. A missing
+		// notice must be visible to the caller, but must not roll the hold back and
+		// reopen the race it was created to close.
+		result.Warning = "PR is held, but the hold comment could not be posted: " + commentErr.Error()
+		if s.log != nil {
+			s.log.Printf("warning: %s#%d held but its PR comment could not be posted: %v", repo, pr, commentErr)
+		}
+	} else {
+		result.CommentURL = comment.URL
+	}
 	if s.log != nil {
 		s.log.Printf("%s#%d held: %s", repo, pr, reason)
 	}
@@ -498,6 +514,19 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	//    completion/retry (bounded to one per pump, like v2's feedback sweep).
 	if updated, err := s.sweepReviewing(ctx, st, now); err != nil {
 		return PumpResult{}, err
+	} else {
+		st = updated
+	}
+
+	// Holds are separate from rounds and can therefore survive after their PR's
+	// review round has completed or been archived. Retire one merged PR per pass
+	// before any queue gate, so a permanent administrative pause does not linger
+	// forever merely because there is no active round left to inspect. Slot work
+	// remains first: cleanup of an unrelated hold must not delay its release.
+	if updated, res, handled, err := s.sweepMergedHold(ctx, st); err != nil {
+		return PumpResult{}, err
+	} else if handled {
+		return res, nil
 	} else {
 		st = updated
 	}
@@ -2711,6 +2740,81 @@ func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
 		return poll
 	}
 	return 30 * time.Second
+}
+
+// sweepMergedHold removes one administrative hold whose pull request GitHub
+// reports as merged. A merely closed PR keeps its hold because it can be
+// reopened; a merged PR cannot, so retaining that hold only leaves stale state
+// in `crq hold` and on the dashboard.
+//
+// The sweep is intentionally bounded and rotating. Holds are usually few, but
+// they still share the account-wide REST budget with every review observation.
+func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpResult, bool, error) {
+	if len(st.Holds) == 0 {
+		return st, PumpResult{}, false, nil
+	}
+	keys := make([]string, 0, len(st.Holds))
+	for key := range st.Holds {
+		if _, _, ok := parseHoldKey(key); ok {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return st, PumpResult{}, false, nil
+	}
+	sort.Strings(keys)
+	next := keys[0]
+	for _, key := range keys {
+		if key > s.lastHeldSweep {
+			next = key
+			break
+		}
+	}
+	s.lastHeldSweep = next
+	repo, pr, _ := parseHoldKey(next)
+	hold := st.Holds[next]
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		if ghapi.IsThrottled(err) || ctx.Err() != nil {
+			return st, PumpResult{}, false, err
+		}
+		// Cleanup of an unrelated held PR must not stop the live review queue.
+		// Rotation ensures another hold still gets inspected on the next pass.
+		if s.log != nil {
+			s.log.Printf("warning: merged-hold check for %s#%d failed: %v", repo, pr, err)
+		}
+		return st, PumpResult{}, false, nil
+	}
+	if !pull.Merged {
+		return st, PumpResult{}, false, nil
+	}
+	result := PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr merged"}
+	if s.cfg.DryRun {
+		return st, result, true, nil
+	}
+	removed := false
+	updated, err := s.store.Update(ctx, func(current *State) error {
+		got, held := current.HeldPR(repo, pr)
+		if !held || got.Reason != hold.Reason || got.By != hold.By || !got.At.Equal(hold.At) {
+			return ErrNoChange
+		}
+		current.Unhold(repo, pr)
+		if round := current.Round(repo, pr); round != nil {
+			token := round.Token
+			current.EndRound(repo, pr, "pr merged")
+			releaseSlot(current, QueueKey(repo, pr), token)
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return st, PumpResult{}, false, err
+	}
+	if !removed {
+		return updated, PumpResult{Action: "lost_race", Repo: repo, PR: pr}, true, nil
+	}
+	s.sync(ctx, updated)
+	return updated, result, true, nil
 }
 
 // sweepParkedClosed abandons one waiting round whose PR has been closed or

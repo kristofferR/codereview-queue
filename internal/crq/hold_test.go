@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,81 @@ func setHoldCapableLeader(t *testing.T, ctx context.Context, store StateStore, n
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertOnlyHoldComment(t *testing.T, gh *fakeGitHub) {
+	t.Helper()
+	if len(gh.posted) != 1 || !strings.Contains(gh.posted[0], "<!-- crq:hold -->") {
+		t.Fatalf("posted comments = %v, want only the hold notice", gh.posted)
+	}
+}
+
+func TestParseHoldKeyRejectsMalformedNumbers(t *testing.T) {
+	for _, key := range []string{
+		"owner/repo#",
+		"owner/repo#0",
+		"owner/repo#-1",
+		"owner/repo#12junk",
+		"owner/repo#12#13",
+	} {
+		if _, _, ok := parseHoldKey(key); ok {
+			t.Errorf("parseHoldKey(%q) succeeded", key)
+		}
+	}
+	if repo, pr, ok := parseHoldKey("owner/repo#12"); !ok || repo != "owner/repo" || pr != 12 {
+		t.Fatalf("valid hold key parsed as repo=%q pr=%d ok=%t", repo, pr, ok)
+	}
+}
+
+func TestHoldPostsItsReasonOnThePullRequest(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	result, err := svc.Hold(ctx, "Owner/Repo", 12, "waiting for product approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOnlyHoldComment(t, gh)
+	want := "**Reason:** waiting for product approval"
+	if !strings.Contains(gh.posted[0], want) || !strings.Contains(gh.posted[0], "`crq unhold owner/repo 12`") {
+		t.Fatalf("hold comment = %q, want reason and resume command", gh.posted[0])
+	}
+	if result.Warning != "" {
+		t.Fatalf("successful hold warning = %q", result.Warning)
+	}
+}
+
+func TestHoldSurvivesACommentPostFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.postErrs = map[string]error{fakeKey("owner/repo", 12): errors.New("comments disabled")}
+	store := NewMemoryStore(cfg)
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	result, err := svc.Hold(ctx, "owner/repo", 12, "waiting for product approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Warning, "comments disabled") {
+		t.Fatalf("warning = %q, want comment failure", result.Warning)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("comment failure rolled back the safety-critical hold")
 	}
 }
 
@@ -61,15 +137,11 @@ func TestHoldIsRecheckedWhenTheRoundIsReserved(t *testing.T) {
 	}
 
 	obs := engine.Observation{Open: true, Head: head}
-	res, err := svc.fireRound(ctx, cfg, round, obs, true, 0, time.Time{}, "", nil, now)
+	_, err := svc.fireRound(ctx, cfg, round, obs, true, 0, time.Time{}, "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, posted := range gh.posted {
-		if posted == cfg.ReviewCommand {
-			t.Fatalf("a held PR was fired anyway (%s)", res.Action)
-		}
-	}
+	assertOnlyHoldComment(t, gh)
 	st, _, _ := store.Load(ctx)
 	if st.FireSlot != nil {
 		t.Errorf("a held round took the fire slot: %#v", st.FireSlot)
@@ -128,9 +200,7 @@ func TestHoldIsRecheckedByQuotaFreeFirePaths(t *testing.T) {
 			if err := fire(svc, ctx, round, now); err != nil {
 				t.Fatal(err)
 			}
-			if len(gh.posted) != 0 {
-				t.Fatalf("a held PR received a co-review trigger: %v", gh.posted)
-			}
+			assertOnlyHoldComment(t, gh)
 			st, _, err = store.Load(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -179,9 +249,7 @@ func TestHoldStopsInflightCoReviewerSelfHeal(t *testing.T) {
 	}
 
 	svc.selfHealCoReviewers(ctx, cfg, round, engine.Observation{Open: true, Head: head}, now)
-	if len(gh.posted) != 0 {
-		t.Fatalf("held in-flight round received a co-review trigger: %v", gh.posted)
-	}
+	assertOnlyHoldComment(t, gh)
 	st, _, err = store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +315,8 @@ func TestHoldRejectsExpiredTriggerClaim(t *testing.T) {
 	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
 	cfg := firingConfig()
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
 	svc.now = func() time.Time { return now }
 	repo, pr, head := "o/r", 8, "eeeeeeee1"
 	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now.Add(-time.Minute), 0)
@@ -282,7 +351,8 @@ func TestHoldAndUnholdDryRunDoNotMutateState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
 	svc.now = func() time.Time { return now }
 
 	held, err := svc.Hold(ctx, "o/new", 2, "simulated hold")
@@ -315,6 +385,9 @@ func TestHoldAndUnholdDryRunDoNotMutateState(t *testing.T) {
 	}
 	if _, held := after.HeldPR("o/new", 2); held {
 		t.Fatal("dry-run hold persisted the simulated hold")
+	}
+	if len(gh.posted) != 0 {
+		t.Fatal("dry-run hold posted a PR comment")
 	}
 }
 

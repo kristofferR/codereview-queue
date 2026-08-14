@@ -1510,14 +1510,12 @@ func (c Config) coCommandFor(login string) string {
 	return ""
 }
 
-// fireCoOnly handles a round where CodeRabbit already reviewed the head but
-// gating co-reviewers have not: it posts ONLY their trigger commands and
-// records the round as fired with the first trigger as the CommandID anchor.
-// Completion already counts the existing CodeRabbit review, so the round then
-// waits on the co-reviewers alone — no `@coderabbitai review` is ever posted,
-// no CodeRabbit quota is spent, and therefore NO FireSlot is taken: the
-// per-round trigger claims (CoBots[login].ClaimedAt, CAS-set before the
-// network post) are the concurrency guard.
+// fireCoOnly handles a round whose primary is already finished, disabled, or
+// unavailable for this head but whose gating co-reviewers have not answered.
+// It posts ONLY their trigger commands and records the round as fired with the
+// first trigger as the CommandID anchor. No primary quota is spent and therefore
+// NO FireSlot is taken: the per-round trigger claims (CoBots[login].ClaimedAt,
+// CAS-set before the network post) are the concurrency guard.
 func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, logins []string, reason string, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
@@ -1663,7 +1661,11 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 	}
 	s.sync(ctx, updated)
 	if s.log != nil {
-		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted co-reviewer triggers for %s)", key, round.Head, strings.Join(claimed, ","))
+		posted := make([]string, 0, len(posts))
+		for _, post := range posts {
+			posted = append(posted, post.login)
+		}
+		s.log.Printf("fire %s@%s (%s; posted co-reviewer triggers for %s)", key, round.Head, reason, strings.Join(posted, ","))
 	}
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 }

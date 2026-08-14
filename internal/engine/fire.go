@@ -341,7 +341,11 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	}
 	delivered := "primary reviewed head"
 	if primaryUnavailable {
-		delivered = "primary review unavailable for this head"
+		if p.PrimaryOff {
+			delivered = "primary disabled for this repository"
+		} else {
+			delivered = "primary review unavailable for this head"
+		}
 	}
 	if len(post) > 0 {
 		return FireDecision{Verdict: FireCoOnly, Reason: delivered + "; co-review still required", PostCo: post}

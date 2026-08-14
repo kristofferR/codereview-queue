@@ -1233,6 +1233,9 @@ func TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota(t *testing.T) {
 		if len(d.PostCo) != 1 || d.PostCo[0] != dialect.CodexBotLogin {
 			t.Fatalf("primary off must still command the co-reviewers, got %+v", d.PostCo)
 		}
+		if d.Reason != "primary disabled for this repository; co-review still required" {
+			t.Fatalf("primary-off reason must not imply a failed or completed review, got %q", d.Reason)
+		}
 	}
 
 	// With the primary on, the same round is an ordinary metered fire — the

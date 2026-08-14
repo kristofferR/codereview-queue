@@ -195,9 +195,13 @@ func TestAwaitCoReviewBoundsTheWait(t *testing.T) {
 
 func TestOneRoundPerPR(t *testing.T) {
 	s := New()
-	if _, err := s.NewRound("Owner/Repo", 7, "abcdef123", t0); err != nil {
+	first, err := s.NewRound("Owner/Repo", 7, "abcdef123", t0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	first.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	first.SetCoCommand("cursor[bot]", 42, t0.Add(2*time.Second))
+	s.PutRound(*first)
 	if _, err := s.NewRound("owner/repo", 7, "00fedcba9", t0); err == nil {
 		t.Fatal("second round for the same PR must be refused (case-insensitive key)")
 	}
@@ -207,6 +211,13 @@ func TestOneRoundPerPR(t *testing.T) {
 	}
 	if r.Head != "00fedcba9" || r.Phase != PhaseQueued || r.Seq != 2 {
 		t.Fatalf("superseded round: %+v", r)
+	}
+	co := r.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(t0.Add(time.Second)) {
+		t.Fatalf("superseded round lost prior reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil || co.CommandID != 0 || co.CommandedAt != nil {
+		t.Fatalf("supersede carried head-scoped reviewer state: %+v", co)
 	}
 	if len(s.Archive) != 1 || s.Archive[0].Phase != PhaseAbandoned || s.Archive[0].Head != "abcdef123" {
 		t.Fatalf("old round must be archived abandoned: %+v", s.Archive)

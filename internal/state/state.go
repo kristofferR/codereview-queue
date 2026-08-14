@@ -211,6 +211,11 @@ type CoBotRound struct {
 	CommandID   int64      `json:"command_id,omitempty"`
 	CommandedAt *time.Time `json:"commanded_at,omitempty"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+	// SeenActiveAt is durable proof that crq has observed this reviewer act on
+	// the pull request. Unlike AnsweredAt it carries across supersede, so a bot
+	// whose clean output exists only as a previous head's check run remains
+	// eligible for self-heal when it silently misses the next head.
+	SeenActiveAt *time.Time `json:"seen_active_at,omitempty"`
 	// AnsweredAt is when crq FIRST observed this bot produce head evidence — a
 	// review, a clean summary at the SHA, a completed check run.
 	//
@@ -229,7 +234,8 @@ type CoBotRound struct {
 }
 
 func (c CoBotRound) empty() bool {
-	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil &&
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil &&
+		c.SeenActiveAt == nil && c.AnsweredAt == nil &&
 		len(c.unknown) == 0
 }
 
@@ -298,13 +304,19 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 // FIRST such observation wins: a round is one head, so the evidence does not
 // change, and re-stamping it with each sweep's clock would both rewrite state
 // on every pass and make a bot that answered days ago read as freshly active.
+// SeenActiveAt is initialized beside it and then carried to later heads.
 func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	c := r.Co(login)
-	if c.AnsweredAt != nil {
+	if c.AnsweredAt != nil && c.SeenActiveAt != nil {
 		return
 	}
 	t := at.UTC()
-	c.AnsweredAt = &t
+	if c.AnsweredAt == nil {
+		c.AnsweredAt = &t
+	}
+	if c.SeenActiveAt == nil {
+		c.SeenActiveAt = &t
+	}
 	r.setCo(login, c)
 }
 
@@ -343,7 +355,7 @@ func (r *Round) foldLegacyCodex() {
 	prev := r.Co(codexCoBotKey)
 	r.setCo(codexCoBotKey, CoBotRound{
 		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
-		AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
+		SeenActiveAt: prev.SeenActiveAt, AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
 	})
 }
 
@@ -588,7 +600,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 8
+const WriterCaps = 9
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -1130,8 +1142,21 @@ func (s *State) EndRound(repo string, pr int, reason string) {
 // Supersede replaces the round for repo#pr with a fresh queued round at the
 // new head, archiving the old one. It is the ONLY way a round's head changes.
 func (s *State) Supersede(repo string, pr int, head string, now time.Time) (*Round, error) {
+	previous := s.Round(repo, pr)
 	s.EndRound(repo, pr, "superseded by "+head)
-	return s.NewRound(repo, pr, head, now)
+	next, err := s.NewRound(repo, pr, head, now)
+	if err != nil || previous == nil {
+		return next, err
+	}
+	for login, co := range previous.CoBots {
+		if co.SeenActiveAt == nil {
+			continue
+		}
+		seen := co.SeenActiveAt.UTC()
+		next.setCo(login, CoBotRound{SeenActiveAt: &seen})
+	}
+	s.PutRound(*next)
+	return next, nil
 }
 
 // SlotRound returns the round currently holding the fire slot, or nil. A slot

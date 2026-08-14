@@ -217,6 +217,54 @@ func TestCoReplayBugbotSilentCleanConvergesOnCheckRun(t *testing.T) {
 	}
 }
 
+// A silent clean Bugbot round leaves no timeline evidence, and observe fetches
+// checks only for the current head. The durable activity proof carried by
+// Supersede is therefore the only signal self-heal can use when Bugbot misses
+// the next head.
+func TestCoReplaySelfHealRemembersSilentCleanPreviousHead(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr := "o/r", 39
+	first, second := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, first)
+	f.setCommitDate(first, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the first CodeRabbit fire, got %+v", res)
+	}
+	f.clk.advance(2 * time.Minute)
+	f.botReview(repo, pr, 500, first, f.clk.now())
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = f.clk.now()
+	f.gh.setCheckRuns(first, clean)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted || r.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("silent clean round did not persist Bugbot activity: %+v", r)
+	}
+
+	// The next head has no Bugbot review, comment, or check run at all.
+	f.openPull(repo, pr, second)
+	f.setCommitDate(second, f.clk.now())
+	f.enqueue(repo, pr)
+	carried := f.round(repo, pr)
+	if carried == nil || carried.Co(bugbotLogin).SeenActiveAt == nil || carried.Co(bugbotLogin).AnsweredAt != nil {
+		t.Fatalf("new head did not carry only the durable activity proof: %+v", carried)
+	}
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the second CodeRabbit fire, got %+v", res)
+	}
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 0 {
+		t.Fatalf("self-heal fired before its grace period, got %d posts", got)
+	}
+
+	f.clk.advance(11 * time.Minute)
+	f.pump()
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 1 {
+		t.Fatalf("silent-clean activity did not recover the missed next head, got %d posts", got)
+	}
+}
+
 // --- 2. Bugbot findings + BUG_ID dedupe -------------------------------------
 
 // TestCoReplayBugbotFindingsDedupeOnBugID: Bugbot re-reports the same bug in a

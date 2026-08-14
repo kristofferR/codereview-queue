@@ -85,6 +85,10 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}
 	commanded := state.Round{Head: head}
 	commanded.SetCoCommand(bugbotLogin, 42, now.Add(-time.Hour))
+	seenAt := now.Add(-2 * time.Hour)
+	seen := state.Round{Head: head, CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
 
 	cases := []struct {
 		name           string
@@ -128,6 +132,7 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 		{name: "selfheal stays quiet when checks are unreadable", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true, ChecksUnknown: true}), anchor: staleAnchor, want: false},
 		{name: "selfheal posts for an active bot that missed the head past grace", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts round activity as active", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{ActiveThisRound: true}), anchor: staleAnchor, want: true},
+		{name: "selfheal counts activity carried from a previous head", cp: policy(TriggerSelfHeal), round: seen, obs: obsWith(CoSeen{}), anchor: staleAnchor, want: true},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
 		{name: "selfheal needs an anchor", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), want: false},
 		{

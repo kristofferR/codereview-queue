@@ -389,9 +389,10 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 // head (including in-progress — a running check will deliver evidence).
 //
 // Modes: never — false. always — post whenever the common current-head guards
-// above allow it. selfheal — post only for a bot observed active that missed
-// the head, once the anchor (the round's fire) is older than the grace period;
-// the caller passes anchor and now so the fire path and the sweep share the rule.
+// above allow it. selfheal — post only for a bot observed active now or on a
+// prior head that missed this one, once the anchor (the round's fire) is older
+// than the grace period; the caller passes anchor and now so the fire path and
+// the sweep share the rule.
 func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPresent bool, anchor, now time.Time) bool {
 	if roundCoCommandID(r, cp.Login) != 0 {
 		return false
@@ -429,7 +430,7 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 			return true
 		}
 		co := obs.co(cp.Login)
-		if !co.AutoActive && !co.ActiveThisRound {
+		if !co.AutoActive && !co.ActiveThisRound && r.Co(cp.Login).SeenActiveAt == nil {
 			return false
 		}
 		if anchor.IsZero() {

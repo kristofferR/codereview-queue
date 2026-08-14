@@ -535,6 +535,24 @@ func TestLoadConfigRLCoDegradeAlias(t *testing.T) {
 	}
 }
 
+func TestPreflightSkipBlockedDefaultsOnAndCanBeDisabled(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PreflightSkipBlocked {
+		t.Fatal("blocked preflight skip must default on")
+	}
+
+	cfg, err = BuildConfig(map[string]string{"CRQ_PREFLIGHT_SKIP_BLOCKED": "0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreflightSkipBlocked {
+		t.Fatal("CRQ_PREFLIGHT_SKIP_BLOCKED=0 must force the local review")
+	}
+}
+
 func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")

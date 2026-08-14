@@ -86,6 +86,7 @@ func TestSkipBlockedPreflightUsesSharedQuota(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	until := now.Add(37 * time.Minute)
 	cfg := firingConfig()
+	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
 		st.Account.BlockedUntil = &until
@@ -126,6 +127,7 @@ func TestSkipBlockedPreflightRunsWhenBlockExpired(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	expired := now.Add(-time.Second)
 	cfg := firingConfig()
+	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
 		st.Account.BlockedUntil = &expired
@@ -149,6 +151,7 @@ func TestSkipBlockedPreflightRunsWithExplicitCredentials(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	until := now.Add(time.Hour)
 	cfg := firingConfig()
+	cfg.PreflightSkipBlocked = true
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(context.Background(), func(st *State) error {
 		st.Account.BlockedUntil = &until
@@ -167,5 +170,34 @@ func TestSkipBlockedPreflightRunsWithExplicitCredentials(t *testing.T) {
 	}
 	if report != nil {
 		t.Fatalf("explicit credentials may select another account and must run, got %+v", report)
+	}
+}
+
+func TestSkipBlockedPreflightHonorsFleetSetting(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &until
+		st.Fleet.Env = map[string]string{"CRQ_PREFLIGHT_SKIP_BLOCKED": "0"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	service.now = func() time.Time { return now }
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Fatalf("fleet-disabled skip setting must run local preflight, got %+v", report)
 	}
 }

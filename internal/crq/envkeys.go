@@ -82,6 +82,8 @@ var envKeys = []EnvKey{
 		Help: "How long crq loop waits for a round before reporting a timeout."},
 	{Key: "CRQ_RL_CO_DEGRADE", Kind: "bool", Group: "review", Label: "Degrade on block",
 		Help: "During a quota block, ask the co-reviewers now and keep the primary queued, instead of waiting the block out."},
+	{Key: "CRQ_PREFLIGHT_SKIP_BLOCKED", Kind: "bool", Group: "review", Label: "Skip blocked preflight",
+		Help: "Satisfy local preflight from a live shared account block instead of calling CodeRabbit."},
 	{Key: "CRQ_AUTOREVIEW_SKIP_AUTHORS", Kind: "list", Group: "review", Label: "Skip authors",
 		Help: "Pull-request authors auto-review never enqueues.", AllowEmpty: true},
 	{Key: "CRQ_AUTOREVIEW_SKIP_MARKER", Kind: "text", Group: "review", Label: "Skip marker",

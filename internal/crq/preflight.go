@@ -106,6 +106,9 @@ func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOption
 	if err != nil {
 		return nil, err
 	}
+	if !s.cfg.WithFleet(state.Fleet).PreflightSkipBlocked {
+		return nil, nil
+	}
 	now := s.clock()
 	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
 		return nil, nil

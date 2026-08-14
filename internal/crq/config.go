@@ -159,6 +159,10 @@ type Config struct {
 	// (return their findings promptly, keep CodeRabbit queued for the window)
 	// instead of waiting the block out. CRQ_RL_CO_DEGRADE, default on.
 	RateLimitCoDegrade bool
+	// PreflightSkipBlocked lets local preflight satisfy its gate from a live
+	// shared account block instead of making a CodeRabbit request that must fail.
+	// CRQ_PREFLIGHT_SKIP_BLOCKED, default on.
+	PreflightSkipBlocked bool
 
 	// env is the map this configuration was parsed from, so WithFleet can
 	// re-parse it with the fleet's overrides layered on.
@@ -353,7 +357,8 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
 		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 
-		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
+		RateLimitCoDegrade:   stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
+		PreflightSkipBlocked: boolEnv(env, "CRQ_PREFLIGHT_SKIP_BLOCKED", true),
 	}
 	// Kept so a fleet record can be layered over it and the whole thing
 	// re-parsed. Unexported: it is an input, not part of the configuration.

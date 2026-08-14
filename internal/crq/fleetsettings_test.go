@@ -107,6 +107,7 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 	settings := (&Service{cfg: cfg}).EnvSettings(State{})
 	foundCalibration := false
 	foundDegrade := false
+	foundPreflightSkip := false
 	for _, setting := range settings {
 		if setting.Key == "CRQ_CALIBRATE_TTL" {
 			foundCalibration = true
@@ -114,12 +115,17 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 				t.Fatalf("calibration setting = %+v, want the effective default", setting)
 			}
 		}
-		if setting.Key != "CRQ_RL_CO_DEGRADE" {
-			continue
-		}
-		foundDegrade = true
-		if setting.Value != "1" || setting.Source != "default" {
-			t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
+		switch setting.Key {
+		case "CRQ_RL_CO_DEGRADE":
+			foundDegrade = true
+			if setting.Value != "1" || setting.Source != "default" {
+				t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
+			}
+		case "CRQ_PREFLIGHT_SKIP_BLOCKED":
+			foundPreflightSkip = true
+			if setting.Value != "1" || setting.Source != "default" {
+				t.Fatalf("preflight skip setting = %+v, want the effective on-by-default value", setting)
+			}
 		}
 	}
 	if !foundCalibration {
@@ -127,6 +133,9 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 	}
 	if !foundDegrade {
 		t.Fatal("CRQ_RL_CO_DEGRADE was not listed")
+	}
+	if !foundPreflightSkip {
+		t.Fatal("CRQ_PREFLIGHT_SKIP_BLOCKED was not listed")
 	}
 }
 

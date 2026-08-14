@@ -849,6 +849,8 @@ func configValueOf(cfg Config, key string) string {
 		return cfg.FeedbackWaitTimeout.String()
 	case "CRQ_RL_CO_DEGRADE":
 		return boolString(cfg.RateLimitCoDegrade)
+	case "CRQ_PREFLIGHT_SKIP_BLOCKED":
+		return boolString(cfg.PreflightSkipBlocked)
 	case "CRQ_AUTOREVIEW_SKIP_AUTHORS":
 		return strings.Join(sortedTrueKeys(cfg.SkipAuthors), ",")
 	case "CRQ_WATCH_INTERVAL":

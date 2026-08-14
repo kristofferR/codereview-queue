@@ -1588,7 +1588,8 @@ when the CLI attributes the limit to the organisation crq queues for; otherwise
 
 When shared state already holds a live account block, crq skips the doomed CLI
 request and exits 0 with status "skipped", .skip_reason and .blocked_until. If
-shared state cannot be read, preflight runs normally.
+shared state cannot be read, preflight runs normally. This is controlled by
+CRQ_PREFLIGHT_SKIP_BLOCKED (default 1); set it to 0 to force the CLI request.
 
 Use crq loop for queued GitHub PR reviews.
 `)

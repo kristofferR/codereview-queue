@@ -217,6 +217,29 @@ func TestCoReplayBugbotSilentCleanConvergesOnCheckRun(t *testing.T) {
 	}
 }
 
+func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 40, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the CodeRabbit fire, got %+v", res)
+	}
+
+	f.clk.advance(time.Minute)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = f.clk.now()
+	f.gh.setCheckRuns(sha, clean)
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("Feedback did not persist observed Bugbot activity: %+v", r)
+	}
+}
+
 // A silent clean Bugbot round leaves no timeline evidence, and observe fetches
 // checks only for the current head. The durable activity proof carried by
 // Supersede is therefore the only signal self-heal can use when Bugbot misses

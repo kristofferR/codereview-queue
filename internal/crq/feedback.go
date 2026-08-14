@@ -131,6 +131,13 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		} else if updated != nil {
 			st = *updated
 		}
+		// Feedback can be the only path that observes a co-reviewer's final
+		// response before the loop completes the round. Persist the same durable
+		// activity proof Pump records so a subsequent head can self-heal a missed
+		// automatic review.
+		if round != nil {
+			s.noteCoAnswers(ctx, cfg, *round, obs.eng, now)
+		}
 	}
 	pull := obs.pull
 	head := ""

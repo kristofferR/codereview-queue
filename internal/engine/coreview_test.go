@@ -133,6 +133,9 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 		{name: "selfheal posts for an active bot that missed the head past grace", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts round activity as active", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{ActiveThisRound: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts activity carried from a previous head", cp: policy(TriggerSelfHeal), round: seen, obs: obsWith(CoSeen{}), anchor: staleAnchor, want: true},
+		{name: "selfheal respects an unable notice after carried activity", cp: policy(TriggerSelfHeal), round: seen,
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: staleAnchor.Add(time.Minute), UpdatedAt: staleAnchor.Add(time.Minute)}}}, anchor: staleAnchor, want: false},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
 		{name: "selfheal needs an anchor", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), want: false},
 		{

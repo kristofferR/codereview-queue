@@ -247,6 +247,30 @@ func TestSupersedeMigratesLegacyCoAnswerAsActivity(t *testing.T) {
 	}
 }
 
+func TestNewRoundRestoresArchivedCoActivityAfterReopen(t *testing.T) {
+	s := New()
+	first, err := s.NewRound("owner/repo", 9, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(time.Second)
+	first.NoteCoAnswer("cursor[bot]", answered)
+	s.PutRound(*first)
+	s.EndRound("owner/repo", 9, "pr closed")
+
+	reopened, err := s.NewRound("owner/repo", 9, "00fedcba9", t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := reopened.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("reopened round lost archived reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("reopened round carried head-scoped reviewer state: %+v", co)
+	}
+}
+
 func TestSlotRoundStaleness(t *testing.T) {
 	s := New()
 	r := newFired(t, &s)

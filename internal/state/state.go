@@ -1101,7 +1101,9 @@ func (s *State) MoveToFront(repo string, pr int) bool {
 
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
-// for one PR" cannot happen by accident.
+// for one PR" cannot happen by accident. Durable co-reviewer activity is
+// restored from the latest archived round so reopening a PR does not forget a
+// silent check-only reviewer that worked on an earlier head.
 func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Round, error) {
 	key := Key(repo, pr)
 	if s.Rounds == nil {
@@ -1119,8 +1121,33 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 		Phase:      PhaseQueued,
 		EnqueuedAt: now.UTC(),
 	}
+	s.carryArchivedCoActivity(&r)
 	s.Rounds[key] = r
 	return &r, nil
+}
+
+func (s *State) carryArchivedCoActivity(next *Round) {
+	key := Key(next.Repo, next.PR)
+	for i := len(s.Archive) - 1; i >= 0; i-- {
+		previous := s.Archive[i]
+		if Key(previous.Repo, previous.PR) != key {
+			continue
+		}
+		for login, co := range previous.CoBots {
+			seenAt := co.SeenActiveAt
+			if seenAt == nil {
+				// Rounds written before SeenActiveAt existed still carry the
+				// head-scoped observation that originally proved activity.
+				seenAt = co.AnsweredAt
+			}
+			if seenAt == nil {
+				continue
+			}
+			seen := seenAt.UTC()
+			next.setCo(login, CoBotRound{SeenActiveAt: &seen})
+		}
+		return
+	}
 }
 
 // EndRound abandons the current round (superseded/closed/cancelled) and moves
@@ -1142,27 +1169,8 @@ func (s *State) EndRound(repo string, pr int, reason string) {
 // Supersede replaces the round for repo#pr with a fresh queued round at the
 // new head, archiving the old one. It is the ONLY way a round's head changes.
 func (s *State) Supersede(repo string, pr int, head string, now time.Time) (*Round, error) {
-	previous := s.Round(repo, pr)
 	s.EndRound(repo, pr, "superseded by "+head)
-	next, err := s.NewRound(repo, pr, head, now)
-	if err != nil || previous == nil {
-		return next, err
-	}
-	for login, co := range previous.CoBots {
-		seenAt := co.SeenActiveAt
-		if seenAt == nil {
-			// Rounds written before SeenActiveAt existed still carry the
-			// head-scoped observation that originally proved activity.
-			seenAt = co.AnsweredAt
-		}
-		if seenAt == nil {
-			continue
-		}
-		seen := seenAt.UTC()
-		next.setCo(login, CoBotRound{SeenActiveAt: &seen})
-	}
-	s.PutRound(*next)
-	return next, nil
+	return s.NewRound(repo, pr, head, now)
 }
 
 // SlotRound returns the round currently holding the fire slot, or nil. A slot

@@ -430,6 +430,9 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 			return true
 		}
 		co := obs.co(cp.Login)
+		if coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) {
+			return false
+		}
 		if !co.AutoActive && !co.ActiveThisRound && r.Co(cp.Login).SeenActiveAt == nil {
 			return false
 		}

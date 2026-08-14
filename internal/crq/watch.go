@@ -406,10 +406,10 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// review on the code this session is about to replace.
 				report, _, _, err = s.nextFromState(ctx, repo, pull.Number)
 				if err == nil && report.Action != string(engine.ActionFix) {
-					report, err = s.Next(ctx, repo, pull.Number)
+					report, err = s.nextAutomated(ctx, repo, pull.Number)
 				}
 			} else {
-				report, err = s.Next(ctx, repo, pull.Number)
+				report, err = s.nextAutomated(ctx, repo, pull.Number)
 			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
@@ -449,7 +449,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// however, a carried finding from an older head must not suppress
 				// Next forever: Next knows it may enqueue and review the current
 				// head because FindingsOnHead is empty.
-				if _, advanceErr := s.Next(ctx, repo, pull.Number); advanceErr != nil {
+				if _, advanceErr := s.nextAutomated(ctx, repo, pull.Number); advanceErr != nil {
 					if _, throttled := ghapi.ThrottleWait(advanceErr); throttled {
 						return advanceErr
 					}
@@ -808,6 +808,7 @@ func (s *Service) dispatchWithStart(
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
+		"CRQ_DISPATCH_TOKEN="+token,
 		// The agent and prompt come from the unit's environment and are already
 		// in os.Environ(); only the per-repository half is added here.
 		"CRQ_FIX_MODEL="+model,
@@ -1090,6 +1091,10 @@ func (s *Service) claimDispatchModels(
 		}
 		if report.Fork && !s.cfgFor(*st, report.Repo).DispatchForks {
 			reason, byDesign = "the head branch is a fork and current solver policy forbids fixing it", true
+			return ErrNoChange
+		}
+		if claim, ok := st.WorkClaim(report.Repo, report.PR, s.clock()); ok {
+			reason, byDesign = "interactive work is claimed by "+claim.By, true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)

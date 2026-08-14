@@ -44,11 +44,11 @@ func (s *Service) waitTick() time.Duration {
 // branches are wrong, and every observed session wrapped the command in
 // `set +e … ; echo "CRQ_EXIT:$?"` to smuggle the exit code back out.
 //
-// This owns nothing: it holds no round and has no exit-code vocabulary of its
-// own, so killing it costs exactly the process. Its ONLY job is to notice, so
-// that its exit can be the wake event for an agent that ended its turn. If it
-// dies, the caller re-runs it (or calls `crq next`) and gets the same answer
-// from persisted state.
+// This owns no review round and has no exit-code vocabulary of its own. It only
+// renews the interactive work claim, whose finite TTL makes interruption safe.
+// Its job is to notice, so that its exit can be the wake event for an agent that
+// ended its turn. If it dies, the caller re-runs it (or calls `crq next`) and
+// gets the same answer from persisted state.
 //
 // It is read-only in the steady state, but NOT unconditionally: when nothing is
 // advancing this PR — no round for the head, or no live leader — it drives the
@@ -59,18 +59,40 @@ func (s *Service) waitTick() time.Duration {
 // Cost matters as much as correctness here: the account shares one REST budget
 // across the daemon and every agent, and seven concurrent waiters once
 // out-spent it on their own. So the loop watches the state ref with a
-// conditional GET — an unchanged ref answers 304 and costs no quota — and only
-// pays for a full evaluation when the ref moves or the staleness ceiling
-// elapses.
+// conditional GET. An authenticated unchanged-ref response answers 304 and
+// does not count against the primary REST rate limit, so the waiter only pays
+// for a full evaluation when the ref moves or the staleness ceiling elapses.
 func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextReport, error) {
 	repo = NormalizeRepo(repo)
 	for {
-		// Sample the ref BEFORE deciding. Taken after, a daemon transition landing
-		// between the decision and the first read would be recorded as the
-		// baseline instead of recognised as a change, and the waiter would sleep
-		// to its ceiling — up to two leader periods — with an actionable answer
-		// already sitting there.
+		claim, err := s.claimInteractiveWork(ctx, repo, pr)
+		if err != nil {
+			return NextReport{}, err
+		}
+		// Sample after claiming but before deciding. The claim itself moves the
+		// state ref, so sampling first would make the waiter observe its own write
+		// as external progress and immediately renew in a hot loop.
 		lastRef, refErr := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+		if !claim.acquired {
+			// The owner that won may finish long before its lease expires. Watch the
+			// shared ref so its release (or an autofix heartbeat/completion) wakes us,
+			// with a bounded recheck in case the ref cannot be observed.
+			now := s.clock()
+			deadline := now.Add(time.Minute)
+			if !claim.until.IsZero() && claim.until.Before(deadline) {
+				deadline = claim.until
+			}
+			if floor := now.Add(s.waitTick()); deadline.Before(floor) {
+				deadline = floor
+			}
+			if refErr != nil {
+				deadline = now.Add(s.waitTick())
+			}
+			if _, _, werr := s.watchStateRef(ctx, lastRef, deadline); werr != nil {
+				return workClaimConflictReport(repo, pr, claim, now, s.waitTick()), werr
+			}
+			continue
+		}
 
 		report, action, _, err := s.nextFromState(ctx, repo, pr)
 		if err != nil {
@@ -86,6 +108,11 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 			return report, err
 		}
 		if actionable(action.Kind) {
+			if terminalInteractiveAction(report.Action) {
+				if releaseErr := s.releaseInteractiveWork(ctx, repo, pr); releaseErr != nil {
+					return report, releaseErr
+				}
+			}
 			return report, nil
 		}
 
@@ -179,10 +206,11 @@ func leaderLive(st State, now time.Time) bool {
 // watchStateRef polls the state ref until its SHA changes or deadline passes,
 // returning the SHA last seen.
 //
-// This is the cheap half of the waiter: one conditional GET per tick, which
-// costs no quota while the ref is unchanged. Every meaningful queue transition
-// — fired, reviewing, completed, superseded — is a state write, so the ref
-// moving is the signal that something worth re-deciding happened.
+// This is the cheap half of the waiter: one authenticated conditional GET per
+// tick. An unchanged ref answers 304 without counting against the primary REST
+// rate limit. Every meaningful queue transition — fired, reviewing, completed,
+// superseded — is a state write, so the ref moving is the signal that something
+// worth re-deciding happened.
 //
 // A read failure is not fatal. Losing a tick only delays a re-evaluation the
 // deadline would force anyway, and a waiter that exits on a transient GitHub

@@ -43,8 +43,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.json")
 	script := filepath.Join(t.TempDir(), "session.sh")
 	body := "#!/bin/sh\n" +
-		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\"}' " +
-		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" > " + record + "\n"
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" > " + record + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	pool.wait()
 
-	var got struct{ Repo, PR, Head, Cwd, Findings string }
+	var got struct{ Repo, PR, Head, Cwd, Findings, Token string }
 	data, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatalf("the session did not run: %v", err)
@@ -79,6 +79,9 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	if got.Findings == "" {
 		t.Fatal("the session was given no findings file")
+	}
+	if got.Token == "" {
+		t.Fatal("the session was given no dispatch token for its crq next calls")
 	}
 	// OUTSIDE the worktree: at the repository root it is an untracked file, and
 	// a session following the documented `git add -A` push would commit crq's

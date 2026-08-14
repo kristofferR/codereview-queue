@@ -38,6 +38,11 @@ crq next            # inside the checkout: crq finds the PR from the remote and 
 idempotent**, and it advances the queue by one step as a side effect — so a PR in a repo outside the
 autoreview fleet still progresses, and running it alongside the daemon is safe.
 
+Before it reads feedback, `crq next` takes a two-hour renewable work claim on the PR. The autofix
+daemon checks that claim in the same CAS that grants its own fix session, so it cannot start a
+duplicate fix while this loop is active. `done` and `blocked` release it automatically. If you stop
+working on the PR earlier, run `crq unclaim "$REPO" "$PR"`; otherwise the lease expires on its own.
+
 Three things this deliberately takes away from you:
 
 - **Choosing a delay.** `.recheck_after` is computed by crq from the account-quota window, the
@@ -67,11 +72,13 @@ It blocks until there IS something to do (`fix`, `push`, `done`, `blocked`), pri
 and exits 0. Run it as your harness's background task — its **exit is the wake event**, so you burn
 no tokens idling and never narrate a countdown.
 
-It owns no round and holds no state, so being killed costs only the process — just run it again (or
-call `crq next`). While idle it watches the shared state ref with a conditional request that spends
-no rate-limit quota. It is read-only in the steady state, but if nothing is advancing your PR (no
-round for the head, or no daemon holding the leader lease) it drives the queue itself rather than
-wait for nobody — which can request a review.
+It owns no review round. It only renews the interactive work claim, which expires after two hours if
+the process disappears — just run it again (or call `crq next`) to continue. While idle it watches
+the shared state ref with an authenticated conditional request. When GitHub answers that ETag check
+with `304 Not Modified`, it does not count against the primary REST rate limit. Apart from renewing
+the claim it is read-only in the steady state, but if nothing is advancing your PR (no round for the
+head, or no daemon holding the leader lease) it drives the queue itself rather than wait for nobody,
+which can request a review.
 
 `crq next --wait` is the same wait inline, for a human at a terminal. All three share one decision
 function, so they cannot disagree.
@@ -206,6 +213,11 @@ every required reviewer has answered.
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
+
+Interactive `next`, `wait`, and `loop` calls and unattended dispatch are mutually exclusive per PR.
+Whichever side wins the shared CAS works; the other waits. Claim creation refuses to promise this
+when a recently active autofix host runs a binary too old to honour work claims, so upgrade every
+reported autofix host when that error appears.
 ## Holding a PR
 
 To stop crq reviewing a PR — a draft you are still shaping, a branch waiting on a decision:

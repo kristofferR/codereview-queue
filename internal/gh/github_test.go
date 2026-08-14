@@ -375,6 +375,9 @@ func TestSendConditionalGETReplaysCachedBodyOn304(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer t" {
+			t.Errorf("conditional cache request authorization = %q, want Bearer t", got)
+		}
 		switch atomic.AddInt32(&calls, 1) {
 		case 1:
 			if r.Header.Get("If-None-Match") != "" {

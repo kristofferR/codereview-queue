@@ -121,6 +121,13 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	if len(done.Findings) != 0 {
 		t.Errorf("done must carry no findings, got %d", len(done.Findings))
 	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatal("done left the interactive work claim behind")
+	}
 }
 
 func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
@@ -154,6 +161,59 @@ func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
 	}
 	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil || !st.SlotHeld(f.clk.now()) {
 		t.Fatalf("push returned without preserving the unanswered primary slot: %+v", st.FireSlot)
+	}
+}
+
+func TestNextDryRunDoesNotClaimOrCompleteWaitRound(t *testing.T) {
+	base := time.Now().UTC()
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{dialect.CodexBotLogin}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	repo, pr, head := "owner/repo", 507, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.next(repo, pr)
+	if _, err := f.svc.UnclaimWork(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	f.clk.advance(time.Minute)
+	f.gh.mu.Lock()
+	review := ghapi.Review{
+		ID: 901, CommitID: head, State: "COMMENTED",
+		SubmittedAt: f.clk.now(), Body: "[review body]",
+	}
+	review.User.Login = dialect.CodexBotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], review)
+	f.gh.mu.Unlock()
+
+	cfg := f.cfg
+	cfg.DryRun = true
+	dry := NewService(cfg, f.gh, f.store, nil)
+	dry.now = f.clk.now
+	dry.localWorkFn = func(context.Context, string) (bool, string) {
+		return true, "uncommitted changes in the working tree"
+	}
+	before, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := dry.Next(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.wantAction(report, engine.ActionPush)
+	after, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run Next changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+	if _, ok := after.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatal("dry-run Next persisted an interactive work claim")
 	}
 }
 

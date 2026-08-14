@@ -80,6 +80,12 @@ type Service struct {
 	// sleepFn overrides how the waiter idles. Only tests set it — a replay must
 	// not spend real seconds to prove what the injected clock already decides.
 	sleepFn func(ctx context.Context, d time.Duration) error
+	// workOwnerFn gives tests stable interactive ownership without depending on
+	// a process environment or checkout path.
+	workOwnerFn func() (owner, by string)
+	// dispatchTokenFn lets tests identify the unattended session that already
+	// owns a dispatch claim. Production reads the per-session environment.
+	dispatchTokenFn func() string
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {

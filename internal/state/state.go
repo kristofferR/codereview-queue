@@ -535,6 +535,12 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// WorkClaims are short-lived PR-level leases held by interactive `crq next`,
+	// `crq wait`, and `crq loop` callers. Autofix dispatch consults them in its
+	// claiming CAS, so an unattended session cannot start work an agent has
+	// already taken. They are independent of the head because one interactive
+	// loop owns the PR across its fix, push, and re-review cycle.
+	WorkClaims map[string]WorkClaim `json:"work_claims,omitempty"`
 	// Fleet is what every repository inherits, recorded once for the whole fleet
 	// rather than in each host's env file. See fleet.go.
 	Fleet FleetDefaults `json:"fleet,omitempty"`
@@ -588,7 +594,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 8
+const WriterCaps = 9
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -623,6 +629,11 @@ const CapsFleetDefaults = 4
 // inheritance, so the dashboard must name it before claiming the saved answer
 // applies fleet-wide.
 const CapsSolver = 8
+
+// CapsWorkClaims is the capability an autofix watcher needs to honour
+// interactive PR ownership. Claim creation refuses to promise exclusivity
+// while a recently active autofix host predates it.
+const CapsWorkClaims = 9
 
 // CapsDispatchClarification is the capability that makes a head-scoped
 // clarification marker terminal for autofix dispatch. Older watchers preserve
@@ -1300,6 +1311,31 @@ func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	for i := range s.Archive {
 		r := &s.Archive[i]
 		if Key(r.Repo, r.PR) == key && r.DispatchHeld(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// OwnsLiveDispatch reports whether token is the unattended session currently
+// entitled to work on repo#pr. The claim may be on the current round, its
+// top-level mirror, or an archived round after the session pushed a new head.
+func (s *State) OwnsLiveDispatch(repo string, pr int, token string, now time.Time) bool {
+	if token == "" {
+		return false
+	}
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token && claim.Live(now) {
+		return true
+	}
+	if round := s.Round(repo, pr); round != nil && round.Dispatch != nil &&
+		round.Dispatch.Token == token && round.DispatchHeld(now) {
+		return true
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Dispatch != nil &&
+			round.Dispatch.Token == token && round.DispatchHeld(now) {
 			return true
 		}
 	}
@@ -2051,6 +2087,15 @@ func (s *State) Normalize(now time.Time) {
 	for key, claim := range s.Dispatches {
 		if !claim.Live(now) {
 			delete(s.Dispatches, key)
+		}
+	}
+	// An interrupted interactive loop must not dead-letter a PR. Unlike a
+	// running dispatch there is no background process to heartbeat while an
+	// agent edits, so the claim carries a generous fixed expiry and is renewed
+	// by every next/wait/loop call.
+	for key, claim := range s.WorkClaims {
+		if !claim.Live(now) {
+			delete(s.WorkClaims, key)
 		}
 	}
 	// Fold both hold representations before repairing the slot. The top-level

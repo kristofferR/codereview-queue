@@ -2929,10 +2929,39 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 		return updated, PumpResult{Action: "lost_race", Repo: repo, PR: pr}, true, nil
 	}
 	s.sync(ctx, updated)
-	if _, err := s.gh.PostIssueComment(ctx, repo, pr, mergedHoldComment()); err != nil && s.log != nil {
-		s.log.Printf("warning: %s#%d merged hold retired but its PR comment could not be posted: %v", repo, pr, err)
+	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, mergedHoldComment())
+	if commentErr != nil && s.log != nil {
+		s.log.Printf("warning: %s#%d merged hold retired but its PR comment could not be posted: %v", repo, pr, commentErr)
 	}
+	s.reconcileMergedHoldNotice(ctx, repo, pr, comment, commentErr)
 	return updated, result, true, nil
+}
+
+// reconcileMergedHoldNotice removes a retirement notice that raced with a
+// replacement hold, so the newest PR-visible status agrees with state.
+func (s *Service) reconcileMergedHoldNotice(
+	ctx context.Context,
+	repo string,
+	pr int,
+	comment ghapi.IssueComment,
+	commentErr error,
+) {
+	if commentErr != nil || comment.ID == 0 {
+		return
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: %s#%d could not confirm hold state after posting its retirement notice: %v", repo, pr, err)
+		}
+		return
+	}
+	if _, held := st.HeldPR(repo, pr); !held {
+		return
+	}
+	if err := s.gh.DeleteIssueComment(ctx, repo, comment.ID); err != nil && !errors.Is(err, ghapi.ErrNotFound) && s.log != nil {
+		s.log.Printf("warning: %s#%d was re-held before its retirement notice completed, but the stale notice could not be removed: %v", repo, pr, err)
+	}
 }
 
 // withoutMergedHold mirrors merged-hold cleanup for a dry run. Pump must make

@@ -2393,6 +2393,52 @@ func TestSweepMergedHoldDoesNotRetireAReplacementHoldAfterCASRetry(t *testing.T)
 	}
 }
 
+func TestSweepMergedHoldRemovesRetirementNoticeIfReheldBeforePostCompletes(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	gh.postHook = func() {
+		if _, err := svc.Hold(ctx, "owner/repo", 12, "waiting for security approval"); err != nil {
+			t.Errorf("re-hold during retirement post: %v", err)
+		}
+	}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, changed, err := svc.sweepMergedHold(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || result.Action != "skipped" {
+		t.Fatalf("result = %#v, changed = %t; want merged hold retired", result, changed)
+	}
+	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
+		t.Fatalf("delete calls = %v, want the stale retirement notice", gh.deleteCalls)
+	}
+	latest, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, held := latest.HeldPR("owner/repo", 12)
+	if !held || hold.Reason != "waiting for security approval" {
+		t.Fatalf("replacement hold = %+v, held = %t", hold, held)
+	}
+}
+
 func TestDryRunReportsMergedHeldPRWithoutMutatingState(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

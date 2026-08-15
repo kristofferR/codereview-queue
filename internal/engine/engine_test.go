@@ -574,8 +574,12 @@ func TestCommandHasCompletionReply(t *testing.T) {
 		Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1003,
 		AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second),
 	})
-	if !CommandHasCompletionReply(Observation{Events: declined}, policy, 1001) {
-		t.Fatal("a command answered by a declined re-review must not be re-adopted")
+	if CommandHasCompletionReply(Observation{Events: declined}, policy, 1001) {
+		t.Fatal("an unproven declined reply must remain adoptable while a first review may be queued")
+	}
+	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef123", SubmittedAt: t0.Add(-time.Minute)}
+	if !CommandHasCompletionReply(Observation{Events: declined, Reviews: []ReviewSeen{priorReview}}, policy, 1001) {
+		t.Fatal("a proven declined re-review must not be re-adopted")
 	}
 }
 

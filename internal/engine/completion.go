@@ -83,7 +83,7 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// leaving the bot out of reviewedBy meant an unreadable in-flight
 			// check was neither asked for nor waited on, and a clean primary
 			// could converge the round straight past it.
-			if (co.AutoActive || co.ActiveThisRound || commanded || co.ChecksUnknown) &&
+			if (co.AutoActive || co.ActiveThisRound || r.Co(cp.Login).SeenActiveAt != nil || commanded || co.ChecksUnknown) &&
 				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) &&
 				!coCheckUnable(obs, cp.Login) {
 				reviewedBy[cp.Login] = false
@@ -243,20 +243,29 @@ func primaryDeclinedRound(obs Observation, p Policy, firedAt time.Time) bool {
 }
 
 // CommandHasCompletionReply reports whether the specific command comment was
-// answered by a completion or declined re-review reply with no
-// in-progress/rate-limited/paused top summary contradicting it since. It ports
+// answered by a completion or a proven declined re-review reply with no
+// contradictory top summary since. It ports
 // v2's reviewCommandHasCompletionReply (the adoption guard: a command already
 // answered by a final reply belongs to a finished round and must not be
-// re-adopted as a fresh fire). Unlike the convergence fallback it does not
-// require a prior submitted review or gate on a failed summary — adoption only
-// asks "was this exact command already spoken for".
+// re-adopted as a fresh fire). A first-ever declined reply can arrive while a
+// real review is still queued, so it needs the same prior-review proof as the
+// convergence fallback; an explicit completion reply remains final on its own.
 func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool {
 	if commandID == 0 {
 		return false
 	}
 	for _, reply := range commandReplies(obs, p) {
-		if reply.commandID == commandID && reply.completion &&
-			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) {
+		if reply.commandID != commandID || !reply.completion {
+			continue
+		}
+		states := []dialect.EventKind{dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused}
+		if reply.declined {
+			if !botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) {
+				continue
+			}
+			states = append(states, dialect.EvFailed)
+		}
+		if !stateSince(obs, p, reply.commandAt, states...) {
 			return true
 		}
 	}

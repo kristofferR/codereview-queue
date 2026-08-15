@@ -248,6 +248,15 @@ func TestCompletionCheckEvidence(t *testing.T) {
 	if got := Completion(round, activeDone, wanted); !got.Done {
 		t.Fatalf("the active bot's completed check must satisfy the gate: %+v", got)
 	}
+	// Activity carried from a previous head is enough for self-heal to nudge a
+	// silent bot. It must also hold this round open through that grace period.
+	carriedAt := fired.Add(-time.Hour)
+	carried := state.Round{Head: head, FiredAt: &fired, CoBots: map[string]state.CoBotRound{
+		bugbotKey: {SeenActiveAt: &carriedAt},
+	}}
+	if got := Completion(carried, silent, wanted); got.Done {
+		t.Fatalf("carried self-heal activity must gate completion: %+v", got)
+	}
 }
 
 // TestCompletionVerdictIsParticipationOnly: a Macroscope approvability verdict

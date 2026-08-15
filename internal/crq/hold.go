@@ -55,11 +55,17 @@ func parseHoldKey(key string) (repo string, pr int, ok bool) {
 }
 
 func holdComment(repo string, pr int, reason string) string {
-	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", reason, repo, pr)
+	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", neutralizeMentions(reason), repo, pr)
 }
 
 func unholdComment() string {
 	return "<!-- crq:unhold -->\n▶️ The administrative hold has been released. crq may request automated reviews again."
+}
+
+// neutralizeMentions prevents free-form hold reasons from running a bot command
+// when rendered in a pull request comment. The original reason remains in state.
+func neutralizeMentions(text string) string {
+	return strings.ReplaceAll(text, "@", "@\u200b")
 }
 
 // sortHolds orders by repo then PR, so a listing is stable rather than however

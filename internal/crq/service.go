@@ -225,7 +225,7 @@ func (s *Service) reconcileHoldNotice(
 		return result
 	}
 	hold, held := st.HeldPR(result.Repo, result.PR)
-	if held && st.HoldToken(result.Repo, result.PR) == token {
+	if held && st.HoldToken(result.Repo, result.PR) == token && holdMatchesResult(hold, result) {
 		return result
 	}
 
@@ -244,6 +244,10 @@ func (s *Service) reconcileHoldNotice(
 		}
 	}
 	return result
+}
+
+func holdMatchesResult(hold Hold, result HoldResult) bool {
+	return result.At != nil && hold.Reason == result.Reason && hold.By == result.By && hold.At.Equal(*result.At)
 }
 
 func appendHoldWarning(current, next string) string {
@@ -273,6 +277,15 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 	}
 	if released {
 		s.sync(ctx, state)
+		comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, unholdComment())
+		if commentErr != nil {
+			result.Warning = "PR hold was released, but the release comment could not be posted: " + commentErr.Error()
+			if s.log != nil {
+				s.log.Printf("warning: %s#%d released but its PR comment could not be posted: %v", repo, pr, commentErr)
+			}
+		} else {
+			result.CommentURL = comment.URL
+		}
 		if s.log != nil {
 			s.log.Printf("%s#%d released", repo, pr)
 		}

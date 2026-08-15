@@ -58,6 +58,10 @@ func holdComment(repo string, pr int, reason string) string {
 	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", reason, repo, pr)
 }
 
+func unholdComment() string {
+	return "<!-- crq:unhold -->\n▶️ The administrative hold has been released. crq may request automated reviews again."
+}
+
 // sortHolds orders by repo then PR, so a listing is stable rather than however
 // the map happened to iterate.
 func sortHolds(holds []HoldResult) {

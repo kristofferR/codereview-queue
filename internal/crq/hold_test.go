@@ -133,6 +133,74 @@ func TestHoldRemovesNoticeIfReleasedBeforePostCompletes(t *testing.T) {
 	}
 }
 
+func TestHoldRemovesNoticeIfLegacyWriterReplacesTheHold(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	replacementAt := now.Add(time.Minute)
+	gh.postHook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			// A tolerant older writer changes Holds but preserves the unknown
+			// HoldTokens member byte-for-byte.
+			st.Holds[QueueKey("owner/repo", 12)] = Hold{
+				Reason: "waiting for security approval",
+				By:     "old-daemon",
+				At:     replacementAt,
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("replace hold during post: %v", err)
+		}
+	}
+
+	result, err := svc.Hold(ctx, "owner/repo", 12, "waiting for product approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Held || result.Reason != "waiting for security approval" || result.By != "old-daemon" ||
+		result.At == nil || !result.At.Equal(replacementAt) {
+		t.Fatalf("replacement hold was not reported: %+v", result)
+	}
+	if result.CommentURL != "" {
+		t.Fatalf("stale hold notice returned as current: %+v", result)
+	}
+	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
+		t.Fatalf("delete calls = %v, want the stale hold comment", gh.deleteCalls)
+	}
+}
+
+func TestUnholdPostsReleaseNotice(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting for product approval", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	result, err := svc.Unhold(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Held || result.Warning != "" {
+		t.Fatalf("unexpected unhold result: %+v", result)
+	}
+	if len(gh.posted) != 1 || !strings.Contains(gh.posted[0], "<!-- crq:unhold -->") ||
+		!strings.Contains(gh.posted[0], "hold has been released") {
+		t.Fatalf("posted comments = %v, want one release notice", gh.posted)
+	}
+}
+
 // The race crq hold exists to close is between selecting a round and writing the
 // reservation. Checking the hold only at selection leaves exactly that window
 // open, so the command could return successfully while a daemon fired anyway.

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type retryWorkClaimStore struct {
@@ -29,6 +31,13 @@ type delayedWorkClaimStore struct {
 	once             sync.Once
 }
 
+type throttledWorkClaimStore struct {
+	StateStore
+	err     error
+	updated chan struct{}
+	once    sync.Once
+}
+
 func (s *cancelingWorkClaimStore) Update(ctx context.Context, _ func(*State) error) (State, error) {
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
@@ -39,6 +48,19 @@ func (s *delayedWorkClaimStore) Update(ctx context.Context, mutate func(*State) 
 	st, err := s.StateStore.Update(ctx, mutate)
 	if err == nil {
 		s.once.Do(s.afterFirstUpdate)
+	}
+	return st, err
+}
+
+func (s *throttledWorkClaimStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if s.err != nil {
+		err := s.err
+		s.err = nil
+		return State{}, err
+	}
+	st, err := s.StateStore.Update(ctx, mutate)
+	if err == nil && s.updated != nil {
+		s.once.Do(func() { close(s.updated) })
 	}
 	return st, err
 }
@@ -360,7 +382,7 @@ func TestHeartbeatIgnoresCancellationDuringNormalShutdown(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svc.heartbeatWorkClaim(ctx, "owner/repo", 20, ticks, errs, cancel)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 20, time.Now().Add(WorkClaimTTL), ticks, errs, cancel)
 	}()
 
 	ticks <- time.Now()
@@ -371,6 +393,100 @@ func TestHeartbeatIgnoresCancellationDuringNormalShutdown(t *testing.T) {
 	case err := <-errs:
 		t.Fatalf("normal shutdown published heartbeat error: %v", err)
 	default:
+	}
+}
+
+func TestHeartbeatRetriesThrottleWhileLeaseIsLive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	owner := workClaimService(t, baseStore, cfg, "session-a", "mac:feature", base)
+	claim, err := owner.claimInteractiveWork(ctx, "owner/repo", 24)
+	if err != nil || !claim.acquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+
+	now = base.Add(WorkClaimTTL - workClaimRenewalInterval + time.Second)
+	store := &throttledWorkClaimStore{
+		StateStore: baseStore,
+		err:        &ghapi.RateLimitError{Kind: "primary"},
+		updated:    make(chan struct{}),
+	}
+	svc := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	svc.now = func() time.Time { return now }
+	var slept time.Duration
+	svc.sleepFn = func(_ context.Context, delay time.Duration) error {
+		slept += delay
+		now = now.Add(delay)
+		return nil
+	}
+	ticks := make(chan time.Time, 1)
+	errs := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 24, claim.until, ticks, errs, cancel)
+	}()
+
+	ticks <- now
+	<-store.updated
+	cancel()
+	<-done
+	if slept != svc.waitTick() {
+		t.Fatalf("throttled heartbeat slept %s, want %s", slept, svc.waitTick())
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("recoverable throttle published heartbeat error: %v", err)
+	default:
+	}
+	st, _, err := baseStore.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, ok := st.WorkClaim("owner/repo", 24, now)
+	if !ok || !persisted.ExpiresAt.Equal(now.Add(WorkClaimTTL)) {
+		t.Fatalf("renewed claim = %+v, %t", persisted, ok)
+	}
+}
+
+func TestHeartbeatStopsWhenThrottleOutlivesLease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := time.Now().UTC()
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	owner := workClaimService(t, baseStore, cfg, "session-a", "mac:feature", base)
+	claim, err := owner.claimInteractiveWork(ctx, "owner/repo", 25)
+	if err != nil || !claim.acquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+
+	now := base.Add(WorkClaimTTL - workClaimRenewalInterval + time.Second)
+	store := &throttledWorkClaimStore{
+		StateStore: baseStore,
+		err: &ghapi.RateLimitError{
+			Kind:  "primary",
+			Until: time.Now().Add(2 * workClaimRenewalInterval),
+		},
+	}
+	svc := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	ticks := make(chan time.Time, 1)
+	ticks <- now
+	errs := make(chan error, 1)
+	svc.heartbeatWorkClaim(ctx, "owner/repo", 25, claim.until, ticks, errs, cancel)
+
+	if ctx.Err() == nil {
+		t.Fatal("heartbeat left the loop running after renewal became impossible")
+	}
+	select {
+	case err := <-errs:
+		if !strings.Contains(err.Error(), "before lease expires") {
+			t.Fatalf("heartbeat error = %v", err)
+		}
+	default:
+		t.Fatal("heartbeat did not publish the renewal failure")
 	}
 }
 

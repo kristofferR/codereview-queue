@@ -14,6 +14,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // WorkClaimTTL is long enough for a substantial fix pass, but finite so an
@@ -270,9 +271,11 @@ func terminalInteractiveAction(action string) bool {
 // the review round is active and leaves it in place when returning findings.
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
 	repo = NormalizeRepo(repo)
+	var claim workClaimOutcome
 	for {
 		lastRef, refErr := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
-		claim, err := s.claimInteractiveWork(ctx, repo, pr)
+		var err error
+		claim, err = s.claimInteractiveWork(ctx, repo, pr)
 		if err != nil {
 			return FeedbackReport{}, 1, err
 		}
@@ -302,7 +305,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		defer close(heartbeatDone)
 		ticker := time.NewTicker(workClaimRenewalInterval)
 		defer ticker.Stop()
-		s.heartbeatWorkClaim(loopCtx, repo, pr, ticker.C, heartbeatErr, cancel)
+		s.heartbeatWorkClaim(loopCtx, repo, pr, claim.until, ticker.C, heartbeatErr, cancel)
 	}()
 
 	report, code, loopErr := s.loopClaimed(loopCtx, repo, pr)
@@ -329,6 +332,7 @@ func (s *Service) heartbeatWorkClaim(
 	ctx context.Context,
 	repo string,
 	pr int,
+	leaseUntil time.Time,
 	ticks <-chan time.Time,
 	heartbeatErr chan<- error,
 	cancel context.CancelFunc,
@@ -338,22 +342,43 @@ func (s *Service) heartbeatWorkClaim(
 		case <-ctx.Done():
 			return
 		case <-ticks:
-			renewed, err := s.claimInteractiveWork(ctx, repo, pr)
-			if err == nil && !renewed.acquired {
-				err = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
-			}
-			if err == nil {
-				continue
-			}
-			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+			for {
+				renewed, err := s.claimInteractiveWork(ctx, repo, pr)
+				if err == nil && !renewed.acquired {
+					err = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
+				}
+				if err == nil {
+					leaseUntil = renewed.until
+					break
+				}
+				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+					return
+				}
+				wait, throttled := ghapi.ThrottleWait(err)
+				if throttled {
+					if wait <= 0 {
+						wait = s.waitTick()
+					}
+					now := s.clock()
+					if !leaseUntil.IsZero() && now.Add(wait).Before(leaseUntil) {
+						if sleepErr := s.sleep(ctx, wait); sleepErr == nil {
+							continue
+						} else if errors.Is(sleepErr, context.Canceled) && ctx.Err() != nil {
+							return
+						} else {
+							err = sleepErr
+						}
+					} else {
+						err = fmt.Errorf("cannot renew interactive work claim before lease expires at %s: %w", leaseUntil.UTC().Format(time.RFC3339), err)
+					}
+				}
+				select {
+				case heartbeatErr <- err:
+				default:
+				}
+				cancel()
 				return
 			}
-			select {
-			case heartbeatErr <- err:
-			default:
-			}
-			cancel()
-			return
 		}
 	}
 }

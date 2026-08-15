@@ -239,6 +239,73 @@ func TestInteractiveClaimRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
 	}
 }
 
+func TestFirstHeartbeatUsesExistingLeaseExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)
+	leaseUntil := now.Add(workClaimRenewalInterval + 5*time.Second)
+	if got := workClaimFirstHeartbeatDelay(now, leaseUntil); got != 5*time.Second {
+		t.Fatalf("first heartbeat delay = %s, want 5s", got)
+	}
+}
+
+func TestHeartbeatDoesNotRenewBeforeFirstLeaseTick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := workClaimService(t, store, cfg, "session-a", "mac:feature", base)
+	claim, err := svc.claimInteractiveWork(ctx, "owner/repo", 27)
+	if err != nil || !claim.acquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now = base.Add(WorkClaimTTL - workClaimRenewalInterval + time.Second)
+	svc.now = func() time.Time { return now }
+	first := make(chan time.Time)
+	errs := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 27, claim.until, first, nil, errs, cancel)
+	}()
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("heartbeat renewed before first lease tick: revision %d -> %d", before.Rev, after.Rev)
+	}
+
+	first <- now
+	deadline := time.After(time.Second)
+	for {
+		after, _, err = store.Load(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Rev > before.Rev {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("heartbeat did not renew after first lease tick")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	select {
+	case err := <-errs:
+		t.Fatalf("heartbeat error: %v", err)
+	default:
+	}
+}
+
 func TestInteractiveReleaseNormalizesRepo(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -382,7 +449,7 @@ func TestHeartbeatIgnoresCancellationDuringNormalShutdown(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svc.heartbeatWorkClaim(ctx, "owner/repo", 20, time.Now().Add(WorkClaimTTL), ticks, errs, cancel)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 20, time.Now().Add(WorkClaimTTL), nil, ticks, errs, cancel)
 	}()
 
 	ticks <- time.Now()
@@ -427,7 +494,7 @@ func TestHeartbeatRetriesThrottleWhileLeaseIsLive(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svc.heartbeatWorkClaim(ctx, "owner/repo", 24, claim.until, ticks, errs, cancel)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 24, claim.until, nil, ticks, errs, cancel)
 	}()
 
 	ticks <- now
@@ -483,7 +550,7 @@ func TestHeartbeatRetriesTransientFailureWhileLeaseIsLive(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svc.heartbeatWorkClaim(ctx, "owner/repo", 26, claim.until, ticks, errs, cancel)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 26, claim.until, nil, ticks, errs, cancel)
 	}()
 
 	ticks <- now
@@ -523,7 +590,7 @@ func TestHeartbeatStopsWhenThrottleOutlivesLease(t *testing.T) {
 	ticks := make(chan time.Time, 1)
 	ticks <- now
 	errs := make(chan error, 1)
-	svc.heartbeatWorkClaim(ctx, "owner/repo", 25, claim.until, ticks, errs, cancel)
+	svc.heartbeatWorkClaim(ctx, "owner/repo", 25, claim.until, nil, ticks, errs, cancel)
 
 	if ctx.Err() == nil {
 		t.Fatal("heartbeat left the loop running after renewal became impossible")

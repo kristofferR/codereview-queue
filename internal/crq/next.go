@@ -26,6 +26,9 @@ type NextReport struct {
 	// `crq next` wire contract: Next does not fetch the head repository, while
 	// watch already has the Pull object and must carry that fact into the CAS.
 	Fork bool `json:"-"`
+	// dispatchUntil is the locally known expiry of a watch-only dispatch claim.
+	// It lets the session stop at the lease boundary if shared-state writes fail.
+	dispatchUntil time.Time
 
 	// RecheckAfter is when to call `crq next` again — the ONE time field, set
 	// for both hold and wait so there is never a question of which to read. crq

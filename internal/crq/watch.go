@@ -1191,6 +1191,7 @@ func (s *Service) claimDispatchModels(
 			return ErrNoChange
 		}
 		selectedModel = round.Dispatch.Model
+		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
@@ -1353,7 +1354,18 @@ func readLogTail(path string, limit int64) []byte {
 // over, so stop() ends this session rather than let two write one worktree.
 func (s *Service) beatDispatch(ctx context.Context, report NextReport, token string, stop func()) func() bool {
 	var lost atomic.Bool
+	markLost := func() {
+		if lost.CompareAndSwap(false, true) {
+			stop()
+		}
+	}
+	leaseUntil := report.dispatchUntil
+	if leaseUntil.IsZero() {
+		leaseUntil = s.clock().Add(DispatchTTL)
+	}
+	expiry := time.AfterFunc(max(leaseUntil.Sub(s.clock()), 0), markLost)
 	go func() {
+		defer expiry.Stop()
 		ticker := time.NewTicker(DispatchTTL / 3)
 		defer ticker.Stop()
 		for {
@@ -1361,34 +1373,38 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				var taken, gone bool
+				var updated, taken, gone bool
+				var refreshedAt time.Time
 				if _, err := s.store.Update(ctx, func(st *State) error {
 					// Reset per ATTEMPT, not per tick: Update re-runs this
 					// closure on a CAS conflict, and a verdict left over from
 					// an attempt that lost would be read as this one's.
-					taken, gone = false, false
-					var updated bool
-					updated, taken, gone = refreshDispatch(st, report, token, s.clock())
+					updated, taken, gone = false, false, false
+					refreshedAt = s.clock()
+					updated, taken, gone = refreshDispatch(st, report, token, refreshedAt)
 					if !updated {
 						return ErrNoChange
 					}
 					return nil
 				}); err != nil && !errors.Is(err, ErrNoChange) {
-					// A failed write is not proof of anything; the next tick
-					// decides.
+					// The local expiry timer stops the session if writes remain
+					// unavailable for the rest of this lease.
 					continue
 				}
 				if taken {
 					// Somebody else is running a session for this round. Two in
 					// one worktree is worse than none.
-					lost.Store(true)
-					stop()
+					markLost()
 					return
 				}
 				// The token is nowhere in current or archived state. There is
 				// nothing left to refresh; let the session finish.
 				if gone {
 					return
+				}
+				if updated {
+					leaseUntil = refreshedAt.Add(DispatchTTL)
+					expiry.Reset(max(leaseUntil.Sub(s.clock()), 0))
 				}
 			}
 		}

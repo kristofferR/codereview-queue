@@ -139,6 +139,30 @@ func TestDispatchHeartbeatLosesToWorkClaimAfterExpiry(t *testing.T) {
 	}
 }
 
+func TestDispatchHeartbeatStopsAtKnownLeaseExpiry(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := make(chan struct{})
+	report := NextReport{
+		Repo: "owner/thing", PR: 4, Head: "abcdef123",
+		dispatchUntil: time.Now().Add(20 * time.Millisecond),
+	}
+	lost := svc.beatDispatch(ctx, report, "old-token", func() {
+		cancel()
+		close(stopped)
+	})
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch continued past its locally known lease expiry")
+	}
+	if !lost() {
+		t.Fatal("expired dispatch was not reported as lost")
+	}
+}
+
 func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"
@@ -1772,6 +1796,9 @@ func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
 	}
 	if model != "new-model" {
 		t.Fatalf("selected model = %q, want the ranking written immediately before the CAS", model)
+	}
+	if report.dispatchUntil.IsZero() {
+		t.Fatal("dispatch claim did not retain its locally known lease expiry")
 	}
 	svc.releaseDispatch(ctx, report, "first", true)
 

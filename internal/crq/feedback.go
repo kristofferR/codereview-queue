@@ -139,6 +139,15 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 			if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
 				return FeedbackReport{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(repo, pr), err)
 			}
+			// noteCoAnswers can add the first durable proof that a self-heal
+			// reviewer is active. Reload it before completion so the same
+			// observation cannot converge past the reviewer it just restored.
+			fresh, _, err := s.store.Load(ctx)
+			if err != nil {
+				return FeedbackReport{}, err
+			}
+			st = fresh
+			round = st.Round(repo, pr)
 		}
 	}
 	pull := obs.pull

@@ -240,6 +240,42 @@ func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
 	}
 }
 
+func TestFeedbackRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, func(cfg *Config) {
+		for i := range cfg.CoBots {
+			if cfg.CoBots[i].Name == "bugbot" {
+				cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+				break
+			}
+		}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	f.gh.graphQL = noForcePush
+	repo, pr, sha := "o/r", 53, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
+	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
+		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
+	oldReview.User.Login = bugbotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+	f.botReview(repo, pr, 702, sha, base)
+	f.enqueue(repo, pr)
+
+	report, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged || report.ReviewedBy[bugbotLogin] {
+		t.Fatalf("Feedback skipped the carried reviewer wait: %+v", report)
+	}
+	round := f.round(repo, pr)
+	if round == nil || round.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("Feedback did not persist the carried reviewer activity: %+v", round)
+	}
+}
+
 func TestNoteCoAnswersCarriesActivityThroughConcurrentSupersede(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)

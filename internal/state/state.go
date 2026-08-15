@@ -548,6 +548,11 @@ type State struct {
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
+	// CoActivity keeps the latest observed activity for each co-reviewer on a
+	// pull request. Unlike Archive, it is not bounded: a closed PR may be
+	// reopened after its historical rounds have been evicted, and a silent
+	// check-only reviewer still needs to be eligible for self-heal then.
+	CoActivity map[string]map[string]time.Time `json:"co_activity,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -614,7 +619,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 9
+const WriterCaps = 10
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -1088,6 +1093,7 @@ func (s *State) PutRound(r Round) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
 	}
+	s.rememberCoActivity(r)
 	s.Rounds[Key(r.Repo, r.PR)] = r
 }
 
@@ -1116,8 +1122,9 @@ func (s *State) MoveToFront(repo string, pr int) bool {
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
 // for one PR" cannot happen by accident. Durable co-reviewer activity is
-// restored from archived rounds so reopening a PR does not forget a silent
-// check-only reviewer that worked on an earlier head.
+// restored from the per-PR index (and archived rounds written before that
+// index existed) so reopening a PR does not forget a silent check-only reviewer
+// that worked on an earlier head.
 func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Round, error) {
 	key := Key(repo, pr)
 	if s.Rounds == nil {
@@ -1135,18 +1142,58 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 		Phase:      PhaseQueued,
 		EnqueuedAt: now.UTC(),
 	}
-	s.carryArchivedCoActivity(&r)
+	s.carryCoActivity(&r)
 	s.Rounds[key] = r
 	return &r, nil
 }
 
-func (s *State) carryArchivedCoActivity(next *Round) {
+func (s *State) rememberCoActivity(r Round) {
+	key := Key(r.Repo, r.PR)
+	for login, co := range r.CoBots {
+		seenAt := co.SeenActiveAt
+		if co.AnsweredAt != nil && (seenAt == nil || seenAt.Before(*co.AnsweredAt)) {
+			seenAt = co.AnsweredAt
+		}
+		if seenAt == nil {
+			continue
+		}
+		if s.CoActivity == nil {
+			s.CoActivity = map[string]map[string]time.Time{}
+		}
+		activity := s.CoActivity[key]
+		if activity == nil {
+			activity = map[string]time.Time{}
+			s.CoActivity[key] = activity
+		}
+		login = coBotKey(login)
+		seen := seenAt.UTC()
+		if previous, ok := activity[login]; !ok || previous.Before(seen) {
+			activity[login] = seen
+		}
+	}
+}
+
+func carryCoActivity(next *Round, activity map[string]time.Time) {
+	for login, seenAt := range activity {
+		current := next.Co(login)
+		if current.SeenActiveAt != nil && !current.SeenActiveAt.Before(seenAt) {
+			continue
+		}
+		seen := seenAt.UTC()
+		current.SeenActiveAt = &seen
+		next.setCo(login, current)
+	}
+}
+
+func (s *State) carryCoActivity(next *Round) {
 	key := Key(next.Repo, next.PR)
+	carryCoActivity(next, s.CoActivity[key])
 	for i := len(s.Archive) - 1; i >= 0; i-- {
 		previous := s.Archive[i]
 		if Key(previous.Repo, previous.PR) != key {
 			continue
 		}
+		activity := make(map[string]time.Time, len(previous.CoBots))
 		for login, co := range previous.CoBots {
 			seenAt := co.SeenActiveAt
 			if seenAt == nil {
@@ -1157,14 +1204,9 @@ func (s *State) carryArchivedCoActivity(next *Round) {
 			if seenAt == nil {
 				continue
 			}
-			current := next.Co(login)
-			if current.SeenActiveAt != nil {
-				continue
-			}
-			seen := seenAt.UTC()
-			current.SeenActiveAt = &seen
-			next.setCo(login, current)
+			activity[login] = seenAt.UTC()
 		}
+		carryCoActivity(next, activity)
 	}
 }
 
@@ -1177,6 +1219,7 @@ func (s *State) EndRound(repo string, pr int, reason string) {
 		return
 	}
 	r.Abandon(reason)
+	s.rememberCoActivity(r)
 	delete(s.Rounds, key)
 	s.Archive = append(s.Archive, r)
 	if len(s.Archive) > ArchiveMax {
@@ -2130,6 +2173,7 @@ func (s *State) Normalize(now time.Time) {
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()
+		s.rememberCoActivity(s.Archive[i])
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
@@ -2137,10 +2181,11 @@ func (s *State) Normalize(now time.Time) {
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()
 		r.inferCoOnly()
+		s.rememberCoActivity(r)
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
 		// replacement without copying it. Repair that replacement on load.
-		s.carryArchivedCoActivity(&r)
+		s.carryCoActivity(&r)
 		s.Rounds[key] = r
 	}
 }

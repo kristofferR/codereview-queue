@@ -1202,6 +1202,13 @@ func carryCoActivity(next *Round, activity map[string]time.Time) bool {
 	for login, seenAt := range activity {
 		current := next.Co(login)
 		if current.SeenActiveAt != nil && !current.SeenActiveAt.Before(seenAt) {
+			// The activity may already be present because a newer writer carried
+			// it before an older writer completed this replacement round. Its
+			// timestamp predating the round preserves that provenance even when
+			// there is nothing left to copy from the activity index.
+			if current.AnsweredAt == nil && !next.EnqueuedAt.IsZero() && current.SeenActiveAt.Before(next.EnqueuedAt) {
+				restored = true
+			}
 			continue
 		}
 		seen := seenAt.UTC()

@@ -372,6 +372,43 @@ func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequeuesCompletedRoundWithPreservedRestoredActivity(t *testing.T) {
+	seen := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: t0.Add(time.Minute),
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("preserved restored activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if !r.PrimarySettled {
+		t.Fatal("restored co-review work must preserve the completed primary side")
+	}
+}
+
+func TestNormalizeDoesNotRequeueCompletedRoundForCurrentActivity(t *testing.T) {
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	if r := s.Round(current.Repo, current.PR); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("current-round activity must keep the completed dedupe marker, got %#v", r)
+	}
+}
+
 func TestNormalizeDoesNotRequeueCompletedRoundForItsLegacyAnswer(t *testing.T) {
 	answered := t0.Add(time.Second)
 	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted,

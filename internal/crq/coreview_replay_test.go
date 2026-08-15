@@ -905,6 +905,15 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 				},
 			}
 
+			// Pump records activity before it parks the wait. The stale summary
+			// must retain its historical provenance rather than claim that the
+			// reviewer answered this unanchored round.
+			if err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), obs, base); err != nil {
+				t.Fatal(err)
+			}
+			if co := f.round(repo, pr).Co(bugbotLogin); co.AnsweredAt != nil {
+				t.Fatalf("historical activity answered the replacement round: %+v", co)
+			}
 			if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
 				t.Fatal(err)
 			}

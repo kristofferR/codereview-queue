@@ -2919,17 +2919,26 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	if s.cfg.DryRun {
 		return nil // DryRun writes nothing, bookkeeping included
 	}
-	var answered []string
+	var active []string
+	answered := map[string]bool{}
 	for _, cb := range cfg.CoBots {
 		// Setup status is not head-scoped: activity on an earlier head still
 		// proves that the reviewer is installed and working.
 		if engine.CoReviewerActive(obs, cb.Login) {
-			answered = append(answered, cb.Login)
+			active = append(active, cb.Login)
+			// A fresh round may adopt activity that arrived before this observation,
+			// but carried activity keeps its historical provenance until the round
+			// has an evidence floor. Explicit head evidence is always safe.
+			co := round.Co(cb.Login)
+			carried := co.SeenActiveAt != nil && co.AnsweredAt == nil
+			anchored := round.FiredAt != nil || co.CommandedAt != nil
+			answered[dialect.NormalizeBotName(cb.Login)] = engine.CoReviewedHead(obs, cb.Login) ||
+				(!carried || anchored) && obs.CoSeenFor(cb.Login).ActiveThisRound
 		}
 	}
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
-	if len(answered) == 0 && !primary {
+	if len(active) == 0 && !primary {
 		return nil
 	}
 	if _, err := s.store.Update(ctx, func(st *State) error {
@@ -2941,7 +2950,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 					continue
 				}
 				before := archived.CoBots
-				for _, login := range answered {
+				for _, login := range active {
 					archived.NoteCoActivity(login, now)
 				}
 				if sameCoActivity(before, archived.CoBots) {
@@ -2954,7 +2963,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// bounded archive before this callback runs. Preserve the activity
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
-			for _, login := range answered {
+			for _, login := range active {
 				round.NoteCoActivity(login, now)
 			}
 			if sameCoActivity(before, round.CoBots) {
@@ -2969,7 +2978,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// essential for a silent check-only reviewer to be eligible for
 			// self-heal on the new head.
 			before := r.CoBots
-			for _, login := range answered {
+			for _, login := range active {
 				r.NoteCoActivity(login, now)
 			}
 			if sameCoActivity(before, r.CoBots) {
@@ -2984,13 +2993,17 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			return nil
 		}
 		before, beforePrimary := r.CoBots, r.PrimaryAnsweredAt
-		for _, login := range answered {
-			r.NoteCoAnswer(login, now)
+		for _, login := range active {
+			if answered[dialect.NormalizeBotName(login)] {
+				r.NoteCoAnswer(login, now)
+			} else {
+				r.NoteCoActivity(login, now)
+			}
 		}
 		if primary {
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
-		if sameCoAnswers(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
+		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
 			return ErrNoChange
 		}
 		st.PutRound(*r)

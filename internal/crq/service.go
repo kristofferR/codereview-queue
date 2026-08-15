@@ -2905,11 +2905,12 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 	if s.cfg.DryRun {
 		return withoutMergedHold(st, repo, pr), result, true, nil
 	}
+	token := st.HoldToken(repo, pr)
 	removed := false
 	updated, err := s.store.Update(ctx, func(current *State) error {
 		removed = false
 		got, held := current.HeldPR(repo, pr)
-		if !held || got.Reason != hold.Reason || got.By != hold.By || !got.At.Equal(hold.At) {
+		if !held || current.HoldToken(repo, pr) != token || got.Reason != hold.Reason || got.By != hold.By || !got.At.Equal(hold.At) {
 			return ErrNoChange
 		}
 		current.Unhold(repo, pr)

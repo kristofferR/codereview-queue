@@ -504,12 +504,12 @@ func (retryMergedHoldStore) Load(context.Context) (State, Revision, error) {
 
 func (s retryMergedHoldStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
 	first := DefaultState(s.cfg)
-	first.Hold("owner/repo", 12, "original hold", "operator", s.at)
+	first.HoldWithToken("owner/repo", 12, "original hold", "operator", s.at, "first")
 	if err := mutate(&first); err != nil {
 		return State{}, err
 	}
 	second := DefaultState(s.cfg)
-	second.Hold("owner/repo", 12, "replacement hold", "operator", s.at)
+	second.HoldWithToken("owner/repo", 12, "original hold", "operator", s.at, "replacement")
 	if err := mutate(&second); err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return second, nil
@@ -2379,7 +2379,7 @@ func TestSweepMergedHoldDoesNotRetireAReplacementHoldAfterCASRetry(t *testing.T)
 	now := time.Now().UTC()
 	svc := NewService(cfg, gh, retryMergedHoldStore{cfg: cfg, at: now}, nil)
 	st := DefaultState(cfg)
-	st.Hold("owner/repo", 12, "original hold", "operator", now)
+	st.HoldWithToken("owner/repo", 12, "original hold", "operator", now, "first")
 
 	_, result, changed, err := svc.sweepMergedHold(ctx, st)
 	if err != nil {

@@ -1077,7 +1077,7 @@ func (s *Service) claimDispatchModels(
 	var seen string
 	var selectedModel string
 	var selectedFindings []dialect.Finding
-	_, err := s.store.Update(ctx, func(st *State) error {
+	st, err := s.store.Update(ctx, func(st *State) error {
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
 		// claim; a concurrent off or a failed earlier Load must fail closed.
@@ -1198,6 +1198,34 @@ func (s *Service) claimDispatchModels(
 	})
 	if err != nil {
 		return false, err.Error(), false, ""
+	}
+	if reason == "" {
+		// Update may spend longer than DispatchTTL retrying transport or CAS
+		// operations after the mutation commits. Renew a stale committed claim
+		// before handing it to a session, without spending another attempt.
+		for !st.OwnsLiveDispatch(report.Repo, report.PR, token, s.clock()) {
+			var updated, taken, gone bool
+			var refreshedAt time.Time
+			st, err = s.store.Update(ctx, func(st *State) error {
+				updated, taken, gone = false, false, false
+				refreshedAt = s.clock()
+				updated, taken, gone = refreshDispatch(st, *report, token, refreshedAt)
+				if !updated {
+					return ErrNoChange
+				}
+				return nil
+			})
+			if err != nil {
+				return false, err.Error(), false, ""
+			}
+			if taken {
+				return false, "another watcher is already fixing this pull request", true, ""
+			}
+			if gone || !updated {
+				return false, "the committed dispatch claim is no longer owned by this session", true, ""
+			}
+			report.dispatchUntil = refreshedAt.Add(DispatchTTL)
+		}
 	}
 	if reason == "" {
 		// The session receives exactly the finding set selected by the same

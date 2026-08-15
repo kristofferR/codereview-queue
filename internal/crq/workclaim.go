@@ -35,7 +35,8 @@ type workClaimOutcome struct {
 }
 
 type workOwnerCache struct {
-	once  sync.Once
+	mu    sync.Mutex
+	ready bool
 	owner string
 	by    string
 }
@@ -178,23 +179,49 @@ func (s *Service) workClaimOwner(ctx context.Context) (string, string) {
 		return s.workOwnerFn()
 	}
 	if s.workOwnerCache != nil {
-		s.workOwnerCache.once.Do(func() {
-			s.workOwnerCache.owner, s.workOwnerCache.by = s.resolveWorkClaimOwner(ctx)
-		})
-		return s.workOwnerCache.owner, s.workOwnerCache.by
+		cache := s.workOwnerCache
+		cache.mu.Lock()
+		if cache.ready {
+			owner, by := cache.owner, cache.by
+			cache.mu.Unlock()
+			return owner, by
+		}
+		cache.mu.Unlock()
+
+		owner, by, cacheable := s.resolveWorkClaimOwner(ctx)
+		if !cacheable {
+			return owner, by
+		}
+		cache.mu.Lock()
+		if !cache.ready {
+			cache.owner, cache.by, cache.ready = owner, by, true
+		}
+		owner, by = cache.owner, cache.by
+		cache.mu.Unlock()
+		return owner, by
 	}
-	return s.resolveWorkClaimOwner(ctx)
+	owner, by, _ := s.resolveWorkClaimOwner(ctx)
+	return owner, by
 }
 
-func (s *Service) resolveWorkClaimOwner(ctx context.Context) (string, string) {
+func (s *Service) resolveWorkClaimOwner(ctx context.Context) (string, string, bool) {
 	dir := s.cfg.WorkDir
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, workOwnerProbeLimit)
-	defer cancel()
-	if root, err := gitDir(probeCtx, dir, "rev-parse", "--show-toplevel"); err == nil {
-		dir = root
+	session := firstWorkOwnerValue(
+		s.cfg.WorkOwner,
+		os.Getenv("CODEX_THREAD_ID"),
+		os.Getenv("CLAUDE_SESSION_ID"),
+	)
+	cacheable := session != ""
+	if session == "" {
+		probeCtx, cancel := context.WithTimeout(ctx, workOwnerProbeLimit)
+		defer cancel()
+		if root, err := gitDir(probeCtx, dir, "rev-parse", "--show-toplevel"); err == nil {
+			dir = root
+			cacheable = true
+		}
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
@@ -202,22 +229,17 @@ func (s *Service) resolveWorkClaimOwner(ctx context.Context) (string, string) {
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
-	session := firstWorkOwnerValue(
-		s.cfg.WorkOwner,
-		os.Getenv("CODEX_THREAD_ID"),
-		os.Getenv("CLAUDE_SESSION_ID"),
-	)
-	identity := session
-	if identity == "" {
-		identity = dir
+	identity := s.cfg.Host + "\x00" + dir
+	if session != "" {
+		identity = session
 	}
-	sum := sha256.Sum256([]byte(s.cfg.Host + "\x00" + identity))
+	sum := sha256.Sum256([]byte(identity))
 	owner := hex.EncodeToString(sum[:])
 	by := s.cfg.Host
 	if base := filepath.Base(dir); base != "" && base != "." {
 		by += ":" + base
 	}
-	return owner, by
+	return owner, by, cacheable
 }
 
 func firstWorkOwnerValue(values ...string) string {

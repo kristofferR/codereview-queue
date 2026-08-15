@@ -435,6 +435,54 @@ func TestFallbackWorkOwnerUsesCheckoutRoot(t *testing.T) {
 	}
 }
 
+func TestFallbackWorkOwnerDoesNotCacheFailedCheckoutProbe(t *testing.T) {
+	t.Setenv("CRQ_WORK_OWNER", "")
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+	root := t.TempDir()
+	if _, err := gitDir(context.Background(), root, "init", "--quiet"); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "internal", "crq")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := firingConfig()
+	cfg.Host = "test-host"
+	cfg.WorkDir = nested
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.workClaimOwner(cancelled)
+	if svc.workOwnerCache.ready {
+		t.Fatal("failed checkout probe was cached")
+	}
+
+	owner, _ := svc.workClaimOwner(context.Background())
+	cfg.WorkDir = root
+	want, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner(context.Background())
+	if owner != want {
+		t.Fatalf("owner after retry %q, want checkout owner %q", owner, want)
+	}
+	if !svc.workOwnerCache.ready {
+		t.Fatal("successful checkout probe was not cached")
+	}
+}
+
+func TestConfiguredWorkOwnerIsStableAcrossHosts(t *testing.T) {
+	cfg := firingConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.WorkOwner = "stable-session"
+	cfg.Host = "mac"
+	macOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner(context.Background())
+	cfg.Host = "linux"
+	linuxOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner(context.Background())
+	if linuxOwner != macOwner {
+		t.Fatalf("owner changed across hosts: %q != %q", linuxOwner, macOwner)
+	}
+}
+
 func TestHeartbeatIgnoresCancellationDuringNormalShutdown(t *testing.T) {
 	cfg := firingConfig()
 	store := &cancelingWorkClaimStore{

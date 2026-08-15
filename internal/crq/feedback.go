@@ -161,10 +161,12 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	}
 
 	// The completion anchor is the current round only when it still tracks this
-	// head. A stale or missing round yields a headless anchor (FiredAt nil), so
-	// only head-matching reviews and SHA-bound Codex summaries can count — the
-	// engine's rule set reproduces v2's "no wait context" behavior.
-	completionRound := Round{Repo: repo, PR: pr, Head: head}
+	// head. Before enqueue, preview the replacement round so durable activity
+	// from a silent co-reviewer still gates the first decision for this head.
+	// Otherwise Next can decide "done", enqueue a round that restores that
+	// activity, park it awaiting the co-reviewer, and still return the stale
+	// pre-enqueue verdict.
+	completionRound := st.PreviewRound(repo, pr, head, now)
 	if round != nil && round.Head == head {
 		completionRound = *round
 	}

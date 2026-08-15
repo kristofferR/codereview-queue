@@ -1220,6 +1220,21 @@ func (s *State) carryCoActivity(next *Round) {
 	}
 }
 
+// PreviewRound builds the round NewRound would create without changing state.
+// Read-only decisions use it before enqueue so durable reviewer activity is
+// visible on the same pass that first observes a replacement head.
+func (s *State) PreviewRound(repo string, pr int, head string, now time.Time) Round {
+	r := Round{
+		Repo:       strings.ToLower(repo),
+		PR:         pr,
+		Head:       head,
+		Phase:      PhaseQueued,
+		EnqueuedAt: now.UTC(),
+	}
+	s.carryCoActivity(&r)
+	return r
+}
+
 // EndRound abandons the current round (superseded/closed/cancelled) and moves
 // it to the archive. The PR has no round afterwards.
 func (s *State) EndRound(repo string, pr int, reason string) {

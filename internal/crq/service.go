@@ -1739,6 +1739,26 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	if !obs.HeadAt.IsZero() {
 		anchor = obs.HeadAt
 	}
+	// A carried reviewer can make a SHA-less clean summary from an earlier head
+	// gate this wait. If the PR was reset to an old commit, the commit date is
+	// older than that stale summary; the force-push event is the true boundary
+	// at which this commit became the head again.
+	carried := false
+	for _, cp := range cfg.policy().CoReviewerPolicies() {
+		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil {
+			carried = true
+			break
+		}
+	}
+	if carried {
+		headAt, err := s.headForcePushCutoff(ctx, round.Repo, round.PR)
+		if err != nil {
+			return result, err
+		}
+		if headAt.After(anchor) {
+			anchor = headAt
+		}
+	}
 	// cfg.Bot, not this process's startup one: the primary is a fleet setting
 	// like any other, and reading the stale one made a review by the primary
 	// somebody had just changed fail to move the floor — so with no HeadAt to

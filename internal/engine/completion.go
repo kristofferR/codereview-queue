@@ -62,9 +62,19 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	// Such a round need not have fired to engage this gate: CodeRabbit cannot
 	// review, so crq resolves the round without ever posting its command and
 	// FiredAt stays nil while the co-reviewers do all of the work. The gate
-	// still keys on observed participation, never on mere configuration — an
-	// enabled-but-absent co-bot must not wedge a round nothing else will finish.
-	if r.FiredAt != nil || primaryUnavailable {
+	// also applies to durable activity previewed before enqueue: otherwise the
+	// first decision for a replacement head can return done before enqueue
+	// restores the reviewer and parks a wait. It still keys on participation,
+	// never on mere configuration — an enabled-but-absent co-bot must not wedge
+	// a round nothing else will finish.
+	carriedReviewer := false
+	for _, cp := range p.coReviewers() {
+		if cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil {
+			carriedReviewer = true
+			break
+		}
+	}
+	if r.FiredAt != nil || primaryUnavailable || carriedReviewer {
 		for _, cp := range p.coReviewers() {
 			if requiredBot(p, cp.Login) {
 				continue

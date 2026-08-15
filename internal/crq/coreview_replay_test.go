@@ -545,6 +545,7 @@ func TestQuotaFreePathsPersistActivityBeforeCompletion(t *testing.T) {
 func TestParkedCoReviewWaitPreservesSelfHealGraceForOldCommit(t *testing.T) {
 	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)
+	f.gh.graphQL = noForcePush
 	repo, pr, head := "o/r", 46, "abcdef123"
 	seenAt := base.Add(-time.Hour)
 	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base.Add(-time.Minute), 0)
@@ -585,6 +586,50 @@ func TestParkedCoReviewWaitPreservesSelfHealGraceForOldCommit(t *testing.T) {
 	f.svc.selfHealCoReviewers(f.ctx, f.cfg, *f.round(repo, pr), obs, base.Add(11*time.Minute))
 	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 1 {
 		t.Fatalf("self-heal did not fire after grace from enqueue elapsed, got %d posts", got)
+	}
+}
+
+func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, nil)
+	repo, pr, head := "o/r", 49, "abcdef123"
+	seenAt := base.Add(-time.Hour)
+	resetAt := base.Add(-time.Minute)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, seenAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.gh.graphQL = func(_ string, _ map[string]any, out any) error {
+		payload := `{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"createdAt":"` + resetAt.Format(time.RFC3339) + `"}]}}}}`
+		return json.Unmarshal([]byte(payload), out)
+	}
+	oldSummary := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin,
+		CreatedAt: base.Add(-30 * time.Minute)}
+	obs := engine.Observation{
+		Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base}},
+		Events:  []dialect.BotEvent{oldSummary},
+	}
+
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+		t.Fatal(err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(resetAt) {
+		t.Fatalf("co-review wait did not use the reset boundary: %+v", parked)
+	}
+	if got := engine.Completion(*parked, obs, f.cfg.policy()); got.ReviewedBy[bugbotLogin] {
+		t.Fatalf("old SHA-less summary satisfied the reset head: %+v", got)
+	}
+	obs.Events = append(obs.Events, dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin,
+		CreatedAt: base.Add(time.Minute)})
+	if got := engine.Completion(*parked, obs, f.cfg.policy()); !got.ReviewedBy[bugbotLogin] {
+		t.Fatalf("new SHA-less summary did not satisfy the reset head: %+v", got)
 	}
 }
 

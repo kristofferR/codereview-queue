@@ -67,6 +67,25 @@ func requireBugbot(cfg *Config) {
 	}
 }
 
+func onlyBugbot(cfg *Config) {
+	for i := range cfg.CoBots {
+		if cfg.CoBots[i].Name == "bugbot" {
+			cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+			break
+		}
+	}
+	cfg.FeedbackBots = cfg.RequiredBots
+}
+
+func seedCarriedBugbotEvidence(f *replayFixture, repo string, pr int, base time.Time) {
+	f.t.Helper()
+	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
+	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
+		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
+	oldReview.User.Login = bugbotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+}
+
 // macroscopeSettled appends Macroscope's settled marker to a finding body,
 // taking the wording from the golden corpus rather than a literal — this
 // file's invariant is that a reword which breaks the classifier breaks the
@@ -242,24 +261,12 @@ func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
 
 func TestFeedbackRecomputesAfterPersistingActivity(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
-	f := newCoReplayFixture(t, base, func(cfg *Config) {
-		for i := range cfg.CoBots {
-			if cfg.CoBots[i].Name == "bugbot" {
-				cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
-				break
-			}
-		}
-		cfg.FeedbackBots = cfg.RequiredBots
-	})
+	f := newCoReplayFixture(t, base, onlyBugbot)
 	f.gh.graphQL = noForcePush
 	repo, pr, sha := "o/r", 53, "abcdef1234567890"
 	f.openPull(repo, pr, sha)
 	f.setCommitDate(sha, base.Add(-time.Hour))
-	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
-	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
-		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
-	oldReview.User.Login = bugbotLogin
-	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+	seedCarriedBugbotEvidence(f, repo, pr, base)
 	f.botReview(repo, pr, 702, sha, base)
 	f.enqueue(repo, pr)
 
@@ -473,24 +480,12 @@ func TestPumpReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 
 func TestPumpRecomputesAfterPersistingActivity(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
-	f := newCoReplayFixture(t, base, func(cfg *Config) {
-		for i := range cfg.CoBots {
-			if cfg.CoBots[i].Name == "bugbot" {
-				cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
-				break
-			}
-		}
-		cfg.FeedbackBots = cfg.RequiredBots
-	})
+	f := newCoReplayFixture(t, base, onlyBugbot)
 	f.gh.graphQL = noForcePush
 	repo, pr, sha := "o/r", 52, "abcdef1234567890"
 	f.openPull(repo, pr, sha)
 	f.setCommitDate(sha, base.Add(-time.Hour))
-	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
-	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
-		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
-	oldReview.User.Login = bugbotLogin
-	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+	seedCarriedBugbotEvidence(f, repo, pr, base)
 	f.botReview(repo, pr, 702, sha, base)
 	f.enqueue(repo, pr)
 
@@ -534,23 +529,11 @@ func TestDaemonProgressRecomputesAfterPersistingActivity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newCoReplayFixture(t, base, func(cfg *Config) {
-				for i := range cfg.CoBots {
-					if cfg.CoBots[i].Name == "bugbot" {
-						cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
-						break
-					}
-				}
-				cfg.FeedbackBots = cfg.RequiredBots
-			})
+			f := newCoReplayFixture(t, base, onlyBugbot)
 			repo, pr, sha := "o/r", 54, "abcdef1234567890"
 			f.openPull(repo, pr, sha)
 			f.setCommitDate(sha, base.Add(-time.Hour))
-			f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
-			oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
-				SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
-			oldReview.User.Login = bugbotLogin
-			f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+			seedCarriedBugbotEvidence(f, repo, pr, base)
 			f.botReview(repo, pr, 702, sha, base)
 			seedRound(t, f.store, f.cfg, repo, pr, sha[:9], tc.phase, base.Add(-time.Minute), 400)
 
@@ -766,25 +749,13 @@ func TestQuotaFreePathsRecomputeAfterPersistingActivity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newCoReplayFixture(t, base, func(cfg *Config) {
-				for i := range cfg.CoBots {
-					if cfg.CoBots[i].Name == "bugbot" {
-						cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
-						break
-					}
-				}
-				cfg.FeedbackBots = cfg.RequiredBots
-			})
+			f := newCoReplayFixture(t, base, onlyBugbot)
 			f.gh.graphQL = noForcePush
 			repo, pr, sha := "o/private", 50, "abcdef1234567890"
 			f.openPull(repo, pr, sha)
 			f.setCommitDate(sha, base)
 			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base.Add(-5*time.Minute))
-			f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
-			oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
-				SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
-			oldReview.User.Login = bugbotLogin
-			f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+			seedCarriedBugbotEvidence(f, repo, pr, base)
 			f.enqueue(repo, pr)
 
 			handled, err := tc.run(f, repo, pr)

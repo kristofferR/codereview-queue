@@ -409,6 +409,24 @@ func noForcePush(_ string, _ map[string]any, out any) error {
 	return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}`), out)
 }
 
+func TestLatestHeadForcePushRejectsInvalidRepository(t *testing.T) {
+	for _, repo := range []string{"owner", "owner/", "/repo", "owner/repo/extra"} {
+		t.Run(repo, func(t *testing.T) {
+			gh := newFakeGitHub()
+			gh.graphQL = func(_ string, _ map[string]any, _ any) error {
+				t.Fatal("invalid repository must not make a GraphQL request")
+				return nil
+			}
+			svc := &Service{gh: gh}
+
+			got, err := svc.latestHeadForcePush(t.Context(), repo, 1)
+			if err != nil || got != (headForcePush{}) {
+				t.Fatalf("latestHeadForcePush() = %+v, %v; want zero result", got, err)
+			}
+		})
+	}
+}
+
 // --- test store fakes (v3) ---
 
 type failNthUpdateStore struct {

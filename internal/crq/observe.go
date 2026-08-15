@@ -514,7 +514,7 @@ type headForcePush struct {
 // commit that event installed. A zero value means the PR has no such event.
 func (s *Service) latestHeadForcePush(ctx context.Context, repo string, pr int) (headForcePush, error) {
 	owner, name, found := strings.Cut(repo, "/")
-	if !found {
+	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
 		return headForcePush{}, nil
 	}
 	var result struct {

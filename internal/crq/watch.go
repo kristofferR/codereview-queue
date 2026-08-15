@@ -1362,34 +1362,11 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					// closure on a CAS conflict, and a verdict left over from
 					// an attempt that lost would be read as this one's.
 					taken, gone = false, false
-					round := st.Round(report.Repo, report.PR)
-					// A round for ANOTHER head is not this round: superseding is
-					// what this session's own push does, and the fresh round's
-					// claim belongs to whoever takes the new head — reading it as
-					// a theft would kill this session between pushing and
-					// resolving, every time it succeeded.
-					if round == nil || round.Head != report.Head {
-						ok, byOther := st.HeartbeatArchivedDispatch(
-							report.Repo, report.PR, token, s.clock())
-						taken = byOther
-						if !ok {
-							// A current live claim for the replacement head is also
-							// proof that this session no longer owns the PR.
-							if round != nil && round.DispatchHeld(s.clock()) {
-								taken = true
-							}
-							gone = !taken
-							return ErrNoChange
-						}
-						return nil
-					}
-					ok, byOther := round.HeartbeatDispatch(token, s.clock())
-					taken = byOther
-					if !ok {
+					updated := false
+					updated, taken, gone = refreshDispatch(st, report, token, s.clock())
+					if !updated {
 						return ErrNoChange
 					}
-					st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
-					st.PutRound(*round)
 					return nil
 				}); err != nil && !errors.Is(err, ErrNoChange) {
 					// A failed write is not proof of anything; the next tick
@@ -1412,6 +1389,43 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 		}
 	}()
 	return lost.Load
+}
+
+func refreshDispatch(st *State, report NextReport, token string, now time.Time) (updated, taken, gone bool) {
+	// An expired unattended claim may have been replaced by an interactive
+	// work claim while this watcher could not write. The work claim won that
+	// CAS race, so the old token must not restore itself when connectivity
+	// returns.
+	if _, ok := st.WorkClaim(report.Repo, report.PR, now); ok {
+		return false, true, false
+	}
+
+	round := st.Round(report.Repo, report.PR)
+	// A round for ANOTHER head is not this round: superseding is what this
+	// session's own push does, and the fresh round's claim belongs to whoever
+	// takes the new head. Reading its absence as theft would kill this session
+	// between pushing and resolving every time it succeeded.
+	if round == nil || round.Head != report.Head {
+		ok, byOther := st.HeartbeatArchivedDispatch(report.Repo, report.PR, token, now)
+		taken = byOther
+		if !ok {
+			// A current live claim for the replacement head is also proof that
+			// this session no longer owns the PR.
+			if round != nil && round.DispatchHeld(now) {
+				taken = true
+			}
+			gone = !taken
+		}
+		return ok, taken, gone
+	}
+	ok, byOther := round.HeartbeatDispatch(token, now)
+	taken = byOther
+	if !ok {
+		return false, taken, false
+	}
+	st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
+	st.PutRound(*round)
+	return true, false, false
 }
 
 func openPullQuery() url.Values {

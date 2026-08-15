@@ -113,6 +113,32 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	})
 }
 
+func TestDispatchHeartbeatLosesToWorkClaimAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)
+	repo, pr, head := "owner/thing", 4, "abcdef123"
+	st := DefaultState(firingConfig())
+	round := Round{Repo: repo, PR: pr, Head: head, Phase: PhaseQueued}
+	if ok, why := round.ClaimDispatch("autofix", "old-token", now, 3); !ok {
+		t.Fatalf("claim dispatch: %s", why)
+	}
+	st.PutRound(round)
+
+	reconnected := now.Add(DispatchTTL + time.Minute)
+	st.SetWorkClaim(repo, pr, WorkClaim{
+		Owner: "interactive", By: "mac:feature", ClaimedAt: reconnected,
+		ExpiresAt: reconnected.Add(WorkClaimTTL),
+	})
+	updated, taken, gone := refreshDispatch(&st, NextReport{
+		Repo: repo, PR: pr, Head: head,
+	}, "old-token", reconnected)
+	if updated || !taken || gone {
+		t.Fatalf("heartbeat = updated %v, taken %v, gone %v; want loss to work claim", updated, taken, gone)
+	}
+	if got := st.Round(repo, pr).Dispatch.Heartbeat; !got.Equal(now) {
+		t.Fatalf("heartbeat restored expired dispatch at %s, want %s", got, now)
+	}
+}
+
 func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"

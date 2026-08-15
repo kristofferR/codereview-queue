@@ -1744,6 +1744,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	// older than that stale summary; the force-push event is the true boundary
 	// at which this commit became the head again.
 	carried := false
+	var forcePushCutoff time.Time
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil {
 			carried = true
@@ -1758,6 +1759,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		if headAt.After(anchor) {
 			anchor = headAt
 		}
+		forcePushCutoff = headAt
 	}
 	// cfg.Bot, not this process's startup one: the primary is a fleet setting
 	// like any other, and reading the stale one made a review by the primary
@@ -1766,7 +1768,8 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	// and the round waited out its timeout for an answer it already had.
 	for _, rv := range obs.Reviews {
 		if isConfiguredBotLogin(cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
-			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {
+			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) &&
+			(forcePushCutoff.IsZero() || !rv.SubmittedAt.Before(forcePushCutoff)) {
 			anchor = rv.SubmittedAt
 		}
 	}

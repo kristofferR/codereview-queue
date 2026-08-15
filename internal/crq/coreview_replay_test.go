@@ -612,7 +612,7 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 		CreatedAt: base.Add(-30 * time.Minute)}
 	obs := engine.Observation{
 		Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
-		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base}},
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-2 * time.Minute)}},
 		Events:  []dialect.BotEvent{oldSummary},
 	}
 

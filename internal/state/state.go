@@ -920,6 +920,16 @@ func (r *Round) Reopen() error {
 	return nil
 }
 
+// ReopenForRestoredActivity puts a completed round back in the queue when a
+// rolling-upgrade repair restores reviewer activity it had lost.
+func (r *Round) ReopenForRestoredActivity() error {
+	if err := r.Reopen(); err != nil {
+		return err
+	}
+	r.Note = "restored reviewer activity"
+	return nil
+}
+
 // ForceCoReviewer reports whether a reviewer-change reopen granted login its
 // one immediate trigger. Bot names are normalized like CoBots keys.
 func (r *Round) ForceCoReviewer(login string) bool {
@@ -1180,7 +1190,8 @@ func (s *State) RememberCoActivity(r Round) {
 	s.rememberCoActivity(r)
 }
 
-func carryCoActivity(next *Round, activity map[string]time.Time) {
+func carryCoActivity(next *Round, activity map[string]time.Time) bool {
+	changed := false
 	for login, seenAt := range activity {
 		current := next.Co(login)
 		if current.SeenActiveAt != nil && !current.SeenActiveAt.Before(seenAt) {
@@ -1189,15 +1200,17 @@ func carryCoActivity(next *Round, activity map[string]time.Time) {
 		seen := seenAt.UTC()
 		current.SeenActiveAt = &seen
 		next.setCo(login, current)
+		changed = true
 	}
+	return changed
 }
 
-func (s *State) carryCoActivity(next *Round) {
+func (s *State) carryCoActivity(next *Round) bool {
 	key := Key(next.Repo, next.PR)
 	if activity, ok := s.CoActivity[key]; ok {
-		carryCoActivity(next, activity)
-		return
+		return carryCoActivity(next, activity)
 	}
+	changed := false
 	for i := len(s.Archive) - 1; i >= 0; i-- {
 		previous := s.Archive[i]
 		if Key(previous.Repo, previous.PR) != key {
@@ -1216,8 +1229,11 @@ func (s *State) carryCoActivity(next *Round) {
 			}
 			activity[login] = seenAt.UTC()
 		}
-		carryCoActivity(next, activity)
+		if carryCoActivity(next, activity) {
+			changed = true
+		}
 	}
+	return changed
 }
 
 // PreviewRound builds the round NewRound would create without changing state.
@@ -2210,7 +2226,9 @@ func (s *State) Normalize(now time.Time) {
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
 		// replacement without copying it. Repair that replacement on load.
-		s.carryCoActivity(&r)
+		if s.carryCoActivity(&r) && r.Phase == PhaseCompleted {
+			_ = r.ReopenForRestoredActivity()
+		}
 		s.Rounds[key] = r
 	}
 }

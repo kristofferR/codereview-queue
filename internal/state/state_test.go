@@ -349,6 +349,26 @@ func TestNormalizeRestoresCoActivityBeyondEmptyArchivedRound(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
+	seen := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted}
+	s := State{
+		Rounds: map[string]Round{Key(current.Repo, current.PR): current},
+		Archive: []Round{{Repo: current.Repo, PR: current.PR, Head: "abcdef123", Phase: PhaseAbandoned,
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("restored activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("requeued round lost restored activity: %+v", co)
+	}
+}
+
 func TestSlotRoundStaleness(t *testing.T) {
 	s := New()
 	r := newFired(t, &s)

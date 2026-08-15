@@ -420,11 +420,12 @@ type failNthUpdateStore struct {
 
 type supersedeBeforeUpdateStore struct {
 	StateStore
-	repo string
-	pr   int
-	head string
-	now  time.Time
-	done bool
+	repo     string
+	pr       int
+	head     string
+	now      time.Time
+	complete bool
+	done     bool
 }
 
 type evictBeforeUpdateStore struct {
@@ -447,8 +448,17 @@ func (s *supersedeBeforeUpdateStore) Update(ctx context.Context, mutate func(*St
 	if !s.done {
 		s.done = true
 		if _, err := s.StateStore.Update(ctx, func(st *State) error {
-			_, err := st.Supersede(s.repo, s.pr, s.head, s.now)
-			return err
+			round, err := st.Supersede(s.repo, s.pr, s.head, s.now)
+			if err != nil {
+				return err
+			}
+			if s.complete {
+				if err := round.Dedupe(s.now); err != nil {
+					return err
+				}
+				st.PutRound(*round)
+			}
+			return nil
 		}); err != nil {
 			return State{}, err
 		}

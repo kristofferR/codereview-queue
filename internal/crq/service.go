@@ -568,6 +568,19 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
 		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
 	}
+	// noteCoAnswers can add the first durable proof that a self-heal reviewer
+	// is active. Reload it before deciding: a dedupe chosen without that proof
+	// may now need to wait for this head.
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	current := fresh.Round(next.Repo, next.PR)
+	if !sameRound(current, *next) {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	st = fresh
+	next = current
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
 	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
@@ -2935,6 +2948,11 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			}
 			if sameCoActivity(before, r.CoBots) {
 				return ErrNoChange
+			}
+			if r.Phase == PhaseCompleted {
+				if err := r.ReopenForRestoredActivity(); err != nil {
+					return err
+				}
 			}
 			st.PutRound(*r)
 			return nil

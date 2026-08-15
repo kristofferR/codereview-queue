@@ -274,6 +274,37 @@ func TestNoteCoAnswersCarriesActivityThroughConcurrentSupersede(t *testing.T) {
 	}
 }
 
+func TestNoteCoAnswersReopensCompletedConcurrentSupersede(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, oldHead, newHead := "o/r", 51, "abcdef1234567890", "fedcba9876543210"
+	f.openPull(repo, pr, oldHead)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &supersedeBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		head:       newHead[:9],
+		now:        base.Add(time.Minute),
+		complete:   true,
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := f.round(repo, pr)
+	if reopened == nil || reopened.Head != newHead[:9] || reopened.Phase != PhaseQueued {
+		t.Fatalf("completed replacement was not reopened for carried activity: %+v", reopened)
+	}
+	if co := reopened.Co(bugbotLogin); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("reopened replacement lost observed reviewer activity: %+v", co)
+	}
+}
+
 func TestNoteCoAnswersPersistsArchivedActivityBeyondEviction(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)
@@ -401,6 +432,39 @@ func TestPumpReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 	}
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseQueued {
 		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestPumpRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, func(cfg *Config) {
+		for i := range cfg.CoBots {
+			if cfg.CoBots[i].Name == "bugbot" {
+				cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+				break
+			}
+		}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	f.gh.graphQL = noForcePush
+	repo, pr, sha := "o/r", 52, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
+	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
+		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
+	oldReview.User.Login = bugbotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+	f.botReview(repo, pr, 702, sha, base)
+	f.enqueue(repo, pr)
+
+	res := f.pump()
+	if res.Action != "waiting" {
+		t.Fatalf("Pump did not recompute the carried reviewer wait: %+v", res)
+	}
+	round := f.round(repo, pr)
+	if round == nil || round.Phase != PhaseReviewing || round.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("stale dedupe skipped the carried reviewer wait: %+v", round)
 	}
 }
 

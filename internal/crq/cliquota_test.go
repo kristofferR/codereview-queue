@@ -275,18 +275,18 @@ func TestRecordCLIQuotaRefusesWhenCredentialsWerePassedIn(t *testing.T) {
 
 // The flag scan has to see both spellings and the =value form, or a run that
 // authenticated itself is treated as one that did not.
-func TestCarriesCredentials(t *testing.T) {
+func TestHasExplicitCredentials(t *testing.T) {
 	for _, args := range [][]string{
 		{"--api-key", "secret"}, {"--apikey", "secret"}, {"--token", "secret"},
 		{"--api-key=secret"}, {"--dir", "x", "--token=y"},
 	} {
-		if !carriesCredentials(args) {
-			t.Errorf("carriesCredentials(%v) = false, want true", args)
+		if !HasExplicitCredentials(args) {
+			t.Errorf("HasExplicitCredentials(%v) = false, want true", args)
 		}
 	}
 	for _, args := range [][]string{nil, {"--light"}, {"--dir", "internal"}} {
-		if carriesCredentials(args) {
-			t.Errorf("carriesCredentials(%v) = true, want false", args)
+		if HasExplicitCredentials(args) {
+			t.Errorf("HasExplicitCredentials(%v) = true, want false", args)
 		}
 	}
 }

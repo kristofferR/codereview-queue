@@ -79,6 +79,27 @@ func TestPreflightExpiredContextReportsTimeout(t *testing.T) {
 	}
 }
 
+func TestCodeRabbitBinaryFallsBackFromMissingConfiguredBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary is POSIX-only")
+	}
+	dir := t.TempDir()
+	cr := filepath.Join(dir, "cr")
+	if err := os.WriteFile(cr, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_CODERABBIT_BIN", "missing-coderabbit")
+	t.Setenv("PATH", dir)
+
+	binary, err := CodeRabbitBinary("also-missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binary != cr {
+		t.Errorf("CodeRabbitBinary fallback = %q, want %q", binary, cr)
+	}
+}
+
 func TestPreflightFindingFallsBackToComment(t *testing.T) {
 	finding := preflightFinding(map[string]any{
 		"type":     "finding",
@@ -161,6 +182,36 @@ func TestSkipBlockedPreflightRunsWhenBlockExpired(t *testing.T) {
 	}
 	if report != nil {
 		t.Fatalf("expired shared block must run local preflight, got %+v", report)
+	}
+}
+
+func TestSkipBlockedPreflightRunsWhenBlockExpiresDuringOrgProbe(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Minute)
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.PreflightSkipBlocked = true
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &until
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, newFakeGitHub(), store, nil)
+	clocks := []time.Time{now, until}
+	service.now = func() time.Time {
+		current := clocks[0]
+		clocks = clocks[1:]
+		return current
+	}
+
+	report, err := service.SkipBlockedPreflight(context.Background(), PreflightOptions{}, func() string { return "owner" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Fatalf("a block that expires during the organization probe must run preflight, got %+v", report)
 	}
 }
 

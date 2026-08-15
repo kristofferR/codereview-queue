@@ -98,7 +98,7 @@ type PreflightFinding struct {
 // treat a state-read failure as a cache miss and run the CLI normally. Explicit
 // credentials bypass the shared block because they may select another account.
 func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOptions, cliOrg func() string) (*PreflightReport, error) {
-	if carriesCredentials(opts.ExtraArgs) {
+	if HasExplicitCredentials(opts.ExtraArgs) {
 		return nil, nil
 	}
 	start := time.Now()
@@ -114,6 +114,10 @@ func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOption
 		return nil, nil
 	}
 	if cliOrg == nil || !cliOrgMatches(s.cfg.WithFleet(state.Fleet), cliOrg()) {
+		return nil, nil
+	}
+	now = s.clock()
+	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
 		return nil, nil
 	}
 	until := state.Account.BlockedUntil.UTC()
@@ -148,7 +152,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 		report.DurationMS = time.Since(start).Milliseconds()
 		return report, 2, err
 	}
-	binary, err := coderabbitBinary(opts.Binary)
+	binary, err := CodeRabbitBinary(opts.Binary)
 	if err != nil {
 		report.Status = "error"
 		report.Error = err.Error()
@@ -159,7 +163,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	args := coderabbitArgs(opts)
 	report.Tool = binary
 	report.Command = redactSecrets(append([]string{binary}, args...))
-	report.CredentialsOverridden = carriesCredentials(opts.ExtraArgs)
+	report.CredentialsOverridden = HasExplicitCredentials(opts.ExtraArgs)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	if opts.Timeout > 0 {
@@ -249,7 +253,9 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	return report, 10, nil
 }
 
-func coderabbitBinary(explicit string) (string, error) {
+// CodeRabbitBinary resolves the executable preflight will run, including its
+// fallback candidates. Callers that probe the CLI must use this result too.
+func CodeRabbitBinary(explicit string) (string, error) {
 	candidates := []string{explicit, os.Getenv("CRQ_CODERABBIT_BIN"), "cr", "coderabbit"}
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate) == "" {
@@ -358,10 +364,10 @@ func preflightFinding(event map[string]any) PreflightFinding {
 	return finding
 }
 
-// carriesCredentials reports whether these arguments authenticate the run
+// HasExplicitCredentials reports whether these arguments authenticate the run
 // themselves. If they do, the login the CLI would report afterwards is not
 // necessarily the account that produced the block.
-func carriesCredentials(args []string) bool {
+func HasExplicitCredentials(args []string) bool {
 	for _, arg := range args {
 		name, _, _ := strings.Cut(arg, "=")
 		switch name {

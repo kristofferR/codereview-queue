@@ -1701,6 +1701,13 @@ func preflight(ctx context.Context, args []string) int {
 // credentials, or GitHub access remain cache misses: local preflight keeps its
 // standalone behavior and runs normally.
 func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.PreflightReport {
+	if crq.HasExplicitCredentials(opts.ExtraArgs) {
+		return nil
+	}
+	binary, err := crq.CodeRabbitBinary(opts.Binary)
+	if err != nil {
+		return nil
+	}
 	cfg, err := crq.LoadConfig()
 	if err != nil || cfg.RequireState() != nil {
 		return nil
@@ -1713,10 +1720,6 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.P
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
-	binary := opts.Binary
-	if strings.TrimSpace(binary) == "" {
-		binary = os.Getenv("CRQ_CODERABBIT_BIN")
-	}
 	report, err := service.SkipBlockedPreflight(readCtx, opts, func() string {
 		return codeRabbitOrg(readCtx, binary)
 	})

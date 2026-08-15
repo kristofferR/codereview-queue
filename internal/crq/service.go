@@ -2877,7 +2877,18 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				st.RememberCoActivity(*archived)
 				return nil
 			}
-			return ErrNoChange
+			// A busy concurrent batch can evict the source round from the
+			// bounded archive before this callback runs. Preserve the activity
+			// directly in the per-PR index so a later round can still carry it.
+			before := round.CoBots
+			for _, login := range answered {
+				round.NoteCoActivity(login, now)
+			}
+			if sameCoActivity(before, round.CoBots) {
+				return ErrNoChange
+			}
+			st.RememberCoActivity(round)
+			return nil
 		}
 		if !sameRound(r, round) {
 			// The evidence belongs to the old head, so it cannot answer the

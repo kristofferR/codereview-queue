@@ -324,6 +324,42 @@ func TestNoteCoAnswersPersistsArchivedActivityBeyondEviction(t *testing.T) {
 	}
 }
 
+func TestNoteCoAnswersPersistsActivityAfterConcurrentArchiveEviction(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, head := "o/r", 47, "abcdef1234567890"
+	f.openPull(repo, pr, head)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &evictBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		now:        base.Add(time.Minute),
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activity := st.CoActivity[QueueKey(repo, pr)]["cursor"]; !activity.Equal(base.Add(time.Minute)) {
+		t.Fatalf("evicted reviewer activity was not indexed: %v", activity)
+	}
+	reopened, err := st.NewRound(repo, pr, "fedcba9876543210", base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if co := reopened.Co(bugbotLogin); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("reopened round lost concurrently evicted activity: %+v", co)
+	}
+}
+
 func TestFeedbackReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)

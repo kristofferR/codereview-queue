@@ -427,6 +427,14 @@ type supersedeBeforeUpdateStore struct {
 	done bool
 }
 
+type evictBeforeUpdateStore struct {
+	StateStore
+	repo string
+	pr   int
+	now  time.Time
+	done bool
+}
+
 func TestSameCoActivityDetectsRemovedReviewer(t *testing.T) {
 	seen := time.Now().UTC()
 	before := map[string]CoBotRound{"bugbot": {SeenActiveAt: &seen}}
@@ -441,6 +449,27 @@ func (s *supersedeBeforeUpdateStore) Update(ctx context.Context, mutate func(*St
 		if _, err := s.StateStore.Update(ctx, func(st *State) error {
 			_, err := st.Supersede(s.repo, s.pr, s.head, s.now)
 			return err
+		}); err != nil {
+			return State{}, err
+		}
+	}
+	return s.StateStore.Update(ctx, mutate)
+}
+
+func (s *evictBeforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if !s.done {
+		s.done = true
+		if _, err := s.StateStore.Update(ctx, func(st *State) error {
+			st.EndRound(s.repo, s.pr, "pr closed")
+			for otherPR := 100; otherPR < 100+ArchiveMax; otherPR++ {
+				round, err := st.NewRound("o/other", otherPR, "123456789", s.now)
+				if err != nil {
+					return err
+				}
+				st.PutRound(*round)
+				st.EndRound("o/other", otherPR, "pr closed")
+			}
+			return nil
 		}); err != nil {
 			return State{}, err
 		}

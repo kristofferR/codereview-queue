@@ -401,6 +401,97 @@ func TestSweepReviewingRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
 	}
 }
 
+func TestPumpRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 47, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	f.botComment(repo, pr, 901, replayFairUsage(t, 40), base)
+	writeErr := errors.New("transient state write failure")
+	// The account-block write succeeds; the following activity write fails.
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 2, err: writeErr}
+
+	if _, err := f.svc.Pump(f.ctx); !errors.Is(err, writeErr) {
+		t.Fatalf("Pump error = %v, want the reviewer-activity persistence failure", err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute)) {
+		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute))
+	}
+	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestQuotaFreePathsPersistActivityBeforeCompletion(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		run  func(*replayFixture, string, int) (bool, error)
+	}{
+		{
+			name: "sweep",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				st, _, err := f.store.Load(f.ctx)
+				if err != nil {
+					return false, err
+				}
+				_, handled, err := f.svc.sweepQuotaFree(f.ctx, st, f.clk.now(), "", 0)
+				return handled, err
+			},
+		},
+		{
+			name: "advance",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				_, handled, err := f.svc.advanceQuotaFree(f.ctx, repo, pr)
+				return handled, err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, func(cfg *Config) {
+				requireBugbot(cfg)
+				for i := range cfg.CoBots {
+					if cfg.CoBots[i].Name == "bugbot" {
+						cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+						break
+					}
+				}
+				cfg.FeedbackBots = cfg.RequiredBots
+			})
+			repo, pr, sha := "o/private", 48, "abcdef1234567890"
+			f.openPull(repo, pr, sha)
+			f.setCommitDate(sha, base.Add(-time.Hour))
+			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base.Add(-30*time.Minute))
+			clean := corpusCheckRun(t, "bugbot/check-clean.json")
+			clean.CompletedAt = base
+			f.gh.setCheckRuns(sha, clean)
+			f.enqueue(repo, pr)
+
+			handled, err := tc.run(f, repo, pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handled {
+				t.Fatal("quota-free path did not handle the completed round")
+			}
+			r := f.round(repo, pr)
+			if r == nil || r.Phase != PhaseCompleted || r.Co(bugbotLogin).SeenActiveAt == nil {
+				t.Fatalf("quota-free completion lost reviewer activity: %+v", r)
+			}
+		})
+	}
+}
+
 func TestParkedCoReviewWaitPreservesSelfHealGraceForOldCommit(t *testing.T) {
 	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)
@@ -420,8 +511,13 @@ func TestParkedCoReviewWaitPreservesSelfHealGraceForOldCommit(t *testing.T) {
 		Open:   true,
 		Head:   head,
 		HeadAt: base.AddDate(0, -1, 0),
-		Reviews: []engine.ReviewSeen{{
-			Bot: f.cfg.Bot, Commit: head, SubmittedAt: base,
+		Reviews: []engine.ReviewSeen{
+			{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base},
+			{Bot: bugbotLogin, Commit: "111111111", SubmittedAt: base.Add(-30 * time.Minute)},
+		},
+		Events: []dialect.BotEvent{{
+			Kind: dialect.EvCoCommand, For: bugbotLogin, CommentID: 700,
+			CreatedAt: base.Add(-time.Hour),
 		}},
 	}
 	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, round, obs, "awaiting co-review", base); err != nil {

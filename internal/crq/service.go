@@ -548,15 +548,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
-	// Record which co-reviewers have answered, from the observation this pass
-	// already paid for. Done HERE and not only on the reviewing sweep: a round
-	// that never fires — because the account is blocked, or because the primary
-	// does not run here — is observed on this path and nowhere else, so a
-	// co-reviewer could review it every time and crq would never notice. That
-	// is exactly the case that made a working Codex read as "never answered".
-	if err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
-		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
-	}
 	// Record a rate-limit notice before deciding, whichever round it answered.
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the
@@ -565,6 +556,17 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{}, err
 	} else if updated != nil {
 		st = *updated
+	}
+	// Record which co-reviewers have answered, from the observation this pass
+	// already paid for. Done HERE and not only on the reviewing sweep: a round
+	// that never fires — because the account is blocked, or because the primary
+	// does not run here — is observed on this path and nowhere else, so a
+	// co-reviewer could review it every time and crq would never notice. That
+	// is exactly the case that made a working Codex read as "never answered".
+	// The account block above is more urgent: this round does not hold the fire
+	// slot, so another worker must see that window even if this write fails.
+	if err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
+		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
 	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
@@ -635,6 +637,9 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
 		}
+		if err := s.noteCoAnswers(ctx, cfg, round, obs.eng, now); err != nil {
+			return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
+		}
 		res, err := s.applyFire(ctx, cfg, round, obs.eng, d, now)
 		if err != nil {
 			return PumpResult{}, false, err
@@ -674,6 +679,9 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
+	}
+	if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
+		return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
 	}
 	res, err := s.applyFire(ctx, cfg, *round, obs.eng, d, now)
 	if err != nil {
@@ -2062,8 +2070,9 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 	firedAt := round.FiredAt.UTC()
 	// A quota-free co-review wait uses FiredAt as its evidence floor, which may
 	// be the timestamp of an old commit reached by a reset or force-push. Grace
-	// instead starts when crq first saw this head. Ordinary fired rounds already
-	// have FiredAt at or after EnqueuedAt, so this changes only the parked case.
+	// and live-command detection instead start when crq first saw this head.
+	// Ordinary fired rounds already have FiredAt at or after EnqueuedAt, so this
+	// changes only the parked case.
 	selfHealAt := firedAt
 	if round.EnqueuedAt.After(selfHealAt) {
 		selfHealAt = round.EnqueuedAt.UTC()
@@ -2072,7 +2081,7 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
-		commandPresent := engine.CoCommandSince(obs, cp.Login, firedAt)
+		commandPresent := engine.CoCommandSince(obs, cp.Login, selfHealAt)
 		if !engine.DecideCoPost(round, obs, cp, commandPresent, selfHealAt, now) {
 			continue
 		}

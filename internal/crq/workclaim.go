@@ -52,6 +52,16 @@ type WorkClaimResult struct {
 // interactive loop reads feedback. The inverse check lives in claimDispatch:
 // whichever claimant wins the state CAS works, and the other waits.
 func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int) (workClaimOutcome, error) {
+	return s.claimInteractiveWorkWithRenewal(ctx, repo, pr, false)
+}
+
+// refreshInteractiveWork renews an existing lease before returning work that
+// may keep the caller busy longer than the normal renewal interval.
+func (s *Service) refreshInteractiveWork(ctx context.Context, repo string, pr int) (workClaimOutcome, error) {
+	return s.claimInteractiveWorkWithRenewal(ctx, repo, pr, true)
+}
+
+func (s *Service) claimInteractiveWorkWithRenewal(ctx context.Context, repo string, pr int, forceRenewal bool) (workClaimOutcome, error) {
 	repo = NormalizeRepo(repo)
 	owner, by := s.workClaimOwner(ctx)
 	dispatchToken := s.dispatchToken()
@@ -60,7 +70,7 @@ func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int)
 		if err != nil {
 			return workClaimOutcome{}, err
 		}
-		outcome, _, err := s.interactiveWorkClaim(&st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), false)
+		outcome, _, err := s.interactiveWorkClaim(&st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), false, forceRenewal)
 		return outcome, err
 	}
 
@@ -70,7 +80,7 @@ func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int)
 			var changed bool
 			var err error
 			outcome, changed, err = s.interactiveWorkClaim(
-				st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), true,
+				st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), true, forceRenewal,
 			)
 			if err != nil {
 				return err
@@ -108,6 +118,7 @@ func (s *Service) interactiveWorkClaim(
 	dispatchToken string,
 	now time.Time,
 	persist bool,
+	forceRenewal bool,
 ) (workClaimOutcome, bool, error) {
 	// The unattended fix session uses `crq next` as its pre-push oracle. It
 	// already won exclusion through this exact dispatch token, so treating it
@@ -140,7 +151,7 @@ func (s *Service) interactiveWorkClaim(
 		}
 		return workClaimOutcome{acquired: true, until: until}, false, nil
 	}
-	if ownsExisting && existing.ExpiresAt.After(now.Add(workClaimRenewalInterval)) {
+	if ownsExisting && !forceRenewal && existing.ExpiresAt.After(now.Add(workClaimRenewalInterval)) {
 		return workClaimOutcome{acquired: true, until: existing.ExpiresAt}, false, nil
 	}
 	claimedAt := now
@@ -353,6 +364,18 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	report, code, loopErr := s.loopClaimed(loopCtx, repo, pr)
 	cancel()
 	<-heartbeatDone
+	if loopErr == nil && code == 10 {
+		// Findings hand the caller work that can outlive the normal renewal
+		// interval, so renew before returning rather than leaving a near-expiry
+		// lease behind.
+		if renewed, err := s.refreshInteractiveWork(ctx, repo, pr); err != nil {
+			loopErr = err
+			code = 1
+		} else if !renewed.acquired {
+			loopErr = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
+			code = 1
+		}
+	}
 	select {
 	case err := <-heartbeatErr:
 		if loopErr == nil || errors.Is(loopErr, context.Canceled) {

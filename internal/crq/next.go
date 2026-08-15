@@ -78,7 +78,11 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		// GitHub transport retries can outlive the claim. Revalidate after the
 		// decision so a caller never receives actionable work after another host
 		// legitimately took over the expired lease.
-		outcome, err = s.claimInteractiveWork(ctx, repo, pr)
+		if report.Action == string(engine.ActionFix) || report.Action == string(engine.ActionPush) {
+			outcome, err = s.refreshInteractiveWork(ctx, repo, pr)
+		} else {
+			outcome, err = s.claimInteractiveWork(ctx, repo, pr)
+		}
 		if err == nil && !outcome.acquired {
 			return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
 		}

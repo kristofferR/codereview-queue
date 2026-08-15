@@ -212,6 +212,35 @@ func TestInteractiveClaimRenewsForItsOwnerAndBlocksAnother(t *testing.T) {
 	}
 }
 
+func TestInteractiveClaimRefreshesBeforeReturningWork(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := workClaimService(t, store, cfg, "session-a", "mac:feature", base)
+	if claim, err := svc.claimInteractiveWork(ctx, "owner/repo", 16); err != nil || !claim.acquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := base.Add(time.Hour)
+	svc.now = func() time.Time { return now }
+	renewed, err := svc.refreshInteractiveWork(ctx, "owner/repo", 16)
+	if err != nil || !renewed.acquired || !renewed.until.Equal(now.Add(WorkClaimTTL)) {
+		t.Fatalf("refreshed claim = %+v, %v", renewed, err)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev == before.Rev {
+		t.Fatal("refresh before returning work did not update the lease")
+	}
+}
+
 func TestInteractiveClaimRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
 	ctx := context.Background()
 	base := time.Now().UTC()

@@ -81,6 +81,31 @@ func TestNextRevalidatesAnExpiredClaimAfterDeciding(t *testing.T) {
 	}
 }
 
+func TestNextRefreshesClaimBeforeReturningFix(t *testing.T) {
+	base := time.Date(2026, 8, 15, 8, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 509, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.wantAction(f.next(repo, pr), engine.ActionWait)
+
+	f.clk.advance(time.Hour)
+	f.botReview(repo, pr, 900, head, f.clk.now())
+	f.botReviewComment(repo, pr, 901, head, "internal/state/state.go", 42,
+		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := st.WorkClaim(repo, pr, f.clk.now())
+	if !ok || !claim.ExpiresAt.Equal(f.clk.now().Add(WorkClaimTTL)) {
+		t.Fatalf("claim before returning fix = %+v, %t", claim, ok)
+	}
+}
+
 // A whole review round driven only by `crq next`: the caller never chooses a
 // delay, never decides when the head may move, and never reads an exit code.
 // Each step asserts the instruction crq returns for a state an agent would

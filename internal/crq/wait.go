@@ -111,6 +111,16 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 			return report, err
 		}
 		if actionable(action.Kind) {
+			// A decision can spend longer than WorkClaimTTL in GitHub transport
+			// retries. Renew and verify ownership before handing actionable work to
+			// the caller; if another host took over, resume waiting instead.
+			claim, err = s.claimInteractiveWork(ctx, repo, pr)
+			if err != nil {
+				return report, err
+			}
+			if !claim.acquired {
+				continue
+			}
 			if terminalInteractiveAction(report.Action) {
 				if releaseErr := s.releaseInteractiveWork(ctx, repo, pr); releaseErr != nil {
 					return report, releaseErr

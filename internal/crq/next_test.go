@@ -45,6 +45,42 @@ func (f *replayFixture) wantAction(report NextReport, want engine.ActionKind) {
 	}
 }
 
+func TestNextRevalidatesAnExpiredClaimAfterDeciding(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 500, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.workOwnerFn = func() (string, string) { return "session-a", "mac:feature" }
+	f.svc.dispatchTokenFn = func() string { return "" }
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  1,
+		mutate: func() {
+			f.clk.advance(WorkClaimTTL + time.Minute)
+			if _, err := f.store.Update(f.ctx, func(st *State) error {
+				now := f.clk.now()
+				st.SetWorkClaim(repo, pr, WorkClaim{
+					Owner: "session-b", By: "linux:other", ClaimedAt: now,
+					ExpiresAt: now.Add(WorkClaimTTL),
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+
+	report, err := f.svc.Next(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionWait) || !strings.Contains(report.Reason, "linux:other") {
+		t.Fatalf("report after lost claim = %+v, want wait for the new owner", report)
+	}
+}
+
 // A whole review round driven only by `crq next`: the caller never chooses a
 // delay, never decides when the head may move, and never reads an exit code.
 // Each step asserts the instruction crq returns for a state an agent would

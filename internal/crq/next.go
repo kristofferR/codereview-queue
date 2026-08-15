@@ -71,6 +71,15 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
 	}
 	report, err := s.nextAutomated(ctx, repo, pr)
+	if err == nil {
+		// GitHub transport retries can outlive the claim. Revalidate after the
+		// decision so a caller never receives actionable work after another host
+		// legitimately took over the expired lease.
+		outcome, err = s.claimInteractiveWork(ctx, repo, pr)
+		if err == nil && !outcome.acquired {
+			return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
+		}
+	}
 	if err == nil && terminalInteractiveAction(report.Action) {
 		if releaseErr := s.releaseInteractiveWork(ctx, repo, pr); releaseErr != nil {
 			return report, releaseErr

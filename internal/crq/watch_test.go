@@ -332,7 +332,8 @@ func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	pull.State, pull.Number, pull.Head.SHA = "open", 3, "aaaaaaaa1"
 	gh.pulls[fakeKey("owner/thing", 3)] = pull
 	said := &recordingLogger{}
-	svc := NewService(cfg, gh, NewMemoryStore(cfg), said)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, said)
 
 	var events []WatchEvent
 	err := svc.Watch(context.Background(), WatchOptions{Once: true}, func(e WatchEvent) error {
@@ -352,6 +353,13 @@ func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	}
 	if !said.contains("observing only") {
 		t.Errorf("the watcher did not say it was observing only: %q", said.lines)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report, ok := st.HostReports[cfg.Host]; ok && report.RolesFresh([]string{"autofix"}, time.Now().UTC(), HostReportTTL) {
+		t.Fatal("observation-only watcher reported the autofix role")
 	}
 }
 

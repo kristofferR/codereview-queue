@@ -2,7 +2,9 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,6 +126,48 @@ func (s *throttledLoadStore) Load(ctx context.Context) (State, Revision, error) 
 		return State{}, Revision{}, s.err
 	}
 	return s.StateStore.Load(ctx)
+}
+
+func TestWaitDoesNotReturnActionableWorkAfterLosingItsClaim(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 600, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.workOwnerFn = func() (string, string) { return "session-a", "mac:feature" }
+	f.svc.dispatchTokenFn = func() string { return "" }
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  1,
+		mutate: func() {
+			f.clk.advance(WorkClaimTTL + time.Minute)
+			f.closePull(repo, pr)
+			if _, err := f.store.Update(f.ctx, func(st *State) error {
+				now := f.clk.now()
+				st.SetWorkClaim(repo, pr, WorkClaim{
+					Owner: "session-b", By: "linux:other", ClaimedAt: now,
+					ExpiresAt: now.Add(WorkClaimTTL),
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	ctx, cancel := context.WithCancel(f.ctx)
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	report, err := f.svc.WaitForAction(ctx, repo, pr)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want cancellation after resuming the wait", err)
+	}
+	if report.Action != string(engine.ActionWait) || !strings.Contains(report.Reason, "linux:other") {
+		t.Fatalf("report after lost claim = %+v, want wait for the new owner", report)
+	}
 }
 
 func (s *refAdvancingStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {

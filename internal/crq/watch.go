@@ -98,9 +98,6 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		on := true
 		opts.Dispatch = &on
 	}
-	// The watcher's PATH is the one a fix session inherits, so its report is the
-	// one that answers "can this host actually run the agent".
-	s.ReportHost(ctx, "autofix")
 	if *opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
@@ -114,6 +111,12 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		if s.log != nil {
 			s.log.Printf("watch: observing only — no fix command configured (set CRQ_DISPATCH_CMD, or pass one after --)")
 		}
+	}
+	// The watcher's PATH is the one a fix session inherits, so its report is the
+	// one that answers "can this host actually run the agent". Observation-only
+	// watchers must not claim a capability they cannot exercise.
+	if opts.dispatching() {
+		s.ReportHost(ctx, "autofix")
 	}
 	// Fix sessions run OUTSIDE the pass, and by default without a cap.
 	//
@@ -206,7 +209,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		result <-chan dispatchResult
 	}
 	var pending []pendingEvent
-	s.ReportHost(ctx, "autofix")
+	if opts.dispatching() {
+		s.ReportHost(ctx, "autofix")
+	}
 	// One snapshot for the pass. It decides both which repositories are watched
 	// at all and which of them may be fixed, so it is read BEFORE the target
 	// list is built.

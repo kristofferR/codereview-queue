@@ -182,7 +182,7 @@ func (s *Service) workClaimOwner() (string, string) {
 		dir = resolved
 	}
 	session := firstWorkOwnerValue(
-		os.Getenv("CRQ_WORK_OWNER"),
+		s.cfg.WorkOwner,
 		os.Getenv("CODEX_THREAD_ID"),
 		os.Getenv("CLAUDE_SESSION_ID"),
 	)

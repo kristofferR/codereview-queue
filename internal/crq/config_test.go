@@ -27,6 +27,33 @@ func TestBuildConfigRetainsACopyOfTheInputEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsWorkOwnerFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(path, []byte("CRQ_WORK_OWNER=file-session\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_CONFIG", path)
+	old, had := os.LookupEnv("CRQ_WORK_OWNER")
+	if err := os.Unsetenv("CRQ_WORK_OWNER"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("CRQ_WORK_OWNER", old)
+		} else {
+			os.Unsetenv("CRQ_WORK_OWNER")
+		}
+	})
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkOwner != "file-session" {
+		t.Fatalf("work owner = %q, want file-session", cfg.WorkOwner)
+	}
+}
+
 func TestLoadConfigDefaultsToCodeRabbitRequiredBot(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")

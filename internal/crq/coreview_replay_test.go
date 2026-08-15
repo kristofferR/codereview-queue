@@ -254,8 +254,93 @@ func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
 	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
 		t.Fatal(err)
 	}
-	if r := f.round(repo, pr); r == nil || r.Co(bugbotLogin).SeenActiveAt == nil {
+	if r := f.round(repo, pr); r == nil || r.Co(bugbotLogin).SeenActiveAt == nil || r.Co(bugbotLogin).AnsweredAt == nil {
 		t.Fatalf("Feedback did not persist observed Bugbot activity: %+v", r)
+	}
+}
+
+func TestFeedbackPersistsCoReviewerActivityBeforeRoundExists(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	repo, pr, sha := "o/r", 54, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.botReview(repo, pr, 703, sha, base)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+
+	f.wantAction(f.next(repo, pr), engine.ActionPush)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := st.Round(repo, pr); r != nil {
+		t.Fatalf("Feedback must not enqueue its activity preview: %+v", r)
+	}
+	if seen := st.CoActivity[QueueKey(repo, pr)][dialect.NormalizeBotName(bugbotLogin)]; !seen.Equal(base) {
+		t.Fatalf("pre-round reviewer activity = %v, want %v", seen, base)
+	}
+}
+
+func TestNoteCoAnswersKeepsParticipationAsActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		obs  engine.Observation
+	}{
+		{name: "running check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckInProgress}}}},
+		{name: "failed check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckFailed}}}},
+		{name: "auxiliary check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckAuxiliary}}}},
+		{name: "verdict", obs: engine.Observation{Events: []dialect.BotEvent{{Kind: dialect.EvCoVerdict, Bot: bugbotLogin}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, onlyBugbot)
+			repo, pr, head := "o/r", 55, "abcdef123"
+			seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base, 0)
+			tc.obs.Head = head
+			tc.obs.Co = map[string]engine.CoSeen{
+				dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true},
+			}
+
+			if err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), tc.obs, base); err != nil {
+				t.Fatal(err)
+			}
+			co := f.round(repo, pr).Co(bugbotLogin)
+			if co.SeenActiveAt == nil || !co.ActivityCarried || co.AnsweredAt != nil {
+				t.Fatalf("participation was not preserved as activity only: %+v", co)
+			}
+		})
+	}
+}
+
+func TestFeedbackDoesNotBindCurrentHeadCheckToStaleRound(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	repo, pr := "o/r", 56
+	oldHead, newHead := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, oldHead)
+	f.setCommitDate(oldHead, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+
+	f.setHead(repo, pr, newHead)
+	f.setCommitDate(newHead, base)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(newHead, clean)
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	round := f.round(repo, pr)
+	if round == nil || round.Head != oldHead[:9] {
+		t.Fatalf("Feedback unexpectedly replaced the stale state round: %+v", round)
+	}
+	co := round.Co(bugbotLogin)
+	if co.SeenActiveAt == nil || !co.ActivityCarried || co.AnsweredAt != nil {
+		t.Fatalf("new-head check must be activity, not an answer for the stale round: %+v", co)
 	}
 }
 

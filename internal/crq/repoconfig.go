@@ -521,6 +521,7 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 				updated.ForceCoReviewers = forced
 				if primaryChanged {
 					updated.PrimarySettled = false
+					updated.CoOnly = false
 				}
 				st.PutRound(updated)
 			}

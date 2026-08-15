@@ -131,24 +131,28 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		} else if updated != nil {
 			st = *updated
 		}
-		// Feedback can be the only path that observes a co-reviewer's final
-		// response before the loop completes the round. Persist the same durable
+		// Feedback can be the only path that observes a co-reviewer's response
+		// before the loop creates or completes the round. Persist the same durable
 		// activity proof Pump records so a subsequent head can self-heal a missed
-		// automatic review.
-		if round != nil {
-			if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
-				return FeedbackReport{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(repo, pr), err)
-			}
-			// noteCoAnswers can add the first durable proof that a self-heal
-			// reviewer is active. Reload it before completion so the same
-			// observation cannot converge past the reviewer it just restored.
-			fresh, _, err := s.store.Load(ctx)
-			if err != nil {
-				return FeedbackReport{}, err
-			}
-			st = fresh
-			round = st.Round(repo, pr)
+		// automatic review. A preview supplies the identity needed to write the
+		// per-PR activity index without publishing a fire-eligible round.
+		observedRound := round
+		if observedRound == nil {
+			preview := st.PreviewRound(repo, pr, obs.eng.Head, now)
+			observedRound = &preview
 		}
+		if err := s.noteCoAnswers(ctx, cfg, *observedRound, obs.eng, now); err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(repo, pr), err)
+		}
+		// noteCoAnswers can add the first durable proof that a self-heal
+		// reviewer is active. Reload it before completion so the same
+		// observation cannot converge past the reviewer it just restored.
+		fresh, _, err := s.store.Load(ctx)
+		if err != nil {
+			return FeedbackReport{}, err
+		}
+		st = fresh
+		round = st.Round(repo, pr)
 	}
 	pull := obs.pull
 	head := ""

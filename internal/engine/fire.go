@@ -60,6 +60,47 @@ func (p Policy) CoReviewerPolicies() []CoReviewerPolicy { return p.coReviewers()
 // feedback layer surfaces it as per-bot status.
 func CoReviewedHead(obs Observation, login string) bool { return coReviewedHead(obs, login) }
 
+// CoReviewedRound reports completed review evidence that binds to this round.
+// In addition to explicit head evidence, it accepts legacy SHA-less reviews and
+// clean summaries after the round's evidence floor. Participation alone — a
+// running/failed/auxiliary check or informational verdict — never satisfies it.
+func CoReviewedRound(r state.Round, obs Observation, login string) bool {
+	cutoff := coCutoff(r, login)
+	observedHead := r.Head != "" && obs.Head != "" && dialect.SHAPrefixMatch(r.Head, obs.Head)
+	for _, review := range obs.Reviews {
+		if !sameBot(review.Bot, login) {
+			continue
+		}
+		if r.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, r.Head) {
+			return true
+		}
+		if observedHead && review.Commit == "" && !review.SubmittedAt.IsZero() &&
+			notBefore(review.SubmittedAt, cutoff) {
+			return true
+		}
+	}
+	for _, ev := range obs.Events {
+		if ev.Kind != dialect.EvCoClean || !eventConcerns(ev, login) {
+			continue
+		}
+		if ev.SHA != "" {
+			if r.Head != "" && dialect.SHAPrefixMatch(ev.SHA, r.Head) {
+				return true
+			}
+			continue
+		}
+		if observedHead && (r.FiredAt != nil || roundCoCommandedAt(r, login) != nil) &&
+			notBefore(ev.ObservedTime(), cutoff) {
+			return true
+		}
+	}
+	if !observedHead {
+		return false
+	}
+	_, reviewed := coCheckReviewedAt(obs, login)
+	return reviewed
+}
+
 // requiredBot reports whether login is in RequiredBots (normalized).
 func requiredBot(p Policy, login string) bool {
 	norm := dialect.NormalizeBotName(login)

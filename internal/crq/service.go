@@ -2939,14 +2939,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		// proves that the reviewer is installed and working.
 		if engine.CoReviewerActive(obs, cb.Login) {
 			active = append(active, cb.Login)
-			// A fresh round may adopt activity that arrived before this observation,
-			// but carried activity keeps its historical provenance until the round
-			// has an evidence floor. Explicit head evidence is always safe.
-			co := round.Co(cb.Login)
-			carried := co.SeenActiveAt != nil && co.AnsweredAt == nil
-			anchored := round.FiredAt != nil || co.CommandedAt != nil
-			answered[dialect.NormalizeBotName(cb.Login)] = engine.CoReviewedHead(obs, cb.Login) ||
-				(!carried || anchored) && obs.CoSeenFor(cb.Login).ActiveThisRound
+			answered[dialect.NormalizeBotName(cb.Login)] = engine.CoReviewedRound(round, obs, cb.Login)
 		}
 	}
 	primary := cfg.Bot != "" &&

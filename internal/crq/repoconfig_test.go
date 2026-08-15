@@ -400,12 +400,13 @@ func TestChangingPrimaryInvalidatesRestoredRoundSettlement(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.PrimarySettled = true
+			r.CoOnly = true
 			st.PutRound(*r)
 			svc := NewService(before, newFakeGitHub(), NewMemoryStore(before), nil)
 
 			svc.reopenForChangedReviewers(&st, "o/r", before, tc.after, map[int]bool{3: true})
 
-			if got := st.Round("o/r", 3); got == nil || got.PrimarySettled {
+			if got := st.Round("o/r", 3); got == nil || got.PrimarySettled || got.CoOnly {
 				t.Fatalf("round = %+v, want stale primary settlement cleared", got)
 			}
 		})

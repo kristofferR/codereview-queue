@@ -136,7 +136,9 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		// activity proof Pump records so a subsequent head can self-heal a missed
 		// automatic review.
 		if round != nil {
-			s.noteCoAnswers(ctx, cfg, *round, obs.eng, now)
+			if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
+				return FeedbackReport{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(repo, pr), err)
+			}
 		}
 	}
 	pull := obs.pull

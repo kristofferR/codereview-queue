@@ -2788,9 +2788,9 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 // thing left to read it from was the phase — and a required set that omits the
 // primary completes on its co-reviewers' answers while the primary has done
 // nothing but acknowledge the command.
-func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
+func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) error {
 	if s.cfg.DryRun {
-		return // DryRun writes nothing, bookkeeping included
+		return nil // DryRun writes nothing, bookkeeping included
 	}
 	var answered []string
 	for _, cb := range cfg.CoBots {
@@ -2803,7 +2803,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
 	if len(answered) == 0 && !primary {
-		return
+		return nil
 	}
 	if _, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
@@ -2822,10 +2822,13 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		}
 		st.PutRound(*r)
 		return nil
-	}); err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
-		// Display-only bookkeeping: worth a line, never worth failing a round.
-		s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+	}); err != nil && !errors.Is(err, ErrNoChange) {
+		if s.log != nil {
+			s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+		}
+		return err
 	}
+	return nil
 }
 
 func sameCoAnswers(before, after map[string]CoBotRound) bool {

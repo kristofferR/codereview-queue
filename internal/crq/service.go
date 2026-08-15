@@ -977,6 +977,17 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err := s.noteCoAnswers(ctx, cfg, slot, obs.eng, now); err != nil {
 		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(slot.Repo, slot.PR), err)
 	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	current := fresh.Round(slot.Repo, slot.PR)
+	if !sameRound(current, slot) || fresh.FireSlot == nil || fresh.FireSlot.Token != slot.Token ||
+		(current.Phase != PhaseFired && current.Phase != PhaseReviewing) {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	slot = *current
+	st = fresh
 	tr := engine.Progress(slot, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -1211,6 +1222,17 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	if err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
 		return st, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(target.Repo, target.PR), err)
 	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return st, err
+	}
+	current := fresh.Round(target.Repo, target.PR)
+	if !sameRound(current, *target) ||
+		(current.Phase != PhaseFired && current.Phase != PhaseReviewing) {
+		return fresh, nil
+	}
+	target = current
+	st = fresh
 	tr := engine.Progress(*target, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
@@ -1787,7 +1809,8 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	carried := false
 	var headBoundary time.Time
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
-		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil {
+		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil &&
+			!obs.CoSeenFor(cp.Login).ActiveThisRound {
 			carried = true
 			break
 		}
@@ -1833,6 +1856,9 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 			continue
 		}
 		at := commandCreatedAt(cmds, id, now)
+		if !headBoundary.IsZero() && at.Before(headBoundary) {
+			continue
+		}
 		adopts = append(adopts, adoptCmd{login: cp.Login, id: id, at: at})
 		// The anchor is the round's evidence FLOOR, so it takes the earliest
 		// candidate. Overwriting it per co-reviewer both discarded the primary

@@ -504,6 +504,67 @@ func TestPumpRecomputesAfterPersistingActivity(t *testing.T) {
 	}
 }
 
+func TestDaemonProgressRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		phase Phase
+		run   func(*replayFixture, string, int) error
+	}{
+		{
+			name:  "slot round",
+			phase: PhaseFired,
+			run: func(f *replayFixture, repo string, pr int) error {
+				_, err := f.svc.progressSlotRound(f.ctx, *f.round(repo, pr))
+				return err
+			},
+		},
+		{
+			name:  "reviewing sweep",
+			phase: PhaseReviewing,
+			run: func(f *replayFixture, _ string, _ int) error {
+				st, _, err := f.store.Load(f.ctx)
+				if err != nil {
+					return err
+				}
+				_, err = f.svc.sweepReviewing(f.ctx, st, f.clk.now())
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, func(cfg *Config) {
+				for i := range cfg.CoBots {
+					if cfg.CoBots[i].Name == "bugbot" {
+						cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+						break
+					}
+				}
+				cfg.FeedbackBots = cfg.RequiredBots
+			})
+			repo, pr, sha := "o/r", 54, "abcdef1234567890"
+			f.openPull(repo, pr, sha)
+			f.setCommitDate(sha, base.Add(-time.Hour))
+			f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
+			oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
+				SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
+			oldReview.User.Login = bugbotLogin
+			f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+			f.botReview(repo, pr, 702, sha, base)
+			seedRound(t, f.store, f.cfg, repo, pr, sha[:9], tc.phase, base.Add(-time.Minute), 400)
+
+			if err := tc.run(f, repo, pr); err != nil {
+				t.Fatal(err)
+			}
+			round := f.round(repo, pr)
+			if round == nil || round.Phase != PhaseReviewing || round.Co(bugbotLogin).SeenActiveAt == nil {
+				t.Fatalf("stale completion skipped the carried reviewer wait: %+v", round)
+			}
+		})
+	}
+}
+
 func TestProgressSlotRoundReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)
@@ -828,10 +889,14 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 				return json.Unmarshal([]byte(payload), out)
 			}
 			oldSummary := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: tc.oldSummaryAt}
+			oldCommand := engine.CommandSeen{ID: 700, CreatedAt: tc.oldSummaryAt.Add(-time.Minute)}
 			obs := engine.Observation{
 				Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
 				Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-2 * time.Minute)}},
 				Events:  []dialect.BotEvent{oldSummary},
+				Co: map[string]engine.CoSeen{
+					dialect.NormalizeBotName(bugbotLogin): {Commands: []engine.CommandSeen{oldCommand}},
+				},
 			}
 
 			if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
@@ -840,6 +905,9 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 			parked := f.round(repo, pr)
 			if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(tc.wantBoundary) {
 				t.Fatalf("co-review wait used the wrong head boundary: %+v", parked)
+			}
+			if co := parked.Co(bugbotLogin); co.CommandID != 0 {
+				t.Fatalf("co-review wait adopted a command before the head boundary: %+v", co)
 			}
 			if got := engine.Completion(*parked, obs, f.cfg.policy()); got.ReviewedBy[bugbotLogin] {
 				t.Fatalf("old SHA-less summary satisfied the reset head: %+v", got)

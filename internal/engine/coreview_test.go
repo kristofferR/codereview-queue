@@ -285,6 +285,11 @@ func TestCarriedSelfHealActivityWaitsDuringQuotaFreeDedupe(t *testing.T) {
 	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireCoReviewWait {
 		t.Fatalf("carried activity must keep quota-free dedupe waiting, got %+v", got)
 	}
+	obs.Events = []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+		CreatedAt: now, UpdatedAt: now}}
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireDedupe {
+		t.Fatalf("an unable carried reviewer must not keep quota-free dedupe waiting, got %+v", got)
+	}
 }
 
 // TestCompletionVerdictIsParticipationOnly: a Macroscope approvability verdict

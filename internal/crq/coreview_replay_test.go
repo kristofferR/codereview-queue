@@ -69,7 +69,7 @@ func requireBugbot(cfg *Config) {
 
 func onlyBugbot(cfg *Config) {
 	for i := range cfg.CoBots {
-		if cfg.CoBots[i].Name == "bugbot" {
+		if cfg.CoBots[i].Login == bugbotLogin {
 			cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
 			break
 		}

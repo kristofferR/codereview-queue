@@ -240,6 +240,40 @@ func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
 	}
 }
 
+func TestNoteCoAnswersCarriesActivityThroughConcurrentSupersede(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, oldHead, newHead := "o/r", 45, "abcdef1234567890", "fedcba9876543210"
+	f.openPull(repo, pr, oldHead)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &supersedeBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		head:       newHead[:9],
+		now:        base.Add(time.Minute),
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	carried := f.round(repo, pr)
+	if carried == nil || carried.Head != newHead[:9] {
+		t.Fatalf("round was not superseded: %+v", carried)
+	}
+	co := carried.Co(bugbotLogin)
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("superseding round lost observed reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("old-head evidence must not answer the replacement round: %+v", co)
+	}
+}
+
 func TestFeedbackReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	f := newCoReplayFixture(t, base, requireBugbot)

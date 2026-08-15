@@ -2813,8 +2813,23 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	}
 	if _, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || !sameRound(r, round) {
+		if r == nil {
 			return ErrNoChange
+		}
+		if !sameRound(r, round) {
+			// The evidence belongs to the old head, so it cannot answer the
+			// replacement round. It still proves this reviewer is active —
+			// essential for a silent check-only reviewer to be eligible for
+			// self-heal on the new head.
+			before := r.CoBots
+			for _, login := range answered {
+				r.NoteCoActivity(login, now)
+			}
+			if sameCoActivity(before, r.CoBots) {
+				return ErrNoChange
+			}
+			st.PutRound(*r)
+			return nil
 		}
 		before, beforePrimary := r.CoBots, r.PrimaryAnsweredAt
 		for _, login := range answered {
@@ -2845,6 +2860,20 @@ func sameCoAnswers(before, after map[string]CoBotRound) bool {
 		case a.AnsweredAt == nil || b.AnsweredAt == nil:
 			return false
 		case !a.AnsweredAt.Equal(*b.AnsweredAt):
+			return false
+		}
+	}
+	return true
+}
+
+func sameCoActivity(before, after map[string]CoBotRound) bool {
+	for login, a := range after {
+		b := before[login]
+		switch {
+		case a.SeenActiveAt == nil && b.SeenActiveAt == nil:
+		case a.SeenActiveAt == nil || b.SeenActiveAt == nil:
+			return false
+		case !a.SeenActiveAt.Equal(*b.SeenActiveAt):
 			return false
 		}
 	}

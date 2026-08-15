@@ -144,6 +144,9 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 		{name: "selfheal preserves an unable notice received before the primary fired", cp: policy(TriggerSelfHeal), round: firedAfterUnable,
 			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
 				CreatedAt: queuedAt.Add(time.Minute), UpdatedAt: queuedAt.Add(time.Minute)}}}, anchor: firedAt, want: false},
+		{name: "selfheal preserves an unable notice received before enqueue for this head", cp: policy(TriggerSelfHeal), round: firedAfterUnable,
+			obs: Observation{Head: head, Open: true, HeadAt: queuedAt.Add(-time.Hour), Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: queuedAt.Add(-time.Minute), UpdatedAt: queuedAt.Add(-time.Minute)}}}, anchor: firedAt, want: false},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
 		{name: "selfheal needs an anchor", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), want: false},
 		{

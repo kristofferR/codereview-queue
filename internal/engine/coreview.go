@@ -71,14 +71,21 @@ func coCutoff(r state.Round, login string) time.Time {
 	return cut
 }
 
-// coSelfHealCutoff includes the queued portion of this round. A co-reviewer
-// can report that it is unable to finish while the round waits for the primary
-// fire slot; that answer must still suppress a nudge after the primary fires.
-func coSelfHealCutoff(r state.Round, login string) time.Time {
+// coSelfHealCutoff includes the observed head's full lifetime and the queued
+// portion of this round. A co-reviewer can report that it is unable to finish
+// before crq enqueues the head or while it waits for the primary fire slot;
+// either answer must still suppress a later nudge.
+func coSelfHealCutoff(r state.Round, obs Observation, login string) time.Time {
 	cut := coCutoff(r, login)
 	enqueued := r.EnqueuedAt.UTC()
 	if !enqueued.IsZero() && (cut.IsZero() || enqueued.Before(cut)) {
-		return enqueued
+		cut = enqueued
+	}
+	if r.Head == obs.Head {
+		headAt := obs.HeadAt.UTC()
+		if !headAt.IsZero() && (cut.IsZero() || headAt.Before(cut)) {
+			return headAt
+		}
 	}
 	return cut
 }
@@ -442,7 +449,7 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 			return true
 		}
 		co := obs.co(cp.Login)
-		if coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) {
+		if coUnableSince(obs, cp.Login, coSelfHealCutoff(r, obs, cp.Login)) {
 			return false
 		}
 		if !co.AutoActive && !co.ActiveThisRound && r.Co(cp.Login).SeenActiveAt == nil {

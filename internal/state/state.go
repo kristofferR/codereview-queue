@@ -320,6 +320,20 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	r.setCo(login, c)
 }
 
+// NoteCoActivity records durable evidence that login has acted on this pull
+// request without claiming it answered this round. It is used when an
+// observation races a supersede: the old head's evidence still proves the
+// reviewer is active, but cannot satisfy the replacement round's head gate.
+func (r *Round) NoteCoActivity(login string, at time.Time) {
+	c := r.Co(login)
+	if c.SeenActiveAt != nil {
+		return
+	}
+	t := at.UTC()
+	c.SeenActiveAt = &t
+	r.setCo(login, c)
+}
+
 // NotePrimaryAnswer records that login, the primary at the time, was OBSERVED
 // producing head evidence. Same terms as NoteCoAnswer sets for a co-reviewer:
 // the FIRST observation wins, since a round is one head and re-stamping it

@@ -418,6 +418,28 @@ type failNthUpdateStore struct {
 	calls int
 }
 
+type supersedeBeforeUpdateStore struct {
+	StateStore
+	repo string
+	pr   int
+	head string
+	now  time.Time
+	done bool
+}
+
+func (s *supersedeBeforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if !s.done {
+		s.done = true
+		if _, err := s.StateStore.Update(ctx, func(st *State) error {
+			_, err := st.Supersede(s.repo, s.pr, s.head, s.now)
+			return err
+		}); err != nil {
+			return State{}, err
+		}
+	}
+	return s.StateStore.Update(ctx, mutate)
+}
+
 func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
 	s.calls++
 	if s.calls == s.n {

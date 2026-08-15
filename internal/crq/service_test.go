@@ -491,6 +491,36 @@ func (s retryNoChangeStore) Update(_ context.Context, mutate func(*State) error)
 
 func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
 
+// retryMergedHoldStore simulates a CAS retry where the original hold is
+// replaced between mutation attempts.
+type retryMergedHoldStore struct {
+	cfg Config
+	at  time.Time
+}
+
+func (retryMergedHoldStore) Load(context.Context) (State, Revision, error) {
+	return DefaultState(Config{}), Revision{}, nil
+}
+
+func (s retryMergedHoldStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(s.cfg)
+	first.Hold("owner/repo", 12, "original hold", "operator", s.at)
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(s.cfg)
+	second.Hold("owner/repo", 12, "replacement hold", "operator", s.at)
+	if err := mutate(&second); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return second, nil
+		}
+		return State{}, err
+	}
+	return second, nil
+}
+
+func (retryMergedHoldStore) SyncDashboard(context.Context, State) error { return nil }
+
 // adoptionRaceStore loads a queued round with an adoptable command, but every
 // Update simulates another worker already holding the fire slot.
 type adoptionRaceStore struct {
@@ -2299,6 +2329,28 @@ func TestPumpDropsMergedPRWhileHeld(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("closed PR cleanup did not preserve the abandoned round in the archive")
+	}
+}
+
+func TestSweepMergedHoldDoesNotRetireAReplacementHoldAfterCASRetry(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	now := time.Now().UTC()
+	svc := NewService(cfg, gh, retryMergedHoldStore{cfg: cfg, at: now}, nil)
+	st := DefaultState(cfg)
+	st.Hold("owner/repo", 12, "original hold", "operator", now)
+
+	_, result, changed, err := svc.sweepMergedHold(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || result.Action != "lost_race" {
+		t.Fatalf("result = %#v, changed = %t; want lost race", result, changed)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("posted comments = %v, want none for replacement hold", gh.posted)
 	}
 }
 

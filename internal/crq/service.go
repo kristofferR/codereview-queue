@@ -2906,6 +2906,7 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 	}
 	removed := false
 	updated, err := s.store.Update(ctx, func(current *State) error {
+		removed = false
 		got, held := current.HeldPR(repo, pr)
 		if !held || got.Reason != hold.Reason || got.By != hold.By || !got.At.Equal(hold.At) {
 			return ErrNoChange

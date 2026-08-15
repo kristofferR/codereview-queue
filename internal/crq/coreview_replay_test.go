@@ -263,6 +263,76 @@ func TestFeedbackReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestPumpReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 42, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	if _, err := f.svc.Pump(f.ctx); !errors.Is(err, writeErr) {
+		t.Fatalf("Pump error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestProgressSlotRoundReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 43, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the CodeRabbit fire, got %+v", res)
+	}
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	if _, err := f.svc.progressSlotRound(f.ctx, *f.round(repo, pr)); !errors.Is(err, writeErr) {
+		t.Fatalf("progressSlotRound error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseFired {
+		t.Fatalf("progressSlotRound advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestSweepReviewingReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 44, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedRound(t, f.store, f.cfg, repo, pr, sha[:9], PhaseReviewing, base.Add(-time.Minute), 400)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.svc.sweepReviewing(f.ctx, st, base); !errors.Is(err, writeErr) {
+		t.Fatalf("sweepReviewing error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
+		t.Fatalf("sweepReviewing advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
 // A silent clean Bugbot round leaves no timeline evidence, and observe fetches
 // checks only for the current head. The durable activity proof carried by
 // Supersede is therefore the only signal self-heal can use when Bugbot misses

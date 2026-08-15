@@ -554,7 +554,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// does not run here — is observed on this path and nowhere else, so a
 	// co-reviewer could review it every time and crq would never notice. That
 	// is exactly the case that made a working Codex read as "never answered".
-	s.noteCoAnswers(ctx, cfg, *next, obs.eng, now)
+	if err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
+		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
+	}
 	// Record a rate-limit notice before deciding, whichever round it answered.
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the
@@ -922,7 +924,9 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	// straight from fired to completed, and a completed round is never looked at
 	// again. The co-reviewer that answered it would be lost with it, leaving a
 	// working bot shown as silent for want of the one field that says otherwise.
-	s.noteCoAnswers(ctx, cfg, slot, obs.eng, now)
+	if err := s.noteCoAnswers(ctx, cfg, slot, obs.eng, now); err != nil {
+		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(slot.Repo, slot.PR), err)
+	}
 	tr := engine.Progress(slot, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -1146,7 +1150,9 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
-	s.noteCoAnswers(ctx, cfg, *target, obs.eng, now)
+	if err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
+		return st, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(target.Repo, target.PR), err)
+	}
 	tr := engine.Progress(*target, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil

@@ -1816,16 +1816,28 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		}
 	}
 	if carried {
-		// EnqueuedAt is always a safe current-head boundary. Refine it when the
-		// force-push timeline is available, but do not wedge this quota-free wait
-		// on a transient GraphQL failure.
+		// A matching force-push is the exact head boundary. With no force-push,
+		// HeadAt is the evidence boundary when the observation already contains
+		// activity for this round: an auto-review can legitimately finish after an
+		// ordinary push but before crq enqueues the head. Otherwise EnqueuedAt keeps
+		// the self-heal grace tied to when crq saw an old commit. It is also the safe
+		// fallback when the timeline is unavailable or its newest force-push belongs
+		// to an intermediate head.
 		headBoundary = round.EnqueuedAt.UTC()
 		fp, err := s.latestHeadForcePush(ctx, round.Repo, round.PR)
-		// The latest force-push is a boundary only when that event installed
-		// this head. A later fast-forward can leave an unrelated event as the
-		// newest one; EnqueuedAt is then the first safe witness for this head.
-		if err == nil && dialect.SHAPrefixMatch(fp.head, round.Head) {
+		switch {
+		case err != nil:
+		case dialect.SHAPrefixMatch(fp.head, round.Head):
 			headBoundary = fp.at
+		case !fp.at.IsZero():
+		default:
+			for _, cp := range cfg.policy().CoReviewerPolicies() {
+				co := round.Co(cp.Login)
+				if co.SeenActiveAt != nil && co.AnsweredAt == nil && obs.CoSeenFor(cp.Login).ActiveThisRound {
+					headBoundary = obs.HeadAt.UTC()
+					break
+				}
+			}
 		}
 		if headBoundary.After(anchor) {
 			anchor = headBoundary
@@ -3037,6 +3049,9 @@ func sameCoActivity(before, after map[string]CoBotRound) bool {
 	}
 	for login, a := range after {
 		b := before[login]
+		if a.ActivityCarried != b.ActivityCarried {
+			return false
+		}
 		switch {
 		case a.SeenActiveAt == nil && b.SeenActiveAt == nil:
 		case a.SeenActiveAt == nil || b.SeenActiveAt == nil:

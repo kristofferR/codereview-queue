@@ -373,9 +373,10 @@ func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
 }
 
 func TestNormalizeRequeuesCompletedRoundWithPreservedRestoredActivity(t *testing.T) {
-	seen := t0.Add(time.Second)
-	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: t0.Add(time.Minute),
-		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, ActivityCarried: true}}}
 	s := State{
 		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
 		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
@@ -389,6 +390,18 @@ func TestNormalizeRequeuesCompletedRoundWithPreservedRestoredActivity(t *testing
 	}
 	if !r.PrimarySettled {
 		t.Fatal("restored co-review work must preserve the completed primary side")
+	}
+}
+
+func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
+	var r Round
+	r.NoteCoActivity("cursor[bot]", t0)
+	if co := r.Co("cursor[bot]"); !co.ActivityCarried {
+		t.Fatalf("historical activity was not marked as carried: %+v", co)
+	}
+	r.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	if co := r.Co("cursor[bot]"); co.ActivityCarried || co.AnsweredAt == nil {
+		t.Fatalf("current-head answer did not replace carried provenance: %+v", co)
 	}
 }
 

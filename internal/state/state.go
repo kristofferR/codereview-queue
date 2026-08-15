@@ -221,6 +221,10 @@ type CoBotRound struct {
 	// whose clean output exists only as a previous head's check run remains
 	// eligible for self-heal when it silently misses the next head.
 	SeenActiveAt *time.Time `json:"seen_active_at,omitempty"`
+	// ActivityCarried says SeenActiveAt came from another head. The timestamp
+	// alone cannot prove that during a supersede race: the old-head observation
+	// may be recorded on the replacement after it was enqueued.
+	ActivityCarried bool `json:"activity_carried,omitempty"`
 	// AnsweredAt is when crq FIRST observed this bot produce head evidence — a
 	// review, a clean summary at the SHA, a completed check run.
 	//
@@ -240,7 +244,7 @@ type CoBotRound struct {
 
 func (c CoBotRound) empty() bool {
 	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil &&
-		c.SeenActiveAt == nil && c.AnsweredAt == nil &&
+		c.SeenActiveAt == nil && !c.ActivityCarried && c.AnsweredAt == nil &&
 		len(c.unknown) == 0
 }
 
@@ -312,7 +316,7 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 // SeenActiveAt is initialized beside it and then carried to later heads.
 func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	c := r.Co(login)
-	if c.AnsweredAt != nil && c.SeenActiveAt != nil {
+	if c.AnsweredAt != nil && c.SeenActiveAt != nil && !c.ActivityCarried {
 		return
 	}
 	t := at.UTC()
@@ -322,6 +326,7 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	if c.SeenActiveAt == nil {
 		c.SeenActiveAt = &t
 	}
+	c.ActivityCarried = false
 	r.setCo(login, c)
 }
 
@@ -331,11 +336,11 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 // reviewer is active, but cannot satisfy the replacement round's head gate.
 func (r *Round) NoteCoActivity(login string, at time.Time) {
 	c := r.Co(login)
-	if c.SeenActiveAt != nil {
-		return
+	if c.SeenActiveAt == nil {
+		t := at.UTC()
+		c.SeenActiveAt = &t
 	}
-	t := at.UTC()
-	c.SeenActiveAt = &t
+	c.ActivityCarried = true
 	r.setCo(login, c)
 }
 
@@ -624,7 +629,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 11
+const WriterCaps = 12
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -1206,13 +1211,15 @@ func carryCoActivity(next *Round, activity map[string]time.Time) bool {
 			// it before an older writer completed this replacement round. Its
 			// timestamp predating the round preserves that provenance even when
 			// there is nothing left to copy from the activity index.
-			if current.AnsweredAt == nil && !next.EnqueuedAt.IsZero() && current.SeenActiveAt.Before(next.EnqueuedAt) {
+			if current.AnsweredAt == nil && (current.ActivityCarried ||
+				!next.EnqueuedAt.IsZero() && current.SeenActiveAt.Before(next.EnqueuedAt)) {
 				restored = true
 			}
 			continue
 		}
 		seen := seenAt.UTC()
 		current.SeenActiveAt = &seen
+		current.ActivityCarried = current.AnsweredAt == nil || current.AnsweredAt.Before(seenAt)
 		next.setCo(login, current)
 		if current.AnsweredAt == nil || current.AnsweredAt.Before(seenAt) {
 			restored = true

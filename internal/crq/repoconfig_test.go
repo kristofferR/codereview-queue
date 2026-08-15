@@ -366,6 +366,52 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestChangingPrimaryInvalidatesRestoredRoundSettlement(t *testing.T) {
+	before := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "codex",
+	})
+	tests := []struct {
+		name  string
+		after Config
+	}{
+		{
+			name: "primary becomes required",
+			after: before.ForRepo(RepoReviewers{
+				CoBots: []string{"codex"}, SetCoBots: true,
+				Required: []string{"codex", before.Bot}, SetRequired: true,
+			}),
+		},
+		{
+			name: "configured primary changes",
+			after: func() Config {
+				cfg := before
+				cfg.Bot = "replacement-reviewer[bot]"
+				cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, cfg.RequiredBots, cfg.CoBots, false)
+				return cfg
+			}(),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := State{}
+			r, err := st.NewRound("o/r", 3, "aaaaaaaa1", time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.PrimarySettled = true
+			st.PutRound(*r)
+			svc := NewService(before, newFakeGitHub(), NewMemoryStore(before), nil)
+
+			svc.reopenForChangedReviewers(&st, "o/r", before, tc.after, map[int]bool{3: true})
+
+			if got := st.Round("o/r", 3); got == nil || got.PrimarySettled {
+				t.Fatalf("round = %+v, want stale primary settlement cleared", got)
+			}
+		})
+	}
+}
+
 func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{

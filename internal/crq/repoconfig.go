@@ -508,6 +508,7 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 	// reviews, against a shared allowance, to reach the answer already on
 	// record. A narrowing must be free.
 	added := addedReviewers(before, after, beforeCo, afterCo)
+	primaryChanged := settledPrimaryInvalidated(before, after)
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
@@ -515,9 +516,12 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		forced := forcedCoReviewers(round.ForceCoReviewers, before, after)
 		switch round.Phase {
 		case PhaseQueued, PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
-			if !sameLogins(round.ForceCoReviewers, forced) {
+			if !sameLogins(round.ForceCoReviewers, forced) || round.PrimarySettled && primaryChanged {
 				updated := round
 				updated.ForceCoReviewers = forced
+				if primaryChanged {
+					updated.PrimarySettled = false
+				}
 				st.PutRound(updated)
 			}
 			continue
@@ -548,6 +552,21 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			s.log.Printf("reviewers: requeued %s#%d@%s — the reviewer set changed", round.Repo, round.PR, round.Head)
 		}
 	}
+}
+
+// settledPrimaryInvalidated reports whether a restored round's proof that its
+// old primary side was final can no longer satisfy the effective primary.
+func settledPrimaryInvalidated(before, after Config) bool {
+	afterPrimary, afterHasPrimary := after.Primary()
+	if !afterHasPrimary {
+		return false
+	}
+	beforePrimary, beforeHadPrimary := before.Primary()
+	if !beforeHadPrimary || !sameBot(beforePrimary.Login, afterPrimary.Login) {
+		return true
+	}
+	return containsBot(after.RequiredBots, afterPrimary.Login) &&
+		!containsBot(before.RequiredBots, beforePrimary.Login)
 }
 
 // forcedCoReviewers carries the one exceptional trigger an existing round

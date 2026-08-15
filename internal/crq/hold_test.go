@@ -145,7 +145,8 @@ func TestHoldRemovesNoticeIfReleasedBeforePostCompletes(t *testing.T) {
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	setHoldCapableLeader(t, ctx, store, now)
-	svc := NewService(cfg, gh, store, nil)
+	logs := &recordingLogger{}
+	svc := NewService(cfg, gh, store, logs)
 	svc.now = func() time.Time { return now }
 	gh.postHook = func() {
 		if _, err := svc.Unhold(ctx, "owner/repo", 12); err != nil {
@@ -166,6 +167,9 @@ func TestHoldRemovesNoticeIfReleasedBeforePostCompletes(t *testing.T) {
 	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
 		t.Fatalf("delete calls = %v, want the stale hold comment", gh.deleteCalls)
 	}
+	if !logs.contains("owner/repo#12 hold was released before its notice completed") {
+		t.Fatalf("hold race logs = %v, want the surviving released state", logs.lines)
+	}
 }
 
 func TestHoldRemovesNoticeIfLegacyWriterReplacesTheHold(t *testing.T) {
@@ -175,7 +179,8 @@ func TestHoldRemovesNoticeIfLegacyWriterReplacesTheHold(t *testing.T) {
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	setHoldCapableLeader(t, ctx, store, now)
-	svc := NewService(cfg, gh, store, nil)
+	logs := &recordingLogger{}
+	svc := NewService(cfg, gh, store, logs)
 	svc.now = func() time.Time { return now }
 	replacementAt := now.Add(time.Minute)
 	gh.postHook = func() {
@@ -206,6 +211,9 @@ func TestHoldRemovesNoticeIfLegacyWriterReplacesTheHold(t *testing.T) {
 	}
 	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
 		t.Fatalf("delete calls = %v, want the stale hold comment", gh.deleteCalls)
+	}
+	if !logs.contains("owner/repo#12 hold was replaced before its notice completed: waiting for security approval") {
+		t.Fatalf("hold race logs = %v, want the surviving replacement hold", logs.lines)
 	}
 }
 

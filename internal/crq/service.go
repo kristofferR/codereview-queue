@@ -207,7 +207,14 @@ func (s *Service) hold(
 	// stale notice and report the state that actually survived.
 	result = s.reconcileHoldNotice(ctx, result, token, comment, commentErr)
 	if s.log != nil {
-		s.log.Printf("%s#%d held: %s", repo, pr, reason)
+		switch {
+		case !result.Held:
+			s.log.Printf("%s#%d hold was released before its notice completed", repo, pr)
+		case result.Reason != reason:
+			s.log.Printf("%s#%d hold was replaced before its notice completed: %s", repo, pr, result.Reason)
+		default:
+			s.log.Printf("%s#%d held: %s", repo, pr, reason)
+		}
 	}
 	return result, nil
 }

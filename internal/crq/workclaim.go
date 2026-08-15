@@ -17,8 +17,8 @@ import (
 )
 
 // WorkClaimTTL is long enough for a substantial fix pass, but finite so an
-// interrupted agent cannot permanently keep a PR away from autofix. Every
-// interactive next/wait/loop call renews it.
+// interrupted agent cannot permanently keep a PR away from autofix. Interactive
+// next/wait/loop calls renew it as expiry approaches.
 const (
 	WorkClaimTTL             = 2 * time.Hour
 	workClaimRenewalInterval = WorkClaimTTL / 3
@@ -43,52 +43,106 @@ type WorkClaimResult struct {
 // whichever claimant wins the state CAS works, and the other waits.
 func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int) (workClaimOutcome, error) {
 	repo = NormalizeRepo(repo)
-	now := s.clock().UTC()
-	if s.cfg.DryRun {
-		return workClaimOutcome{acquired: true, until: now.Add(WorkClaimTTL)}, nil
-	}
 	owner, by := s.workClaimOwner()
 	dispatchToken := s.dispatchToken()
-	outcome := workClaimOutcome{}
-	_, err := s.store.Update(ctx, func(st *State) error {
-		outcome = workClaimOutcome{}
-		// The unattended fix session uses `crq next` as its pre-push oracle. It
-		// already won exclusion through this exact dispatch token, so treating it
-		// as a competing interactive caller would deadlock it on its own claim.
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return workClaimOutcome{}, err
+		}
+		outcome, _, err := s.interactiveWorkClaim(&st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), false)
+		return outcome, err
+	}
+
+	for {
+		outcome := workClaimOutcome{}
+		st, err := s.store.Update(ctx, func(st *State) error {
+			var changed bool
+			var err error
+			outcome, changed, err = s.interactiveWorkClaim(
+				st, repo, pr, owner, by, dispatchToken, s.clock().UTC(), true,
+			)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				return ErrNoChange
+			}
+			return nil
+		})
+		if err != nil || !outcome.acquired {
+			return outcome, err
+		}
+
+		// A store update can spend an unbounded time retrying transport or CAS
+		// operations after the mutation callback. Verify that the lease which
+		// actually committed still has a renewal interval left before proceeding.
+		now := s.clock().UTC()
 		if dispatchToken != "" && st.OwnsLiveDispatch(repo, pr, dispatchToken, now) {
-			outcome.acquired = true
-			outcome.until = now.Add(DispatchTTL)
-			return ErrNoChange
+			return outcome, nil
 		}
-		if existing, ok := st.WorkClaim(repo, pr, now); ok && existing.Owner != owner {
-			outcome.reason = "interactive work is already claimed by " + existing.By
-			outcome.until = existing.ExpiresAt
-			return ErrNoChange
+		if claim, ok := st.WorkClaim(repo, pr, now); ok && claim.Owner == owner &&
+			claim.ExpiresAt.After(now.Add(workClaimRenewalInterval)) {
+			outcome.until = claim.ExpiresAt
+			return outcome, nil
 		}
-		round := st.Round(repo, pr)
-		if (round != nil && round.DispatchHeld(now)) || st.ArchivedDispatchHeld(repo, pr, now) {
-			outcome.reason = "unattended autofix is already working on this pull request"
-			outcome.until = now.Add(DispatchTTL)
-			return ErrNoChange
+	}
+}
+
+func (s *Service) interactiveWorkClaim(
+	st *State,
+	repo string,
+	pr int,
+	owner string,
+	by string,
+	dispatchToken string,
+	now time.Time,
+	persist bool,
+) (workClaimOutcome, bool, error) {
+	// The unattended fix session uses `crq next` as its pre-push oracle. It
+	// already won exclusion through this exact dispatch token, so treating it
+	// as a competing interactive caller would deadlock it on its own claim.
+	if dispatchToken != "" && st.OwnsLiveDispatch(repo, pr, dispatchToken, now) {
+		return workClaimOutcome{acquired: true, until: now.Add(DispatchTTL)}, false, nil
+	}
+	existing, ownsExisting := st.WorkClaim(repo, pr, now)
+	if ownsExisting && existing.Owner != owner {
+		return workClaimOutcome{
+			reason: "interactive work is already claimed by " + existing.By,
+			until:  existing.ExpiresAt,
+		}, false, nil
+	}
+	round := st.Round(repo, pr)
+	if (round != nil && round.DispatchHeld(now)) || st.ArchivedDispatchHeld(repo, pr, now) {
+		return workClaimOutcome{
+			reason: "unattended autofix is already working on this pull request",
+			until:  now.Add(DispatchTTL),
+		}, false, nil
+	}
+	if lagging := laggingAutofixHosts(*st, now); len(lagging) > 0 {
+		return workClaimOutcome{}, false, fmt.Errorf("cannot safely claim interactive work while autofix host(s) %s run a version that ignores work claims; upgrade those daemons first",
+			strings.Join(lagging, ", "))
+	}
+	if !persist {
+		until := now.Add(WorkClaimTTL)
+		if ownsExisting {
+			until = existing.ExpiresAt
 		}
-		if lagging := laggingAutofixHosts(*st, now); len(lagging) > 0 {
-			return fmt.Errorf("cannot safely claim interactive work while autofix host(s) %s run a version that ignores work claims; upgrade those daemons first",
-				strings.Join(lagging, ", "))
-		}
-		claimedAt := now
-		if existing, ok := st.WorkClaim(repo, pr, now); ok && existing.Owner == owner {
-			claimedAt = existing.ClaimedAt
-		}
-		claim := WorkClaim{
-			Owner: owner, By: by, ClaimedAt: claimedAt,
-			ExpiresAt: now.Add(WorkClaimTTL),
-		}
-		st.SetWorkClaim(repo, pr, claim)
-		outcome.acquired = true
-		outcome.until = claim.ExpiresAt
-		return nil
-	})
-	return outcome, err
+		return workClaimOutcome{acquired: true, until: until}, false, nil
+	}
+	if ownsExisting && existing.ExpiresAt.After(now.Add(workClaimRenewalInterval)) {
+		return workClaimOutcome{acquired: true, until: existing.ExpiresAt}, false, nil
+	}
+	claimedAt := now
+	if ownsExisting {
+		claimedAt = existing.ClaimedAt
+	}
+	claim := WorkClaim{
+		Owner: owner, By: by, ClaimedAt: claimedAt,
+		ExpiresAt: now.Add(WorkClaimTTL),
+	}
+	st.SetWorkClaim(repo, pr, claim)
+	return workClaimOutcome{acquired: true, until: claim.ExpiresAt}, true, nil
 }
 
 func (s *Service) dispatchToken() string {

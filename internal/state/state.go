@@ -2092,7 +2092,7 @@ func (s *State) Normalize(now time.Time) {
 	// An interrupted interactive loop must not dead-letter a PR. Unlike a
 	// running dispatch there is no background process to heartbeat while an
 	// agent edits, so the claim carries a generous fixed expiry and is renewed
-	// by every next/wait/loop call.
+	// by next/wait/loop as expiry approaches.
 	for key, claim := range s.WorkClaims {
 		if !claim.Live(now) {
 			delete(s.WorkClaims, key)

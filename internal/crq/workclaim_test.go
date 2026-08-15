@@ -23,10 +23,24 @@ type cancelingWorkClaimStore struct {
 	once    sync.Once
 }
 
+type delayedWorkClaimStore struct {
+	StateStore
+	afterFirstUpdate func()
+	once             sync.Once
+}
+
 func (s *cancelingWorkClaimStore) Update(ctx context.Context, _ func(*State) error) (State, error) {
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
 	return State{}, ctx.Err()
+}
+
+func (s *delayedWorkClaimStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	st, err := s.StateStore.Update(ctx, mutate)
+	if err == nil {
+		s.once.Do(s.afterFirstUpdate)
+	}
+	return st, err
 }
 
 func (s retryWorkClaimStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
@@ -141,20 +155,133 @@ func TestInteractiveClaimRenewsForItsOwnerAndBlocksAnother(t *testing.T) {
 	if claim, err := first.claimInteractiveWork(ctx, "owner/repo", 14); err != nil || !claim.acquired {
 		t.Fatalf("first claim = %+v, %v", claim, err)
 	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	first.now = func() time.Time { return base.Add(time.Hour) }
+	kept, err := first.claimInteractiveWork(ctx, "owner/repo", 14)
+	if err != nil || !kept.acquired || !kept.until.Equal(base.Add(WorkClaimTTL)) {
+		t.Fatalf("claim before renewal window = %+v, %v", kept, err)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("early renewal changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+
+	renewAt := base.Add(WorkClaimTTL - workClaimRenewalInterval + time.Second)
+	first.now = func() time.Time { return renewAt }
 	renewed, err := first.claimInteractiveWork(ctx, "owner/repo", 14)
-	if err != nil || !renewed.acquired || !renewed.until.Equal(base.Add(time.Hour+WorkClaimTTL)) {
+	if err != nil || !renewed.acquired || !renewed.until.Equal(renewAt.Add(WorkClaimTTL)) {
 		t.Fatalf("renewed claim = %+v, %v", renewed, err)
 	}
 
-	other := workClaimService(t, store, cfg, "session-b", "linux:other", base.Add(time.Hour))
+	other := workClaimService(t, store, cfg, "session-b", "linux:other", renewAt)
 	blocked, err := other.claimInteractiveWork(ctx, "owner/repo", 14)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked.acquired || !strings.Contains(blocked.reason, "mac:first") {
 		t.Fatalf("other owner = %+v, want current owner conflict", blocked)
+	}
+}
+
+func TestInteractiveClaimRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	store := &delayedWorkClaimStore{StateStore: NewMemoryStore(cfg)}
+	store.afterFirstUpdate = func() { now = base.Add(WorkClaimTTL + time.Minute) }
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", base)
+	manual.now = func() time.Time { return now }
+
+	claim, err := manual.claimInteractiveWork(ctx, "owner/repo", 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claim.acquired || !claim.until.Equal(now.Add(WorkClaimTTL)) {
+		t.Fatalf("claim after delayed update = %+v, want expiry %s", claim, now.Add(WorkClaimTTL))
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, ok := st.WorkClaim("owner/repo", 21, now)
+	if !ok || persisted.Owner != "session-a" || !persisted.ExpiresAt.Equal(claim.until) {
+		t.Fatalf("persisted claim = %+v, %t", persisted, ok)
+	}
+}
+
+func TestInteractiveClaimDryRunReportsExistingOwner(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	owner := workClaimService(t, store, cfg, "session-a", "mac:first", now)
+	if claim, err := owner.claimInteractiveWork(ctx, "owner/repo", 22); err != nil || !claim.acquired {
+		t.Fatalf("first claim = %+v, %v", claim, err)
+	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.DryRun = true
+	dry := workClaimService(t, store, cfg, "session-b", "linux:other", now)
+	claim, err := dry.claimInteractiveWork(ctx, "owner/repo", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.acquired || !strings.Contains(claim.reason, "mac:first") {
+		t.Fatalf("dry-run claim = %+v, want existing-owner conflict", claim)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run claim changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+}
+
+func TestInteractiveClaimDryRunReportsAutofixDispatch(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	repo, pr, head := "owner/repo", 23, "abcdef126"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+	autofix := NewService(cfg, newFakeGitHub(), store, nil)
+	if ok, why, _ := autofix.claimDispatch(ctx,
+		NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}, "dispatch", 3); !ok {
+		t.Fatalf("autofix claim failed: %s", why)
+	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.DryRun = true
+	dry := workClaimService(t, store, cfg, "session-b", "linux:other", now)
+	claim, err := dry.claimInteractiveWork(ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.acquired || !strings.Contains(claim.reason, "autofix") {
+		t.Fatalf("dry-run claim = %+v, want autofix conflict", claim)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run claim changed state revision %d -> %d", before.Rev, after.Rev)
 	}
 }
 

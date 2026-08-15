@@ -505,21 +505,27 @@ func hasCommentBody(comments []ghapi.IssueComment, body string) bool {
 	return false
 }
 
-// headForcePushCutoff returns when the PR head was last force-pushed (zero when
-// never), or an error when the lookup could not run. The caller must not adopt a
-// command without this guard: a lookup error means the force-push protection is
-// unavailable, so adoption is skipped rather than done blind.
-func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) (time.Time, error) {
+type headForcePush struct {
+	at   time.Time
+	head string
+}
+
+// latestHeadForcePush returns when the PR head was last force-pushed and the
+// commit that event installed. A zero value means the PR has no such event.
+func (s *Service) latestHeadForcePush(ctx context.Context, repo string, pr int) (headForcePush, error) {
 	owner, name, found := strings.Cut(repo, "/")
 	if !found {
-		return time.Time{}, nil
+		return headForcePush{}, nil
 	}
 	var result struct {
 		Repository struct {
 			PullRequest struct {
 				TimelineItems struct {
 					Nodes []struct {
-						CreatedAt time.Time `json:"createdAt"`
+						CreatedAt   time.Time `json:"createdAt"`
+						AfterCommit struct {
+							OID string `json:"oid"`
+						} `json:"afterCommit"`
 					} `json:"nodes"`
 				} `json:"timelineItems"`
 			} `json:"pullRequest"`
@@ -529,17 +535,27 @@ func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) 
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
       timelineItems(itemTypes: HEAD_REF_FORCE_PUSHED_EVENT, last: 1) {
-        nodes { ... on HeadRefForcePushedEvent { createdAt } }
+        nodes { ... on HeadRefForcePushedEvent { createdAt afterCommit { oid } } }
       }
     }
   }
 }`
 	if err := s.gh.GraphQL(ctx, query, map[string]any{"owner": owner, "name": name, "number": pr}, &result); err != nil {
-		return time.Time{}, err
+		return headForcePush{}, err
 	}
 	nodes := result.Repository.PullRequest.TimelineItems.Nodes
 	if len(nodes) == 0 {
-		return time.Time{}, nil
+		return headForcePush{}, nil
 	}
-	return nodes[len(nodes)-1].CreatedAt.UTC(), nil
+	latest := nodes[len(nodes)-1]
+	return headForcePush{at: latest.CreatedAt.UTC(), head: dialect.ShortOID(latest.AfterCommit.OID)}, nil
+}
+
+// headForcePushCutoff returns when the PR head was last force-pushed (zero when
+// never), or an error when the lookup could not run. The caller must not adopt a
+// command without this guard: a lookup error means the force-push protection is
+// unavailable, so adoption is skipped rather than done blind.
+func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) (time.Time, error) {
+	fp, err := s.latestHeadForcePush(ctx, repo, pr)
+	return fp.at, err
 }

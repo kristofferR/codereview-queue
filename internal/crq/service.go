@@ -640,6 +640,22 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if err := s.noteCoAnswers(ctx, cfg, round, obs.eng, now); err != nil {
 			return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
 		}
+		// noteCoAnswers can add the first durable proof that a self-heal
+		// reviewer is active. Reload it before applying the verdict: a dedupe
+		// chosen without that proof may now need to wait for this head.
+		fresh, _, err := s.store.Load(ctx)
+		if err != nil {
+			return PumpResult{}, false, err
+		}
+		current := fresh.Round(round.Repo, round.PR)
+		if !sameRound(current, round) {
+			continue
+		}
+		round = *current
+		d = engine.DecideFire(s.global(fresh, now), round, obs.eng, now, cfg.policy())
+		if !quotaFreeVerdict(d.Verdict) {
+			continue
+		}
 		res, err := s.applyFire(ctx, cfg, round, obs.eng, d, now)
 		if err != nil {
 			return PumpResult{}, false, err
@@ -682,6 +698,19 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	}
 	if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
 		return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
+	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	current := fresh.Round(round.Repo, round.PR)
+	if !sameRound(current, *round) {
+		return PumpResult{}, false, nil
+	}
+	round = current
+	d = engine.DecideFire(s.global(fresh, now), *round, obs.eng, now, cfg.policy())
+	if !quotaFreeVerdict(d.Verdict) {
+		return PumpResult{}, false, nil
 	}
 	res, err := s.applyFire(ctx, cfg, *round, obs.eng, d, now)
 	if err != nil {
@@ -1728,23 +1757,22 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	if s.cfg.DryRun {
 		return result, nil
 	}
-	// The anchor is the wait's evidence floor, so it must be when this HEAD
-	// appeared — not when crq happened to notice it. Defaulting to now was a
-	// repeatable 20-minute timeout on a primary-unavailable round: with no
-	// CodeRabbit review to anchor on and no trigger posted (the co-reviewer
-	// auto-reviews), the floor landed after the co-reviewer's existing answer
-	// for this head, so the wait could never be satisfied and the bot had no
-	// reason to speak again. The candidates below only narrow it further.
+	// The anchor is the wait's evidence floor. Prefer when this HEAD appeared;
+	// when no event proves that boundary, EnqueuedAt below is the conservative
+	// witness that crq had seen it. Defaulting to now was a repeatable 20-minute
+	// timeout on a primary-unavailable round: with no CodeRabbit review to anchor
+	// on and no trigger posted (the co-reviewer auto-reviews), the floor landed
+	// after the co-reviewer's existing answer for this head, so the wait could
+	// never be satisfied and the bot had no reason to speak again.
 	anchor := now
 	if !obs.HeadAt.IsZero() {
 		anchor = obs.HeadAt
 	}
 	// A carried reviewer can make a SHA-less clean summary from an earlier head
 	// gate this wait. If the PR was reset to an old commit, the commit date is
-	// older than that stale summary; the force-push event is the true boundary
-	// at which this commit became the head again.
+	// older than that stale summary, so require a boundary tied to this head.
 	carried := false
-	var forcePushCutoff time.Time
+	var headBoundary time.Time
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil {
 			carried = true
@@ -1752,14 +1780,20 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		}
 	}
 	if carried {
-		headAt, err := s.headForcePushCutoff(ctx, round.Repo, round.PR)
+		fp, err := s.latestHeadForcePush(ctx, round.Repo, round.PR)
 		if err != nil {
 			return result, err
 		}
-		if headAt.After(anchor) {
-			anchor = headAt
+		// The latest force-push is a boundary only when that event installed
+		// this head. A later fast-forward can leave an unrelated event as the
+		// newest one; EnqueuedAt is then the first safe witness for this head.
+		headBoundary = round.EnqueuedAt.UTC()
+		if dialect.SHAPrefixMatch(fp.head, round.Head) {
+			headBoundary = fp.at
 		}
-		forcePushCutoff = headAt
+		if headBoundary.After(anchor) {
+			anchor = headBoundary
+		}
 	}
 	// cfg.Bot, not this process's startup one: the primary is a fleet setting
 	// like any other, and reading the stale one made a review by the primary
@@ -1769,7 +1803,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	for _, rv := range obs.Reviews {
 		if isConfiguredBotLogin(cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
 			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) &&
-			(forcePushCutoff.IsZero() || !rv.SubmittedAt.Before(forcePushCutoff)) {
+			(headBoundary.IsZero() || !rv.SubmittedAt.Before(headBoundary)) {
 			anchor = rv.SubmittedAt
 		}
 	}

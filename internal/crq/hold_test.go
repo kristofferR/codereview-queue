@@ -134,6 +134,9 @@ func TestHoldSurvivesACommentPostFailure(t *testing.T) {
 	if !strings.Contains(result.Warning, "comments disabled") {
 		t.Fatalf("warning = %q, want comment failure", result.Warning)
 	}
+	if strings.Contains(result.Warning, "is held") {
+		t.Fatalf("warning must not assert a state that reconciliation can change: %q", result.Warning)
+	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +249,29 @@ func TestUnholdPostsReleaseNotice(t *testing.T) {
 	if len(gh.posted) != 1 || !strings.Contains(gh.posted[0], "<!-- crq:unhold -->") ||
 		!strings.Contains(gh.posted[0], "hold has been released") {
 		t.Fatalf("posted comments = %v, want one release notice", gh.posted)
+	}
+}
+
+func TestUnholdCommentPostFailureUsesStateNeutralWarning(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.postErrs = map[string]error{fakeKey("owner/repo", 12): errors.New("comments disabled")}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting for product approval", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	result, err := svc.Unhold(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Warning, "comments disabled") || strings.Contains(result.Warning, "released") {
+		t.Fatalf("warning = %q, want state-neutral comment failure", result.Warning)
 	}
 }
 

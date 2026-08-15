@@ -195,7 +195,7 @@ func (s *Service) hold(
 		// The hold is the safety boundary and has already committed. A missing
 		// notice must be visible to the caller, but must not roll the hold back and
 		// reopen the race it was created to close.
-		result.Warning = "PR is held, but the hold comment could not be posted: " + commentErr.Error()
+		result.Warning = "hold comment could not be posted: " + commentErr.Error()
 		if s.log != nil {
 			s.log.Printf("warning: %s#%d held but its PR comment could not be posted: %v", repo, pr, commentErr)
 		}
@@ -287,7 +287,7 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 		s.sync(ctx, state)
 		comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, unholdComment())
 		if commentErr != nil {
-			result.Warning = "PR hold was released, but the release comment could not be posted: " + commentErr.Error()
+			result.Warning = "release comment could not be posted: " + commentErr.Error()
 			if s.log != nil {
 				s.log.Printf("warning: %s#%d released but its PR comment could not be posted: %v", repo, pr, commentErr)
 			}

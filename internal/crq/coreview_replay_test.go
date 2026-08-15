@@ -891,12 +891,17 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 			}
 			oldSummary := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: tc.oldSummaryAt}
 			oldCommand := engine.CommandSeen{ID: 700, CreatedAt: tc.oldSummaryAt.Add(-time.Minute)}
+			// The queued round's zero cutoff makes the stale SHA-less summary
+			// appear active in the real observation path.
 			obs := engine.Observation{
 				Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
 				Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-2 * time.Minute)}},
 				Events:  []dialect.BotEvent{oldSummary},
 				Co: map[string]engine.CoSeen{
-					dialect.NormalizeBotName(bugbotLogin): {Commands: []engine.CommandSeen{oldCommand}},
+					dialect.NormalizeBotName(bugbotLogin): {
+						Commands:        []engine.CommandSeen{oldCommand},
+						ActiveThisRound: true,
+					},
 				},
 			}
 

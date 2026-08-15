@@ -1809,8 +1809,8 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	carried := false
 	var headBoundary time.Time
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
-		if cp.Trigger != engine.TriggerNever && round.Co(cp.Login).SeenActiveAt != nil &&
-			!obs.CoSeenFor(cp.Login).ActiveThisRound {
+		co := round.Co(cp.Login)
+		if cp.Trigger != engine.TriggerNever && co.SeenActiveAt != nil && co.AnsweredAt == nil {
 			carried = true
 			break
 		}

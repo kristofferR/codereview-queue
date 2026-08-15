@@ -2498,9 +2498,9 @@ func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) (
 	return result.Warning, err
 }
 
-func (a prActor) Unhold(ctx context.Context, repo string, pr int) error {
-	_, err := a.svc.Unhold(ctx, repo, pr)
-	return err
+func (a prActor) Unhold(ctx context.Context, repo string, pr int) (string, error) {
+	result, err := a.svc.Unhold(ctx, repo, pr)
+	return result.Warning, err
 }
 
 func (a prActor) Prioritize(ctx context.Context, repo string, pr int) error {

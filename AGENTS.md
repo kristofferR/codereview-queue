@@ -134,8 +134,9 @@ Daemon `Pump` = Progress on the slot round + DecideFire on the next eligible.
 findings filters to converge. The wait IS the round: a fired/reviewing round with
 a `WaitDeadline` is the in-flight wait. Loop exit codes are frozen: 0 converged/
 skipped/held, 10 findings, 2 timeout. A hold is terminal for the run and ends
-only when a person lifts it, so it is never 2 — that code means the wait
-elapsed, and a caller scripted against it would retry for ever.
+when a person lifts it or the daemon clears it after the pull request merges,
+so it is never 2 — that code means the wait elapsed, and a caller scripted
+against it would retry for ever.
 
 ## Adding a new bot-message format
 

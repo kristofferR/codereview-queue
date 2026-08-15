@@ -19,7 +19,7 @@ import (
 // never become a second way to change state with different rules.
 type Actor interface {
 	Hold(ctx context.Context, repo string, pr int, reason string) (warning string, err error)
-	Unhold(ctx context.Context, repo string, pr int) error
+	Unhold(ctx context.Context, repo string, pr int) (warning string, err error)
 	Prioritize(ctx context.Context, repo string, pr int) error
 	Cancel(ctx context.Context, repo string, pr int) error
 	SetAutofix(ctx context.Context, repo string, enabled bool, reason string) error
@@ -165,7 +165,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return err
 		})
 	case "unhold":
-		err = s.needPR(req, func() error { return s.actor.Unhold(ctx, req.Repo, req.PR) })
+		err = s.needPR(req, func() error {
+			warning, err = s.actor.Unhold(ctx, req.Repo, req.PR)
+			return err
+		})
 	case "prioritize":
 		err = s.needPR(req, func() error { return s.actor.Prioritize(ctx, req.Repo, req.PR) })
 	case "cancel":

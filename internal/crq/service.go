@@ -286,11 +286,49 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 		} else {
 			result.CommentURL = comment.URL
 		}
+		result = s.reconcileUnholdNotice(ctx, result, comment, commentErr)
 		if s.log != nil {
-			s.log.Printf("%s#%d released", repo, pr)
+			if result.Held {
+				s.log.Printf("%s#%d was re-held before its release notice completed", repo, pr)
+			} else {
+				s.log.Printf("%s#%d released", repo, pr)
+			}
 		}
 	}
 	return result, nil
+}
+
+// reconcileUnholdNotice removes a release notice that raced with a replacement
+// hold, so the newest PR-visible status cannot say the PR is unheld when state
+// says otherwise.
+func (s *Service) reconcileUnholdNotice(
+	ctx context.Context,
+	result HoldResult,
+	comment ghapi.IssueComment,
+	commentErr error,
+) HoldResult {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		result.Warning = appendHoldWarning(result.Warning, "could not confirm hold state after posting its release notice: "+err.Error())
+		return result
+	}
+	hold, held := st.HeldPR(result.Repo, result.PR)
+	if !held {
+		return result
+	}
+
+	result.Held = true
+	result.CommentURL = ""
+	result.Reason = hold.Reason
+	result.By = hold.By
+	at := hold.At
+	result.At = &at
+	if commentErr == nil && comment.ID != 0 {
+		if err := s.gh.DeleteIssueComment(ctx, result.Repo, comment.ID); err != nil && !errors.Is(err, ghapi.ErrNotFound) {
+			result.Warning = appendHoldWarning(result.Warning, "hold was restored before its release notice completed, but the stale notice could not be removed: "+err.Error())
+		}
+	}
+	return result
 }
 
 // Prioritize moves a tracked PR ahead of every other round. The queue sequence

@@ -69,6 +69,10 @@ func (a *holdWarningActor) Hold(context.Context, string, int, string) (string, e
 	return a.warning, nil
 }
 
+func (a *holdWarningActor) Unhold(context.Context, string, int) (string, error) {
+	return a.warning, nil
+}
+
 func (*holdWarningActor) Fleet(context.Context) (*FleetSettings, error) { return nil, nil }
 
 func (*holdWarningActor) EnvSettings(state.State) []EnvSetting { return nil }
@@ -377,6 +381,27 @@ func TestHoldActionReturnsCommentWarning(t *testing.T) {
 
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), actor.warning) {
 		t.Fatalf("hold response = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUnholdActionReturnsCommentWarning(t *testing.T) {
+	loader := &stubLoader{st: state.New()}
+	actor := &holdWarningActor{warning: "PR hold was released, but the release comment could not be posted"}
+	srv := New(loader, Options{Addr: "127.0.0.1:7777", Actor: actor})
+	srv.refresh(t.Context())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"http://localhost:7777/api/action/unhold",
+		strings.NewReader(`{"repo":"owner/repo","pr":12}`),
+	)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("action", "unhold")
+	srv.handleAction(rec, req)
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), actor.warning) {
+		t.Fatalf("unhold response = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -201,6 +201,46 @@ func TestUnholdPostsReleaseNotice(t *testing.T) {
 	}
 }
 
+func TestUnholdRemovesReleaseNoticeIfReheldBeforePostCompletes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting for product approval", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	current := now
+	svc.now = func() time.Time { return current }
+	reheldAt := now.Add(time.Minute)
+	gh.postHook = func() {
+		current = reheldAt
+		if _, err := svc.Hold(ctx, "owner/repo", 12, "waiting for security approval"); err != nil {
+			t.Errorf("re-hold during release post: %v", err)
+		}
+	}
+
+	result, err := svc.Unhold(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Held || result.Reason != "waiting for security approval" || result.By != cfg.Host ||
+		result.At == nil || !result.At.Equal(reheldAt) {
+		t.Fatalf("replacement hold was not reported: %+v", result)
+	}
+	if result.CommentURL != "" {
+		t.Fatalf("stale release notice returned as current: %+v", result)
+	}
+	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
+		t.Fatalf("delete calls = %v, want the stale release comment", gh.deleteCalls)
+	}
+}
+
 // The race crq hold exists to close is between selecting a round and writing the
 // reservation. Checking the hold only at selection leaves exactly that window
 // open, so the command could return successfully while a daemon fired anyway.

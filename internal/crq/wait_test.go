@@ -103,6 +103,21 @@ type throttledLoadStore struct {
 	loads int
 }
 
+type pullMutatingGitHub struct {
+	GitHubAPI
+	mutateAt int
+	reads    int
+	mutate   func()
+}
+
+func (g *pullMutatingGitHub) GetPull(ctx context.Context, repo string, pr int) (ghapi.Pull, error) {
+	g.reads++
+	if g.reads == g.mutateAt {
+		g.mutate()
+	}
+	return g.GitHubAPI.GetPull(ctx, repo, pr)
+}
+
 func (s *throttledLoadStore) Load(ctx context.Context) (State, Revision, error) {
 	s.loads++
 	if s.loads == 1 {
@@ -269,6 +284,33 @@ func TestWaitReturnsOnConvergence(t *testing.T) {
 	}
 	if report.Action != string(engine.ActionDone) {
 		t.Fatalf("action = %q (%s), want %q", report.Action, report.Reason, engine.ActionDone)
+	}
+}
+
+func TestWaitReturnsActionableResultFromNestedDrive(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/outside-the-fleet", 704, "ffffffff1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  2,
+		mutate:    func() { f.closePull(repo, pr) },
+	}
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		t.Fatal("waiter slept after its nested drive produced an actionable result")
+		return nil
+	}
+
+	report, err := f.svc.WaitForAction(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if report.Action != string(engine.ActionBlocked) {
+		t.Fatalf("action = %q (%s), want %q", report.Action, report.Reason, engine.ActionBlocked)
 	}
 }
 

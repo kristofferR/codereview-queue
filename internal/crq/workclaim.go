@@ -209,6 +209,7 @@ func firstWorkOwnerValue(values ...string) string {
 }
 
 func (s *Service) releaseInteractiveWork(ctx context.Context, repo string, pr int) error {
+	repo = NormalizeRepo(repo)
 	if s.cfg.DryRun {
 		return nil
 	}

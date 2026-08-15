@@ -217,6 +217,28 @@ func TestInteractiveClaimRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
 	}
 }
 
+func TestInteractiveReleaseNormalizesRepo(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+
+	if claim, err := manual.claimInteractiveWork(ctx, "OWNER/REPO.git", 23); err != nil || !claim.acquired {
+		t.Fatalf("interactive claim = %+v, %v", claim, err)
+	}
+	if err := manual.releaseInteractiveWork(ctx, "OWNER/REPO.git", 23); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.WorkClaim("owner/repo", 23, now); ok {
+		t.Fatal("normalized release left the interactive work claim behind")
+	}
+}
+
 func TestInteractiveClaimDryRunReportsExistingOwner(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

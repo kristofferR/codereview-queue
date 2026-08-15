@@ -152,8 +152,12 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		untracked := round == nil || (report.Head != "" && round.Head != report.Head)
 		_, held := st.HeldPR(repo, pr)
 		if !held && (untracked || !leaderLive(st, now)) {
-			if _, nerr := s.Next(ctx, repo, pr); nerr != nil {
+			nested, nerr := s.Next(ctx, repo, pr)
+			if nerr != nil {
 				return report, nerr
+			}
+			if actionable(engine.ActionKind(nested.Action)) {
+				return nested, nil
 			}
 			delay := s.waitTick()
 			if delay > workClaimRenewalInterval {

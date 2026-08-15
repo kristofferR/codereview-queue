@@ -360,9 +360,9 @@ func TestFallbackWorkOwnerUsesCheckoutRoot(t *testing.T) {
 	cfg := firingConfig()
 	cfg.Host = "test-host"
 	cfg.WorkDir = root
-	rootOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner()
+	rootOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner(context.Background())
 	cfg.WorkDir = nested
-	nestedOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner()
+	nestedOwner, _ := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).workClaimOwner(context.Background())
 	if nestedOwner != rootOwner {
 		t.Fatalf("nested owner %q, want checkout owner %q", nestedOwner, rootOwner)
 	}
@@ -449,6 +449,54 @@ func TestHeartbeatRetriesThrottleWhileLeaseIsLive(t *testing.T) {
 	persisted, ok := st.WorkClaim("owner/repo", 24, now)
 	if !ok || !persisted.ExpiresAt.Equal(now.Add(WorkClaimTTL)) {
 		t.Fatalf("renewed claim = %+v, %t", persisted, ok)
+	}
+}
+
+func TestHeartbeatRetriesTransientFailureWhileLeaseIsLive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	owner := workClaimService(t, baseStore, cfg, "session-a", "mac:feature", base)
+	claim, err := owner.claimInteractiveWork(ctx, "owner/repo", 26)
+	if err != nil || !claim.acquired {
+		t.Fatalf("initial claim = %+v, %v", claim, err)
+	}
+
+	now = base.Add(WorkClaimTTL - workClaimRenewalInterval + time.Second)
+	store := &throttledWorkClaimStore{
+		StateStore: baseStore,
+		err:        errors.New("transient state write failure"),
+		updated:    make(chan struct{}),
+	}
+	svc := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	svc.now = func() time.Time { return now }
+	var slept time.Duration
+	svc.sleepFn = func(_ context.Context, delay time.Duration) error {
+		slept += delay
+		now = now.Add(delay)
+		return nil
+	}
+	ticks := make(chan time.Time, 1)
+	errs := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.heartbeatWorkClaim(ctx, "owner/repo", 26, claim.until, ticks, errs, cancel)
+	}()
+
+	ticks <- now
+	<-store.updated
+	cancel()
+	<-done
+	if slept != svc.waitTick() {
+		t.Fatalf("transient failure slept %s, want %s", slept, svc.waitTick())
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("recoverable failure published heartbeat error: %v", err)
+	default:
 	}
 }
 

@@ -1367,7 +1367,7 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					// closure on a CAS conflict, and a verdict left over from
 					// an attempt that lost would be read as this one's.
 					taken, gone = false, false
-					updated := false
+					var updated bool
 					updated, taken, gone = refreshDispatch(st, report, token, s.clock())
 					if !updated {
 						return ErrNoChange

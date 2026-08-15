@@ -83,6 +83,10 @@ type Service struct {
 	// workOwnerFn gives tests stable interactive ownership without depending on
 	// a process environment or checkout path.
 	workOwnerFn func() (owner, by string)
+	// workOwnerCache is a shared pointer because RefreshQuota copies Service by
+	// value. Resolving the checkout identity once also keeps heartbeat renewals
+	// from repeatedly spawning Git.
+	workOwnerCache *workOwnerCache
 	// dispatchTokenFn lets tests identify the unattended session that already
 	// owns a dispatch claim. Production reads the per-session environment.
 	dispatchTokenFn func() string
@@ -94,7 +98,14 @@ func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service
 		RateLimitMarker:   cfg.RateLimitMarker,
 		CalibrationMarker: cfg.CalibrationMarker,
 	}
-	return &Service{cfg: cfg, cr: cr, gh: gh, store: store, log: log}
+	return &Service{
+		cfg:            cfg,
+		cr:             cr,
+		gh:             gh,
+		store:          store,
+		log:            log,
+		workOwnerCache: &workOwnerCache{},
+	}
 }
 
 // clock is the service's notion of "now" (UTC) for scheduling decisions: retry

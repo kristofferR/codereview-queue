@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
@@ -24,12 +25,19 @@ const (
 	WorkClaimTTL             = 2 * time.Hour
 	workClaimRenewalInterval = WorkClaimTTL / 3
 	workClaimReleaseLimit    = 30 * time.Second
+	workOwnerProbeLimit      = 5 * time.Second
 )
 
 type workClaimOutcome struct {
 	acquired bool
 	reason   string
 	until    time.Time
+}
+
+type workOwnerCache struct {
+	once  sync.Once
+	owner string
+	by    string
 }
 
 // WorkClaimResult is printed by `crq unclaim`.
@@ -44,7 +52,7 @@ type WorkClaimResult struct {
 // whichever claimant wins the state CAS works, and the other waits.
 func (s *Service) claimInteractiveWork(ctx context.Context, repo string, pr int) (workClaimOutcome, error) {
 	repo = NormalizeRepo(repo)
-	owner, by := s.workClaimOwner()
+	owner, by := s.workClaimOwner(ctx)
 	dispatchToken := s.dispatchToken()
 	if s.cfg.DryRun {
 		st, _, err := s.store.Load(ctx)
@@ -165,15 +173,27 @@ func laggingAutofixHosts(st State, now time.Time) []string {
 	return hosts
 }
 
-func (s *Service) workClaimOwner() (string, string) {
+func (s *Service) workClaimOwner(ctx context.Context) (string, string) {
 	if s.workOwnerFn != nil {
 		return s.workOwnerFn()
 	}
+	if s.workOwnerCache != nil {
+		s.workOwnerCache.once.Do(func() {
+			s.workOwnerCache.owner, s.workOwnerCache.by = s.resolveWorkClaimOwner(ctx)
+		})
+		return s.workOwnerCache.owner, s.workOwnerCache.by
+	}
+	return s.resolveWorkClaimOwner(ctx)
+}
+
+func (s *Service) resolveWorkClaimOwner(ctx context.Context) (string, string) {
 	dir := s.cfg.WorkDir
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
-	if root, err := gitDir(context.Background(), dir, "rev-parse", "--show-toplevel"); err == nil {
+	probeCtx, cancel := context.WithTimeout(ctx, workOwnerProbeLimit)
+	defer cancel()
+	if root, err := gitDir(probeCtx, dir, "rev-parse", "--show-toplevel"); err == nil {
 		dir = root
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
@@ -216,7 +236,7 @@ func (s *Service) releaseInteractiveWork(ctx context.Context, repo string, pr in
 	}
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workClaimReleaseLimit)
 	defer cancel()
-	owner, _ := s.workClaimOwner()
+	owner, _ := s.workClaimOwner(releaseCtx)
 	_, err := s.store.Update(releaseCtx, func(st *State) error {
 		if !st.ReleaseWorkClaim(repo, pr, owner, false) {
 			return ErrNoChange
@@ -345,7 +365,12 @@ func (s *Service) heartbeatWorkClaim(
 			for {
 				renewed, err := s.claimInteractiveWork(ctx, repo, pr)
 				if err == nil && !renewed.acquired {
-					err = fmt.Errorf("lost interactive work claim: %s", renewed.reason)
+					select {
+					case heartbeatErr <- fmt.Errorf("lost interactive work claim: %s", renewed.reason):
+					default:
+					}
+					cancel()
+					return
 				}
 				if err == nil {
 					leaseUntil = renewed.until
@@ -355,22 +380,20 @@ func (s *Service) heartbeatWorkClaim(
 					return
 				}
 				wait, throttled := ghapi.ThrottleWait(err)
-				if throttled {
-					if wait <= 0 {
-						wait = s.waitTick()
-					}
-					now := s.clock()
-					if !leaseUntil.IsZero() && now.Add(wait).Before(leaseUntil) {
-						if sleepErr := s.sleep(ctx, wait); sleepErr == nil {
-							continue
-						} else if errors.Is(sleepErr, context.Canceled) && ctx.Err() != nil {
-							return
-						} else {
-							err = sleepErr
-						}
+				if !throttled || wait <= 0 {
+					wait = s.waitTick()
+				}
+				now := s.clock()
+				if !leaseUntil.IsZero() && now.Add(wait).Before(leaseUntil) {
+					if sleepErr := s.sleep(ctx, wait); sleepErr == nil {
+						continue
+					} else if errors.Is(sleepErr, context.Canceled) && ctx.Err() != nil {
+						return
 					} else {
-						err = fmt.Errorf("cannot renew interactive work claim before lease expires at %s: %w", leaseUntil.UTC().Format(time.RFC3339), err)
+						err = sleepErr
 					}
+				} else {
+					err = fmt.Errorf("cannot renew interactive work claim before lease expires at %s: %w", leaseUntil.UTC().Format(time.RFC3339), err)
 				}
 				select {
 				case heartbeatErr <- err:

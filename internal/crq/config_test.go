@@ -29,7 +29,7 @@ func TestBuildConfigRetainsACopyOfTheInputEnvironment(t *testing.T) {
 
 func TestLoadConfigReadsWorkOwnerFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "env")
-	if err := os.WriteFile(path, []byte("CRQ_WORK_OWNER=file-session\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("CRQ_WORK_OWNER=  file-session  \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CRQ_CONFIG", path)
@@ -39,18 +39,52 @@ func TestLoadConfigReadsWorkOwnerFromFile(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if had {
-			os.Setenv("CRQ_WORK_OWNER", old)
-		} else {
-			os.Unsetenv("CRQ_WORK_OWNER")
+			if err := os.Setenv("CRQ_WORK_OWNER", old); err != nil {
+				t.Errorf("restore CRQ_WORK_OWNER: %v", err)
+			}
+			return
+		}
+		if err := os.Unsetenv("CRQ_WORK_OWNER"); err != nil {
+			t.Errorf("unset CRQ_WORK_OWNER: %v", err)
 		}
 	})
 
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.WorkOwner != "file-session" {
-		t.Fatalf("work owner = %q, want file-session", cfg.WorkOwner)
+	for _, test := range []struct {
+		name  string
+		owner string
+		want  string
+	}{
+		{name: "file", want: "file-session"},
+		{name: "process overrides file", owner: "  process-session  ", want: "process-session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			old, had := os.LookupEnv("CRQ_WORK_OWNER")
+			t.Cleanup(func() {
+				if had {
+					if err := os.Setenv("CRQ_WORK_OWNER", old); err != nil {
+						t.Errorf("restore CRQ_WORK_OWNER: %v", err)
+					}
+					return
+				}
+				if err := os.Unsetenv("CRQ_WORK_OWNER"); err != nil {
+					t.Errorf("unset CRQ_WORK_OWNER: %v", err)
+				}
+			})
+			if test.owner == "" {
+				if err := os.Unsetenv("CRQ_WORK_OWNER"); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Setenv("CRQ_WORK_OWNER", test.owner); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.WorkOwner != test.want {
+				t.Fatalf("work owner = %q, want %q", cfg.WorkOwner, test.want)
+			}
+		})
 	}
 }
 

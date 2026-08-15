@@ -565,7 +565,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// is exactly the case that made a working Codex read as "never answered".
 	// The account block above is more urgent: this round does not hold the fire
 	// slot, so another worker must see that window even if this write fails.
-	if err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
+	if _, err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
 		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
 	}
 	// noteCoAnswers can add the first durable proof that a self-heal reviewer
@@ -650,7 +650,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
 		}
-		if err := s.noteCoAnswers(ctx, cfg, round, obs.eng, now); err != nil {
+		if _, err := s.noteCoAnswers(ctx, cfg, round, obs.eng, now); err != nil {
 			return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
 		}
 		// noteCoAnswers can add the first durable proof that a self-heal
@@ -709,7 +709,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
 	}
-	if err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
+	if _, err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
 		return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
 	}
 	fresh, _, err := s.store.Load(ctx)
@@ -974,7 +974,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	// straight from fired to completed, and a completed round is never looked at
 	// again. The co-reviewer that answered it would be lost with it, leaving a
 	// working bot shown as silent for want of the one field that says otherwise.
-	if err := s.noteCoAnswers(ctx, cfg, slot, obs.eng, now); err != nil {
+	if _, err := s.noteCoAnswers(ctx, cfg, slot, obs.eng, now); err != nil {
 		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(slot.Repo, slot.PR), err)
 	}
 	fresh, _, err := s.store.Load(ctx)
@@ -1219,7 +1219,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	} else if updated != nil {
 		st = *updated
 	}
-	if err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
+	if _, err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
 		return st, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(target.Repo, target.PR), err)
 	}
 	fresh, _, err := s.store.Load(ctx)
@@ -2928,9 +2928,9 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 // thing left to read it from was the phase — and a required set that omits the
 // primary completes on its co-reviewers' answers while the primary has done
 // nothing but acknowledge the command.
-func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) error {
+func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) (*State, error) {
 	if s.cfg.DryRun {
-		return nil // DryRun writes nothing, bookkeeping included
+		return nil, nil // DryRun writes nothing, bookkeeping included
 	}
 	var active []string
 	answered := map[string]bool{}
@@ -2945,9 +2945,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
 	if len(active) == 0 && !primary {
-		return nil
+		return nil, nil
 	}
-	if _, err := s.store.Update(ctx, func(st *State) error {
+	updated, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
 		if r == nil {
 			for i := len(st.Archive) - 1; i >= 0; i-- {
@@ -3017,13 +3017,14 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		}
 		st.PutRound(*r)
 		return nil
-	}); err != nil && !errors.Is(err, ErrNoChange) {
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
 		if s.log != nil {
 			s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return &updated, nil
 }
 
 func sameCoAnswers(before, after map[string]CoBotRound) bool {

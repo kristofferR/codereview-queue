@@ -357,10 +357,11 @@ func (r *Round) NoteCoActivity(login string, at time.Time) {
 	if c.AnsweredAt != nil {
 		return
 	}
-	if c.SeenActiveAt == nil {
-		t := at.UTC()
-		c.SeenActiveAt = &t
+	if c.SeenActiveAt != nil {
+		return
 	}
+	t := at.UTC()
+	c.SeenActiveAt = &t
 	c.ActivityCarried = true
 	r.setCo(login, c)
 }
@@ -1049,6 +1050,14 @@ func (r *Round) AwaitCoReview(deadline, anchor time.Time) error {
 func (r *Round) Complete() error {
 	if r.Phase != PhaseFired && r.Phase != PhaseReviewing {
 		return r.illegal(PhaseCompleted)
+	}
+	if r.WaitDeadline != nil {
+		for _, co := range r.CoBots {
+			if co.AnsweredAt == nil && co.ActivityCarried {
+				r.PrimarySettled = true
+				break
+			}
+		}
 	}
 	r.Phase = PhaseCompleted
 	r.ForceCoReviewers = nil

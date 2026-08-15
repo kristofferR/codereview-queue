@@ -421,6 +421,31 @@ func TestNormalizeKeepsCompletedRoundAfterRestoredActivityWaitExpires(t *testing
 	}
 }
 
+func TestNormalizeKeepsCompletedNewRoundAfterCarriedActivityWaitExpires(t *testing.T) {
+	seen := t0.Add(time.Second)
+	s := State{
+		CoActivity: map[string]map[string]time.Time{Key("owner/repo", 12): {"cursor": seen}},
+	}
+	r, err := s.NewRound("owner/repo", 12, "00fedcba9", t0.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := t0.Add(3 * time.Minute)
+	if err := r.AwaitCoReview(deadline, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	s.PutRound(*r)
+
+	s.Normalize(deadline)
+
+	if r := s.Round("owner/repo", 12); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("an initial carried-activity wait must stay completed, got %#v", r)
+	}
+}
+
 func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
 	var r Round
 	r.NoteCoActivity("cursor[bot]", t0)
@@ -443,6 +468,19 @@ func TestCoParticipationReplacesCarriedProvenance(t *testing.T) {
 	if co.ActivityCarried || co.AnsweredAt != nil || co.SeenActiveAt == nil ||
 		!co.SeenActiveAt.Equal(participatedAt) {
 		t.Fatalf("current-head participation did not replace carried provenance: %+v", co)
+	}
+}
+
+func TestCoActivityDoesNotReplaceCurrentHeadParticipation(t *testing.T) {
+	var r Round
+	participatedAt := t0.Add(time.Minute)
+	r.NoteCoParticipation("cursor[bot]", participatedAt)
+	r.NoteCoActivity("cursor[bot]", participatedAt.Add(time.Minute))
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt != nil || co.SeenActiveAt == nil ||
+		!co.SeenActiveAt.Equal(participatedAt) {
+		t.Fatalf("delayed historical activity replaced current-head participation: %+v", co)
 	}
 }
 

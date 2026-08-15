@@ -318,7 +318,7 @@ func TestNoteCoAnswersKeepsCurrentParticipationOnCurrentHead(t *testing.T) {
 				dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true},
 			}
 
-			if err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), tc.obs, base); err != nil {
+			if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), tc.obs, base); err != nil {
 				t.Fatal(err)
 			}
 			co := f.round(repo, pr).Co(bugbotLogin)
@@ -398,7 +398,7 @@ func TestNoteCoAnswersCarriesActivityThroughConcurrentSupersede(t *testing.T) {
 	}
 	obs := engine.Observation{Head: round.Head, Open: true,
 		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
-	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -433,7 +433,7 @@ func TestNoteCoAnswersReopensCompletedConcurrentSupersede(t *testing.T) {
 	}
 	obs := engine.Observation{Head: round.Head, Open: true,
 		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
-	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -462,7 +462,7 @@ func TestNoteCoAnswersPersistsArchivedActivityBeyondEviction(t *testing.T) {
 	}
 	obs := engine.Observation{Head: round.Head, Open: true,
 		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
-	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -512,7 +512,7 @@ func TestNoteCoAnswersPersistsActivityAfterConcurrentArchiveEviction(t *testing.
 	}
 	obs := engine.Observation{Head: round.Head, Open: true,
 		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
-	if err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1087,7 +1087,7 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 			// Pump records activity before it parks the wait. The stale summary
 			// must retain its historical provenance rather than claim that the
 			// reviewer answered this unanchored round.
-			if err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), obs, base); err != nil {
+			if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), obs, base); err != nil {
 				t.Fatal(err)
 			}
 			if co := f.round(repo, pr).Co(bugbotLogin); co.AnsweredAt != nil || !co.ActivityCarried {

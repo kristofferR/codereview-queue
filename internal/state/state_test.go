@@ -393,6 +393,34 @@ func TestNormalizeRequeuesCompletedRoundWithPreservedRestoredActivity(t *testing
 	}
 }
 
+func TestNormalizeKeepsCompletedRoundAfterRestoredActivityWaitExpires(t *testing.T) {
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, ActivityCarried: true}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+	r := s.Round(current.Repo, current.PR)
+	deadline := t0.Add(3 * time.Minute)
+	if err := r.AwaitCoReview(deadline, enqueued); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	s.PutRound(*r)
+
+	s.Normalize(deadline)
+
+	if r := s.Round(current.Repo, current.PR); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("an expired restored-activity wait must stay completed, got %#v", r)
+	}
+}
+
 func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
 	var r Round
 	r.NoteCoActivity("cursor[bot]", t0)
@@ -582,6 +610,22 @@ func TestNormalizeFoldsLegacyCodex(t *testing.T) {
 	co := r.Co(dialect.CodexBotLogin)
 	if co.CommandID != 11 || co.CommandedAt == nil {
 		t.Fatalf("fold produced %+v, want command 11", co)
+	}
+
+	// Activity provenance has no legacy counterpart, so folding the legacy
+	// trigger fields must preserve it with the other observation fields.
+	carried := *r
+	seenAt := t0.Add(time.Second)
+	co.SeenActiveAt = &seenAt
+	co.ActivityCarried = true
+	carried.CoBots = map[string]CoBotRound{codexCoBotKey: co}
+	carried.foldLegacyCodex()
+	got := carried.Co(dialect.CodexBotLogin)
+	if !got.ActivityCarried {
+		t.Fatal("fold cleared Codex carried-activity provenance")
+	}
+	if got.SeenActiveAt == nil || !got.SeenActiveAt.Equal(seenAt) {
+		t.Fatalf("fold lost Codex activity timestamp: %+v", got)
 	}
 
 	// Stale mirror: an old binary moved the legacy command on; fold overwrites.

@@ -379,7 +379,8 @@ func (r *Round) foldLegacyCodex() {
 	prev := r.Co(codexCoBotKey)
 	r.setCo(codexCoBotKey, CoBotRound{
 		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
-		SeenActiveAt: prev.SeenActiveAt, AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
+		SeenActiveAt: prev.SeenActiveAt, ActivityCarried: prev.ActivityCarried,
+		AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
 	})
 }
 
@@ -2248,8 +2249,9 @@ func (s *State) Normalize(now time.Time) {
 		s.rememberCoActivity(r)
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
-		// replacement without copying it. Repair that replacement on load.
-		if s.carryCoActivity(&r) && r.Phase == PhaseCompleted {
+		// replacement without copying it. Repair that replacement on load, unless
+		// its restored-activity wait already completed and consumed the gate.
+		if s.carryCoActivity(&r) && r.Phase == PhaseCompleted && !r.PrimarySettled {
 			_ = r.ReopenForRestoredActivity()
 		}
 		s.Rounds[key] = r

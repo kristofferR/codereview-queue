@@ -2493,9 +2493,9 @@ func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Obs
 // Service method the command line does, so the two cannot drift apart.
 type prActor struct{ svc *crq.Service }
 
-func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) error {
-	_, err := a.svc.Hold(ctx, repo, pr, reason)
-	return err
+func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) (string, error) {
+	result, err := a.svc.Hold(ctx, repo, pr, reason)
+	return result.Warning, err
 }
 
 func (a prActor) Unhold(ctx context.Context, repo string, pr int) error {

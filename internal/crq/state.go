@@ -16,6 +16,7 @@ import (
 type (
 	State          = crqstate.State
 	Round          = crqstate.Round
+	Hold           = crqstate.Hold
 	Phase          = crqstate.Phase
 	FireSlot       = crqstate.FireSlot
 	AccountQuota   = crqstate.AccountQuota

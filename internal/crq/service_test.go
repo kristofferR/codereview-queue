@@ -40,10 +40,12 @@ type fakeGitHub struct {
 	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
+	deleteCalls     []int64
 	commentID       int64
 	createdIssues   []int
 	nextIssueNumber int
 	postErrs        map[string]error
+	postHook        func()
 	graphQL         func(query string, vars map[string]any, out any) error
 	// stateRef is the SHA GetRef reports; tests that exercise `crq wait` move it
 	// to signal "the queue advanced".
@@ -253,11 +255,12 @@ func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64)
 
 func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (ghapi.IssueComment, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
+		f.mu.Unlock()
 		return ghapi.IssueComment{}, err
 	}
 	if err := f.postBodyErrs[body]; err != nil {
+		f.mu.Unlock()
 		return ghapi.IssueComment{}, err
 	}
 	f.commentID++
@@ -265,6 +268,12 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	now := f.clock()
 	comment := ghapi.IssueComment{ID: f.commentID, Body: body, CreatedAt: now, UpdatedAt: now}
 	comment.User.Login = "kristofferR"
+	hook := f.postHook
+	f.postHook = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return comment, nil
 }
 
@@ -297,6 +306,7 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleteCalls = append(f.deleteCalls, id)
 	if err := f.deleteErrs[id]; err != nil {
 		return err
 	}
@@ -2352,6 +2362,77 @@ func TestPumpRemovesMergedHoldWithoutARound(t *testing.T) {
 	}
 	if _, held := st.HeldPR("owner/repo", 62); held {
 		t.Fatal("merged PR's standalone hold was not removed")
+	}
+}
+
+func TestPumpContinuesAfterMergedHoldCleanup(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/merged", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	ready := ghapi.Pull{State: "open"}
+	ready.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/ready", 63)] = ready
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/merged", 62, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, "owner/ready", 63, "abcdef123", PhaseQueued, now, 0)
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Repo != "owner/ready" || pumped.PR != 63 {
+		t.Fatalf("pump = %#v, want the ready PR to fire", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/merged", 62); held {
+		t.Fatal("merged hold remained after pump")
+	}
+}
+
+func TestDryRunPumpContinuesAfterMergedHoldCleanup(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/merged", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	ready := ghapi.Pull{State: "open"}
+	ready.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/ready", 63)] = ready
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/merged", 62, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, "owner/ready", 63, "abcdef123", PhaseQueued, now, 0)
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "dry_run" || pumped.Repo != "owner/ready" || pumped.PR != 63 {
+		t.Fatalf("pump = %#v, want the ready PR's dry-run decision", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/merged", 62); !held {
+		t.Fatal("dry run removed the merged hold")
 	}
 }
 

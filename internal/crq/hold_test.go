@@ -103,6 +103,36 @@ func TestHoldSurvivesACommentPostFailure(t *testing.T) {
 	}
 }
 
+func TestHoldRemovesNoticeIfReleasedBeforePostCompletes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	gh.postHook = func() {
+		if _, err := svc.Unhold(ctx, "owner/repo", 12); err != nil {
+			t.Errorf("unhold during post: %v", err)
+		}
+	}
+
+	result, err := svc.Hold(ctx, "owner/repo", 12, "waiting for product approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Held {
+		t.Fatalf("stale hold reported as active: %+v", result)
+	}
+	if result.CommentURL != "" {
+		t.Fatalf("stale hold notice returned as current: %+v", result)
+	}
+	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
+		t.Fatalf("delete calls = %v, want the stale hold comment", gh.deleteCalls)
+	}
+}
+
 // The race crq hold exists to close is between selecting a round and writing the
 // reservation. Checking the hold only at selection leaves exactly that window
 // open, so the command could return successfully while a daemon fired anyway.

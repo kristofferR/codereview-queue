@@ -164,6 +164,7 @@ func (s *Service) hold(
 	if s.cfg.DryRun {
 		return result, nil
 	}
+	token := randomToken()
 	state, err := s.store.Update(ctx, func(st *State) error {
 		if owner != nil {
 			round := st.Round(repo, pr)
@@ -182,7 +183,7 @@ func (s *Service) hold(
 		if triggerPostClaimed(st.Round(repo, pr)) {
 			return errors.New("a review trigger is already being posted; wait for it to finish before holding the PR")
 		}
-		st.Hold(repo, pr, reason, s.cfg.Host, now)
+		st.HoldWithToken(repo, pr, reason, s.cfg.Host, now, token)
 		return nil
 	})
 	if err != nil {
@@ -201,10 +202,55 @@ func (s *Service) hold(
 	} else {
 		result.CommentURL = comment.URL
 	}
+	// Posting a comment is not part of the state CAS. If another actor released
+	// or replaced this hold while GitHub was accepting the request, remove this
+	// stale notice and report the state that actually survived.
+	result = s.reconcileHoldNotice(ctx, result, token, comment, commentErr)
 	if s.log != nil {
 		s.log.Printf("%s#%d held: %s", repo, pr, reason)
 	}
 	return result, nil
+}
+
+func (s *Service) reconcileHoldNotice(
+	ctx context.Context,
+	result HoldResult,
+	token string,
+	comment ghapi.IssueComment,
+	commentErr error,
+) HoldResult {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		result.Warning = appendHoldWarning(result.Warning, "could not confirm hold state after posting its notice: "+err.Error())
+		return result
+	}
+	hold, held := st.HeldPR(result.Repo, result.PR)
+	if held && st.HoldToken(result.Repo, result.PR) == token {
+		return result
+	}
+
+	result.Held = held
+	result.CommentURL = ""
+	result.Reason = ""
+	result.By = ""
+	result.At = nil
+	if held {
+		at := hold.At
+		result.Reason, result.By, result.At = hold.Reason, hold.By, &at
+	}
+	if commentErr == nil && comment.ID != 0 {
+		if err := s.gh.DeleteIssueComment(ctx, result.Repo, comment.ID); err != nil && !errors.Is(err, ghapi.ErrNotFound) {
+			result.Warning = appendHoldWarning(result.Warning, "hold changed before its notice completed, but the stale notice could not be removed: "+err.Error())
+		}
+	}
+	return result
+}
+
+func appendHoldWarning(current, next string) string {
+	if current == "" {
+		return next
+	}
+	return current + " " + next
 }
 
 // Unhold puts a PR back in the queue.
@@ -523,10 +569,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// before any queue gate, so a permanent administrative pause does not linger
 	// forever merely because there is no active round left to inspect. Slot work
 	// remains first: cleanup of an unrelated hold must not delay its release.
+	var mergedHoldResult *PumpResult
 	if updated, res, handled, err := s.sweepMergedHold(ctx, st); err != nil {
 		return PumpResult{}, err
 	} else if handled {
-		return res, nil
+		st = updated
+		mergedHoldResult = &res
 	} else {
 		st = updated
 	}
@@ -543,6 +591,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// 3. Fire the next eligible round.
 	next := st.NextEligible(now)
 	if next == nil {
+		if mergedHoldResult != nil {
+			return *mergedHoldResult, nil
+		}
 		return PumpResult{Action: "idle"}, nil
 	}
 	// Terminal cleanup is independent of quota and pacing: drop a closed/merged
@@ -570,6 +621,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// ETag-cached 304s.
 	next = st.NextEligible(now)
 	if next == nil {
+		if mergedHoldResult != nil {
+			return *mergedHoldResult, nil
+		}
 		return PumpResult{Action: "idle"}, nil
 	}
 	cfg := s.cfgFor(st, next.Repo)
@@ -2790,7 +2844,7 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 	}
 	result := PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr merged"}
 	if s.cfg.DryRun {
-		return st, result, true, nil
+		return withoutMergedHold(st, repo, pr), result, true, nil
 	}
 	removed := false
 	updated, err := s.store.Update(ctx, func(current *State) error {
@@ -2815,6 +2869,34 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 	}
 	s.sync(ctx, updated)
 	return updated, result, true, nil
+}
+
+// withoutMergedHold mirrors merged-hold cleanup for a dry run. Pump must make
+// its later queue decision against the same logical state it would persist,
+// without sharing any mutable maps with the loaded snapshot.
+func withoutMergedHold(st State, repo string, pr int) State {
+	updated := st
+	updated.Holds = make(map[string]Hold, len(st.Holds))
+	for key, hold := range st.Holds {
+		updated.Holds[key] = hold
+	}
+	updated.HoldTokens = make(map[string]string, len(st.HoldTokens))
+	for key, token := range st.HoldTokens {
+		updated.HoldTokens[key] = token
+	}
+	updated.Rounds = make(map[string]Round, len(st.Rounds))
+	for key, round := range st.Rounds {
+		updated.Rounds[key] = round
+	}
+	updated.Archive = append([]Round(nil), st.Archive...)
+
+	updated.Unhold(repo, pr)
+	if round := updated.Round(repo, pr); round != nil {
+		token := round.Token
+		updated.EndRound(repo, pr, "pr merged")
+		releaseSlot(&updated, QueueKey(repo, pr), token)
+	}
+	return updated
 }
 
 // sweepParkedClosed abandons one waiting round whose PR has been closed or

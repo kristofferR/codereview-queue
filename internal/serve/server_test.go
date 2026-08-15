@@ -60,6 +60,19 @@ type previewGuardActor struct {
 	enrollmentCalls int
 }
 
+type holdWarningActor struct {
+	Actor
+	warning string
+}
+
+func (a *holdWarningActor) Hold(context.Context, string, int, string) (string, error) {
+	return a.warning, nil
+}
+
+func (*holdWarningActor) Fleet(context.Context) (*FleetSettings, error) { return nil, nil }
+
+func (*holdWarningActor) EnvSettings(state.State) []EnvSetting { return nil }
+
 func (a *previewGuardActor) SetEnrollment(
 	context.Context, string, bool, string, *int64,
 ) ([]string, error) {
@@ -343,6 +356,27 @@ func TestUnsupportedPreviewIsRejectedBeforeItCanMutate(t *testing.T) {
 	}
 	if actor.enrollmentCalls != 0 {
 		t.Fatalf("enrollment calls = %d, want the request rejected before mutation", actor.enrollmentCalls)
+	}
+}
+
+func TestHoldActionReturnsCommentWarning(t *testing.T) {
+	loader := &stubLoader{st: state.New()}
+	actor := &holdWarningActor{warning: "PR is held, but the hold comment could not be posted"}
+	srv := New(loader, Options{Addr: "127.0.0.1:7777", Actor: actor})
+	srv.refresh(t.Context())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"http://localhost:7777/api/action/hold",
+		strings.NewReader(`{"repo":"owner/repo","pr":12,"reason":"waiting"}`),
+	)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("action", "hold")
+	srv.handleAction(rec, req)
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), actor.warning) {
+		t.Fatalf("hold response = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

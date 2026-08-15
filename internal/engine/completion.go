@@ -83,8 +83,9 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// leaving the bot out of reviewedBy meant an unreadable in-flight
 			// check was neither asked for nor waited on, and a clean primary
 			// could converge the round straight past it.
-			if (co.AutoActive || co.ActiveThisRound || r.Co(cp.Login).SeenActiveAt != nil || commanded || co.ChecksUnknown) &&
-				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) &&
+			carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
+			if (co.AutoActive || co.ActiveThisRound || carried || commanded || co.ChecksUnknown) &&
+				!coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) &&
 				!coCheckUnable(obs, cp.Login) {
 				reviewedBy[cp.Login] = false
 			}

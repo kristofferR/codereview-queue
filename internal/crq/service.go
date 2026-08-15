@@ -2814,6 +2814,20 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	if _, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
 		if r == nil {
+			for i := len(st.Archive) - 1; i >= 0; i-- {
+				archived := &st.Archive[i]
+				if !sameRound(archived, round) {
+					continue
+				}
+				before := archived.CoBots
+				for _, login := range answered {
+					archived.NoteCoActivity(login, now)
+				}
+				if sameCoActivity(before, archived.CoBots) {
+					return ErrNoChange
+				}
+				return nil
+			}
 			return ErrNoChange
 		}
 		if !sameRound(r, round) {

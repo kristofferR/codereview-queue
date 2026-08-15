@@ -257,6 +257,34 @@ func TestCompletionCheckEvidence(t *testing.T) {
 	if got := Completion(carried, silent, wanted); got.Done {
 		t.Fatalf("carried self-heal activity must gate completion: %+v", got)
 	}
+	never := wanted
+	never.CoReviewers[0].Trigger = TriggerNever
+	if got := Completion(carried, silent, never); !got.Done {
+		t.Fatalf("a never-mode reviewer must not gate on carried activity: %+v", got)
+	}
+	unableBeforeFire := carried
+	unableBeforeFire.EnqueuedAt = fired.Add(-10 * time.Minute)
+	unable := silent
+	unable.Events = []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+		CreatedAt: fired.Add(-5 * time.Minute), UpdatedAt: fired.Add(-5 * time.Minute)}}
+	if got := Completion(unableBeforeFire, unable, wanted); !got.Done {
+		t.Fatalf("an unable notice after enqueue must disengage carried activity: %+v", got)
+	}
+}
+
+func TestCarriedSelfHealActivityWaitsDuringQuotaFreeDedupe(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	seenAt := now.Add(-time.Hour)
+	r := state.Round{Head: head, Phase: state.PhaseQueued, EnqueuedAt: now.Add(-time.Minute), CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal, SelfHealGrace: 10 * time.Minute}}}
+	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{{Bot: p.Bot, Commit: head, SubmittedAt: now}}}
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireCoReviewWait {
+		t.Fatalf("carried activity must keep quota-free dedupe waiting, got %+v", got)
+	}
 }
 
 // TestCompletionVerdictIsParticipationOnly: a Macroscope approvability verdict

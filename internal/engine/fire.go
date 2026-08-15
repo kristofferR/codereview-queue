@@ -314,7 +314,8 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable || r.ForceCoReviewer(cp.Login)
+		carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
+		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || primaryUnavailable || r.ForceCoReviewer(cp.Login)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -326,7 +327,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// running on this head. Without it the round dedupes to completed while
 		// the co-review is still in flight, discarding the findings it is about
 		// to publish.
-		if co.AutoActive || co.ActiveThisRound || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
+		if co.AutoActive || co.ActiveThisRound || carried || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
 			wait = true
 			continue
 		}

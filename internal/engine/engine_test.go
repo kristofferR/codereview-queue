@@ -768,6 +768,22 @@ func TestDecideFireForcedCoReviewerGate(t *testing.T) {
 	}
 }
 
+func TestProgressCompletesExpiredCoWaitOnPrimaryCompletionEvidence(t *testing.T) {
+	fired := t0.Add(-time.Hour)
+	deadline := t0.Add(-time.Minute)
+	head := "abcdef123"
+	seenAt := t0.Add(-2 * time.Hour)
+	r := state.Round{Head: head, Phase: state.PhaseReviewing, FiredAt: &fired, WaitDeadline: &deadline,
+		CoBots: map[string]state.CoBotRound{dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt}}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal}}}
+	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvNoAction, Bot: p.Bot,
+		CreatedAt: fired.Add(time.Minute), UpdatedAt: fired.Add(time.Minute)}}}
+	if got := Progress(r, state.AccountQuota{}, obs, t0, p); got.Outcome != OutComplete {
+		t.Fatalf("expired co-review wait must complete on a clean primary summary, got %+v", got)
+	}
+}
+
 // TestDynamicCodexGate covers the dynamic completion gate: an observed-active
 // Codex gates a round it isn't configured-required for, a usage-limit notice
 // disengages that dynamic gate, and a configured-required Codex is left gating

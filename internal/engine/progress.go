@@ -79,7 +79,7 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	// OLDEST reviewing round per pump, it would also starve every reviewing round
 	// behind it. Its deadline is the only thing that can end it.
 	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) {
-		if primaryReviewedHead(r, obs, p) {
+		if primaryReviewedHead(r, obs, p) || PrimaryCompletedRound(r, obs, p) {
 			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
 		}
 		if declined {

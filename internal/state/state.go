@@ -1317,6 +1317,38 @@ func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	return false
 }
 
+// LiveDispatchUntil reports when the latest live unattended claim for repo#pr
+// expires. A session can move its claim into the archive when it pushes, so
+// callers coordinating work must consider the current round, mirror, and
+// archived rounds together.
+func (s *State) LiveDispatchUntil(repo string, pr int, now time.Time) (time.Time, bool) {
+	var until time.Time
+	consider := func(claim *DispatchClaim) {
+		if claim == nil || !claim.Live(now) {
+			return
+		}
+		expires := claim.Heartbeat.Add(DispatchTTL)
+		if expires.After(until) {
+			until = expires
+		}
+	}
+
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok {
+		consider(&claim)
+	}
+	if round := s.Round(repo, pr); round != nil {
+		consider(round.Dispatch)
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key {
+			consider(round.Dispatch)
+		}
+	}
+	return until, !until.IsZero()
+}
+
 // OwnsLiveDispatch reports whether token is the unattended session currently
 // entitled to work on repo#pr. The claim may be on the current round, its
 // top-level mirror, or an archived round after the session pushed a new head.

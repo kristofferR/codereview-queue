@@ -1200,10 +1200,18 @@ func (s *Service) claimDispatchModels(
 		return false, err.Error(), false, ""
 	}
 	if reason == "" {
-		// Update may spend longer than DispatchTTL retrying transport or CAS
-		// operations after the mutation commits. Renew a stale committed claim
-		// before handing it to a session, without spending another attempt.
-		for !st.OwnsLiveDispatch(report.Repo, report.PR, token, s.clock()) {
+		// Update may spend long enough retrying transport or CAS operations after
+		// the mutation commits to leave less than one heartbeat interval on its
+		// lease. Renew before handing it to the session, without spending another
+		// attempt: otherwise beatDispatch's first tick arrives after local expiry.
+		for {
+			now := s.clock()
+			until, live := st.LiveDispatchUntil(report.Repo, report.PR, now)
+			if live && st.OwnsLiveDispatch(report.Repo, report.PR, token, now) &&
+				until.After(now.Add(DispatchTTL/3)) {
+				report.dispatchUntil = until
+				break
+			}
 			var updated, taken, gone bool
 			var refreshedAt time.Time
 			st, err = s.store.Update(ctx, func(st *State) error {

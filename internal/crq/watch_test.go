@@ -197,6 +197,40 @@ func TestClaimDispatchRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
 	}
 }
 
+func TestClaimDispatchRenewsLeaseBeforeFirstHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	repo, pr, head := "owner/thing", 6, "abcdef125"
+	seedRound(t, baseStore, cfg, repo, pr, head, PhaseQueued, base, 0)
+	store := &delayedWorkClaimStore{StateStore: baseStore}
+	store.afterFirstUpdate = func() { now = base.Add(2*DispatchTTL/3 + time.Minute) }
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
+
+	ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "dispatch-token", 3)
+	if !ok {
+		t.Fatalf("claim after delayed update failed: %s", why)
+	}
+	st, _, err := baseStore.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Dispatch == nil || !round.Dispatch.Heartbeat.Equal(now) {
+		t.Fatalf("dispatch after delayed update = %#v, want heartbeat %s", round, now)
+	}
+	if round.Dispatch.Attempts != 1 {
+		t.Fatalf("dispatch attempts = %d, want renewal not a second attempt", round.Dispatch.Attempts)
+	}
+	if !report.dispatchUntil.Equal(now.Add(DispatchTTL)) {
+		t.Fatalf("dispatch expiry = %s, want %s", report.dispatchUntil, now.Add(DispatchTTL))
+	}
+}
+
 func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"

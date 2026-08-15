@@ -133,11 +133,10 @@ func (s *Service) interactiveWorkClaim(
 			until:  existing.ExpiresAt,
 		}, false, nil
 	}
-	round := st.Round(repo, pr)
-	if (round != nil && round.DispatchHeld(now)) || st.ArchivedDispatchHeld(repo, pr, now) {
+	if until, held := st.LiveDispatchUntil(repo, pr, now); held {
 		return workClaimOutcome{
 			reason: "unattended autofix is already working on this pull request",
-			until:  now.Add(DispatchTTL),
+			until:  until,
 		}, false, nil
 	}
 	if lagging := laggingAutofixHosts(*st, now); len(lagging) > 0 {

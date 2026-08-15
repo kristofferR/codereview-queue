@@ -138,6 +138,33 @@ func TestInteractiveClaimWaitsWhenAutofixWonTheRace(t *testing.T) {
 	}
 }
 
+func TestInteractiveClaimReportsRemainingAutofixLease(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	now := base
+	repo, pr, head := "owner/repo", 15, "abcdef125"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+
+	autofix := NewService(cfg, newFakeGitHub(), store, nil)
+	autofix.now = func() time.Time { return now }
+	if ok, why, _ := autofix.claimDispatch(ctx,
+		NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}, "dispatch", 3); !ok {
+		t.Fatalf("autofix claim failed: %s", why)
+	}
+	now = base.Add(8 * time.Minute)
+	manual := workClaimService(t, store, cfg, "session-a", "mac:feature", now)
+	claimed, err := manual.claimInteractiveWork(ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.acquired || !claimed.until.Equal(base.Add(DispatchTTL)) {
+		t.Fatalf("interactive claim = %+v, want conflict until %s", claimed, base.Add(DispatchTTL))
+	}
+}
+
 func TestAutofixSessionMayUseNextUnderItsOwnDispatchClaim(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

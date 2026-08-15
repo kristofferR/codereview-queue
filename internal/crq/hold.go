@@ -62,6 +62,10 @@ func unholdComment() string {
 	return "<!-- crq:unhold -->\n▶️ The administrative hold has been released. crq may request automated reviews again."
 }
 
+func mergedHoldComment() string {
+	return "<!-- crq:hold-merged -->\n✅ The administrative hold has been retired because this pull request merged. crq will not request further automated reviews."
+}
+
 // neutralizeMentions prevents free-form hold reasons from running a bot command
 // when rendered in a pull request comment. The original reason remains in state.
 func neutralizeMentions(text string) string {

@@ -2287,6 +2287,9 @@ func TestPumpDropsMergedPRWhileHeld(t *testing.T) {
 	if _, held := st.HeldPR("owner/repo", 12); held {
 		t.Fatal("merged PR remained in the held list")
 	}
+	if len(gh.posted) != 1 || !strings.Contains(gh.posted[0], "<!-- crq:hold-merged -->") {
+		t.Fatalf("posted comments = %v, want merged-hold notice", gh.posted)
+	}
 	found := false
 	for _, archived := range st.Archive {
 		if archived.Repo == "owner/repo" && archived.PR == 12 && archived.Phase == PhaseAbandoned {

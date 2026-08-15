@@ -2926,6 +2926,9 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 		return updated, PumpResult{Action: "lost_race", Repo: repo, PR: pr}, true, nil
 	}
 	s.sync(ctx, updated)
+	if _, err := s.gh.PostIssueComment(ctx, repo, pr, mergedHoldComment()); err != nil && s.log != nil {
+		s.log.Printf("warning: %s#%d merged hold retired but its PR comment could not be posted: %v", repo, pr, err)
+	}
 	return updated, result, true, nil
 }
 

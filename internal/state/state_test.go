@@ -364,6 +364,9 @@ func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
 	if r == nil || r.Phase != PhaseQueued {
 		t.Fatalf("restored activity must requeue the completed dedupe marker, got %#v", r)
 	}
+	if !r.PrimarySettled {
+		t.Fatal("restored co-review work must preserve the completed primary side")
+	}
 	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
 		t.Fatalf("requeued round lost restored activity: %+v", co)
 	}

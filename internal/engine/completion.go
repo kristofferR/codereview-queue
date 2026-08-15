@@ -74,7 +74,8 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			break
 		}
 	}
-	if r.FiredAt != nil || primaryUnavailable || carriedReviewer {
+	roundActivated := r.FiredAt != nil || primaryUnavailable
+	if roundActivated || carriedReviewer {
 		for _, cp := range p.coReviewers() {
 			if requiredBot(p, cp.Login) {
 				continue
@@ -94,7 +95,11 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// check was neither asked for nor waited on, and a clean primary
 			// could converge the round straight past it.
 			carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
-			if (co.AutoActive || co.ActiveThisRound || carried || commanded || co.ChecksUnknown) &&
+			engaged := co.AutoActive || co.ActiveThisRound || carried || commanded
+			if roundActivated {
+				engaged = engaged || co.ChecksUnknown
+			}
+			if engaged &&
 				!coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) &&
 				!coCheckUnable(obs, cp.Login) {
 				reviewedBy[cp.Login] = false
@@ -227,7 +232,7 @@ func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.
 // nonterminal or failed top-summary state contradicts it.
 func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool {
 	for _, reply := range commandReplies(obs, p) {
-		if reply.completion && botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
+		if reply.completion && reply.priorReview &&
 			notBefore(reply.commandAt, firedAt) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvFailed) {
@@ -244,7 +249,7 @@ func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool 
 // while the real review is still queued, and must not release the slot.
 func primaryDeclinedRound(obs Observation, p Policy, firedAt time.Time) bool {
 	for _, reply := range commandReplies(obs, p) {
-		if reply.declined && botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
+		if reply.declined && reply.priorReview &&
 			notBefore(reply.commandAt, firedAt) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
 			return true
@@ -271,7 +276,7 @@ func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool 
 		}
 		states := []dialect.EventKind{dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused}
 		if reply.declined {
-			if !botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) {
+			if !reply.priorReview {
 				continue
 			}
 			states = append(states, dialect.EvFailed)
@@ -310,18 +315,9 @@ func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
 	}
 	for _, reply := range commandReplies(obs, p) {
 		if reply.commandID == r.CommandID && reply.completion &&
-			botReviewedBefore(obs.Reviews, p.Bot, reply.commandAt) &&
+			reply.priorReview &&
 			notBefore(reply.commandAt, cutoff) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
-			return true
-		}
-	}
-	return false
-}
-
-func botReviewedBefore(reviews []ReviewSeen, bot string, before time.Time) bool {
-	for _, review := range reviews {
-		if sameBot(review.Bot, bot) && !review.SubmittedAt.IsZero() && review.SubmittedAt.Before(before) {
 			return true
 		}
 	}
@@ -346,10 +342,11 @@ func stateSince(obs Observation, p Policy, since time.Time, kinds ...dialect.Eve
 }
 
 type commandReply struct {
-	commandID  int64
-	commandAt  time.Time
-	completion bool
-	declined   bool
+	commandID   int64
+	commandAt   time.Time
+	completion  bool
+	declined    bool
+	priorReview bool
 }
 
 // commandReplies folds the classified event stream (plus submitted reviews)
@@ -357,15 +354,19 @@ type commandReply struct {
 func commandReplies(obs Observation, p Policy) []commandReply {
 	type kind int
 	const (
-		kCommand kind = iota
+		// GitHub timestamps have only second precision. Put reviews first so a
+		// review immediately followed by a command in that same second remains
+		// prior evidence instead of consuming the new command.
+		kReview kind = iota
+		kCommand
 		kAutoReply
-		kReview
 	)
 	type event struct {
-		kind kind
-		at   time.Time
-		id   int64
-		ev   dialect.BotEvent
+		kind        kind
+		at          time.Time
+		id          int64
+		ev          dialect.BotEvent
+		priorReview bool
 	}
 	var events []event
 	for _, ev := range obs.Events {
@@ -394,14 +395,17 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 
 	var out []commandReply
 	var pending []event
+	seenReview := false
 	for _, ev := range events {
 		switch ev.kind {
 		case kCommand:
+			ev.priorReview = seenReview
 			pending = append(pending, ev)
 		case kReview:
 			if len(pending) > 0 {
 				pending = pending[1:]
 			}
+			seenReview = true
 		case kAutoReply:
 			if len(pending) == 0 {
 				continue
@@ -409,10 +413,11 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 			cmd := pending[0]
 			pending = pending[1:]
 			out = append(out, commandReply{
-				commandID:  cmd.id,
-				commandAt:  cmd.at,
-				completion: ev.ev.Kind == dialect.EvCompletion || ev.ev.Kind == dialect.EvAlreadyReviewed,
-				declined:   ev.ev.Kind == dialect.EvAlreadyReviewed,
+				commandID:   cmd.id,
+				commandAt:   cmd.at,
+				completion:  ev.ev.Kind == dialect.EvCompletion || ev.ev.Kind == dialect.EvAlreadyReviewed,
+				declined:    ev.ev.Kind == dialect.EvAlreadyReviewed,
+				priorReview: cmd.priorReview,
 			})
 		}
 	}

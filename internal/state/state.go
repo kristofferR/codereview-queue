@@ -143,6 +143,11 @@ type Round struct {
 	// the two claims exactly backwards. The identity travels as data here for
 	// the same reason it does in CoBots.
 	PrimaryAnsweredBy string `json:"primary_answered_by,omitempty"`
+	// PrimarySettled marks a completed round reopened solely to restore a lost
+	// co-reviewer gate. The primary side of that round is final: its metered
+	// request may have produced only an acknowledgement because the primary was
+	// not required, and its trigger comment may already have been tidied.
+	PrimarySettled bool `json:"primary_settled,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -619,7 +624,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 10
+const WriterCaps = 11
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -916,6 +921,7 @@ func (r *Round) Reopen() error {
 	r.WaitDeadline = nil
 	r.RetryAt = nil
 	r.ReviewersChanged = false
+	r.PrimarySettled = false
 	r.Note = "reviewer configuration changed"
 	return nil
 }
@@ -926,6 +932,7 @@ func (r *Round) ReopenForRestoredActivity() error {
 	if err := r.Reopen(); err != nil {
 		return err
 	}
+	r.PrimarySettled = true
 	r.Note = "restored reviewer activity"
 	return nil
 }

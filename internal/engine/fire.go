@@ -144,6 +144,13 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}
 	}
+	// Normalization can reopen a completed marker solely because it recovered
+	// co-reviewer activity that an older writer lost. The primary side already
+	// reached its terminal state; firing it again would spend a second request
+	// for the same head after its original command was tidied.
+	if r.PrimarySettled {
+		return coAwareDedupe(r, obs, p, now, false)
+	}
 	// No review of this head is coming from the configured bot, ever — its plan
 	// produces a walkthrough only, or it skipped this head outright. Resolve the
 	// round on the co-reviewers alone, before the slot / account-quota / pacing
@@ -315,7 +322,8 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
 		carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
-		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || primaryUnavailable || r.ForceCoReviewer(cp.Login)
+		checksUnknown := r.FiredAt != nil && co.ChecksUnknown
+		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable || r.ForceCoReviewer(cp.Login)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -328,7 +336,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// the co-review is still in flight, discarding the findings it is about
 		// to publish.
 		unable := coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) || coCheckUnable(obs, cp.Login)
-		if !unable && (co.AutoActive || co.ActiveThisRound || carried || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0) {
+		if !unable && (co.AutoActive || co.ActiveThisRound || carried || checksUnknown || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0) {
 			wait = true
 			continue
 		}

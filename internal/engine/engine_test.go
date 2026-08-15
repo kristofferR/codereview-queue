@@ -1297,6 +1297,54 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 	}
 }
 
+func TestRestoredCoReviewDoesNotRefireSettledPrimary(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	seenAt := t0.Add(-time.Hour)
+	firedAt := t0.Add(-time.Minute)
+	r := state.Round{Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseQueued,
+		CommandID: 42, FiredAt: &firedAt, PrimarySettled: true, CoBots: map[string]state.CoBotRound{
+			dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+		}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{bugbotLogin},
+		CoReviewers: []CoReviewerPolicy{
+			{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerAlways},
+			{Login: macroLogin, Command: "macroscope run", Trigger: TriggerSelfHeal},
+		}}
+	obs := Observation{Head: r.Head, Open: true,
+		Reviews: []ReviewSeen{{Bot: bugbotLogin, Commit: r.Head, SubmittedAt: now}},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(macroLogin): {ChecksUnknown: true},
+		}}
+
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireCoReviewWait {
+		t.Fatalf("restored co-review work must not spend another primary request: %+v", got)
+	}
+}
+
+func TestEqualTimestampPriorReviewProvesCompletionReply(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	at := t0.Add(2 * time.Second)
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: at, UpdatedAt: at}
+	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: at.Add(time.Second), UpdatedAt: at.Add(time.Second)}
+	obs := Observation{Head: r.Head, Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 1000, Commit: "000011122", SubmittedAt: at}},
+		Events:  []dialect.BotEvent{command, completion}}
+
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("an equal-second review ordered before the command must prove its completion reply: %+v", got)
+	}
+
+	obs.Reviews[0].SubmittedAt = at.Add(time.Second)
+	completion.CreatedAt = at.Add(2 * time.Second)
+	completion.UpdatedAt = completion.CreatedAt
+	obs.Events[1] = completion
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a review after the command must not become prior evidence: %+v", got)
+	}
+}
+
 // TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota pins the repository-level
 // primary switch. A private repo on a free plan gets nothing from the metered
 // reviewer, so crq must neither spend the account on it nor let that account's

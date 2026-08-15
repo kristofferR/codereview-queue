@@ -292,6 +292,32 @@ func TestCarriedSelfHealActivityWaitsDuringQuotaFreeDedupe(t *testing.T) {
 	}
 }
 
+func TestCarriedOnlyGateIgnoresUnknownChecksFromAnotherReviewer(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	seenAt := now.Add(-time.Hour)
+	r := state.Round{Head: head, CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{
+			{Login: bugbotLogin, Trigger: TriggerSelfHeal},
+			{Login: macroLogin, Trigger: TriggerSelfHeal},
+		}}
+	obs := Observation{Head: head, Open: true,
+		Reviews: []ReviewSeen{
+			{Bot: p.Bot, Commit: head, SubmittedAt: now},
+			{Bot: bugbotLogin, Commit: head, SubmittedAt: now},
+		},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(macroLogin): {ChecksUnknown: true},
+		}}
+
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("an unrelated unreadable checks endpoint must not join a carried-only gate: %+v", got)
+	}
+}
+
 // TestCompletionVerdictIsParticipationOnly: a Macroscope approvability verdict
 // engages round participation (CoActiveThisRound) but never counts as review
 // evidence.

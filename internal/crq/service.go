@@ -2851,6 +2851,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				if sameCoActivity(before, archived.CoBots) {
 					return ErrNoChange
 				}
+				st.RememberCoActivity(*archived)
 				return nil
 			}
 			return ErrNoChange
@@ -2906,6 +2907,9 @@ func sameCoAnswers(before, after map[string]CoBotRound) bool {
 }
 
 func sameCoActivity(before, after map[string]CoBotRound) bool {
+	if len(before) != len(after) {
+		return false
+	}
 	for login, a := range after {
 		b := before[login]
 		switch {

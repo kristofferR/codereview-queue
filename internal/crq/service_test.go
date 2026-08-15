@@ -427,6 +427,14 @@ type supersedeBeforeUpdateStore struct {
 	done bool
 }
 
+func TestSameCoActivityDetectsRemovedReviewer(t *testing.T) {
+	seen := time.Now().UTC()
+	before := map[string]CoBotRound{"bugbot": {SeenActiveAt: &seen}}
+	if sameCoActivity(before, map[string]CoBotRound{}) {
+		t.Fatal("removed reviewer activity must be a change")
+	}
+}
+
 func (s *supersedeBeforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
 	if !s.done {
 		s.done = true

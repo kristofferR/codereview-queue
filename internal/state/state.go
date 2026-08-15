@@ -1173,6 +1173,13 @@ func (s *State) rememberCoActivity(r Round) {
 	}
 }
 
+// RememberCoActivity folds a round's reviewer activity into the durable per-PR
+// index. Callers that mutate an archived round in place need this because
+// PutRound, EndRound, and Normalize do not observe that mutation.
+func (s *State) RememberCoActivity(r Round) {
+	s.rememberCoActivity(r)
+}
+
 func carryCoActivity(next *Round, activity map[string]time.Time) {
 	for login, seenAt := range activity {
 		current := next.Co(login)
@@ -1187,7 +1194,10 @@ func carryCoActivity(next *Round, activity map[string]time.Time) {
 
 func (s *State) carryCoActivity(next *Round) {
 	key := Key(next.Repo, next.PR)
-	carryCoActivity(next, s.CoActivity[key])
+	if activity, ok := s.CoActivity[key]; ok {
+		carryCoActivity(next, activity)
+		return
+	}
 	for i := len(s.Archive) - 1; i >= 0; i-- {
 		previous := s.Archive[i]
 		if Key(previous.Repo, previous.PR) != key {

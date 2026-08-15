@@ -76,27 +76,32 @@ func TestHoldPostsItsReasonOnThePullRequest(t *testing.T) {
 	}
 }
 
-func TestHoldNeutralizesMentionsInPostedReason(t *testing.T) {
+func TestHoldNeutralizesReviewCommandsInPostedReason(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{Command: "custom review command"}}
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	setHoldCapableLeader(t, ctx, store, now)
 	svc := NewService(cfg, gh, store, nil)
 	svc.now = func() time.Time { return now }
 
-	reason := "do not run @coderabbitai review or @codex review"
+	commands := []string{cfg.ReviewCommand, cfg.CoBots[0].Command}
+	for _, co := range dialect.KnownCoReviewers() {
+		commands = append(commands, co.Command)
+		commands = append(commands, co.TriggerAliases...)
+	}
+	reason := strings.Join(commands, "\n")
 	result, err := svc.Hold(ctx, "owner/repo", 12, reason)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertOnlyHoldComment(t, gh)
-	if strings.Contains(gh.posted[0], "@coderabbitai review") || strings.Contains(gh.posted[0], "@codex review") {
-		t.Fatalf("hold comment kept a live review command: %q", gh.posted[0])
-	}
-	if !strings.Contains(gh.posted[0], "@\u200bcoderabbitai review") || !strings.Contains(gh.posted[0], "@\u200bcodex review") {
-		t.Fatalf("hold comment did not neutralize reviewer mentions: %q", gh.posted[0])
+	for _, command := range commands {
+		if command != "" && strings.Contains(gh.posted[0], command) {
+			t.Fatalf("hold comment kept review command %q: %q", command, gh.posted[0])
+		}
 	}
 	if result.Reason != reason {
 		t.Fatalf("result reason = %q, want original %q", result.Reason, reason)

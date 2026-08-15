@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 // HoldResult reports a PR's hold state after a change.
@@ -54,8 +57,8 @@ func parseHoldKey(key string) (repo string, pr int, ok bool) {
 	return repo, pr, true
 }
 
-func holdComment(repo string, pr int, reason string) string {
-	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", neutralizeMentions(reason), repo, pr)
+func holdComment(repo string, pr int, reason string, cfg Config) string {
+	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", neutralizeReviewCommands(reason, cfg), repo, pr)
 }
 
 func unholdComment() string {
@@ -66,10 +69,41 @@ func mergedHoldComment() string {
 	return "<!-- crq:hold-merged -->\n✅ The administrative hold has been retired because this pull request merged. crq will not request further automated reviews."
 }
 
-// neutralizeMentions prevents free-form hold reasons from running a bot command
-// when rendered in a pull request comment. The original reason remains in state.
 func neutralizeMentions(text string) string {
 	return strings.ReplaceAll(text, "@", "@\u200b")
+}
+
+// neutralizeReviewCommands prevents a hold reason from triggering any configured
+// or registered review command when rendered in a pull request comment.
+func neutralizeReviewCommands(text string, cfg Config) string {
+	commands := []string{cfg.ReviewCommand}
+	for _, co := range cfg.CoBots {
+		commands = append(commands, co.Command)
+	}
+	for _, co := range cfg.KnownCoBots {
+		commands = append(commands, co.Command)
+	}
+	for _, co := range dialect.KnownCoReviewers() {
+		commands = append(commands, co.Command)
+		commands = append(commands, co.TriggerAliases...)
+	}
+	sort.Slice(commands, func(i, j int) bool {
+		if len(commands[i]) != len(commands[j]) {
+			return len(commands[i]) > len(commands[j])
+		}
+		return commands[i] < commands[j]
+	})
+	seen := make(map[string]bool, len(commands))
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command == "" || seen[command] {
+			continue
+		}
+		seen[command] = true
+		_, size := utf8.DecodeRuneInString(command)
+		text = strings.ReplaceAll(text, command, command[:size]+"\u200b"+command[size:])
+	}
+	return neutralizeMentions(text)
 }
 
 // sortHolds orders by repo then PR, so a listing is stable rather than however

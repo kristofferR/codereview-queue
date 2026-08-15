@@ -521,6 +521,32 @@ func (s retryMergedHoldStore) Update(_ context.Context, mutate func(*State) erro
 
 func (retryMergedHoldStore) SyncDashboard(context.Context, State) error { return nil }
 
+// retryUnholdStore simulates another caller releasing a hold after this caller
+// successfully mutated a stale state snapshot.
+type retryUnholdStore struct{ cfg Config }
+
+func (retryUnholdStore) Load(context.Context) (State, Revision, error) {
+	return DefaultState(Config{}), Revision{}, nil
+}
+
+func (s retryUnholdStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(s.cfg)
+	first.Hold("owner/repo", 12, "original hold", "operator", time.Now().UTC())
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(s.cfg)
+	if err := mutate(&second); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return second, nil
+		}
+		return State{}, err
+	}
+	return second, nil
+}
+
+func (retryUnholdStore) SyncDashboard(context.Context, State) error { return nil }
+
 // adoptionRaceStore loads a queued round with an adoptable command, but every
 // Update simulates another worker already holding the fire slot.
 type adoptionRaceStore struct {
@@ -1798,6 +1824,19 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	_, err := svc.recordFire(context.Background(), cfg, round, "token", 1, nil, time.Now().UTC(), time.Now().UTC())
 	if !errors.Is(err, ErrNoChange) {
 		t.Fatalf("expected no-change after retry lost the fire slot, got %v", err)
+	}
+}
+
+func TestUnholdDoesNotPostNoticeAfterCASRetry(t *testing.T) {
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, retryUnholdStore{cfg: cfg}, nil)
+
+	if _, err := svc.Unhold(context.Background(), "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("posted comments = %v, want none after losing the unhold race", gh.posted)
 	}
 }
 

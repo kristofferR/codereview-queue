@@ -190,7 +190,7 @@ func (s *Service) hold(
 		return HoldResult{}, err
 	}
 	s.sync(ctx, state)
-	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, holdComment(repo, pr, reason))
+	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, holdComment(repo, pr, reason, s.cfgFor(state, repo)))
 	if commentErr != nil {
 		// The hold is the safety boundary and has already committed. A missing
 		// notice must be visible to the caller, but must not roll the hold back and
@@ -273,6 +273,7 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 	}
 	released := false
 	state, err := s.store.Update(ctx, func(st *State) error {
+		released = false
 		if !st.Unhold(repo, pr) {
 			return ErrNoChange
 		}

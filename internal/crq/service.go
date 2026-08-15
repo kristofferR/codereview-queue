@@ -1833,7 +1833,8 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		default:
 			for _, cp := range cfg.policy().CoReviewerPolicies() {
 				co := round.Co(cp.Login)
-				if co.SeenActiveAt != nil && co.AnsweredAt == nil && obs.CoSeenFor(cp.Login).ActiveThisRound {
+				if co.SeenActiveAt != nil && co.AnsweredAt == nil &&
+					obs.CoSeenFor(cp.Login).ActiveThisRound && !obs.HeadAt.IsZero() {
 					headBoundary = obs.HeadAt.UTC()
 					break
 				}

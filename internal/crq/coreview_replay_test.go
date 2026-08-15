@@ -887,6 +887,50 @@ func TestCarriedCoReviewWaitAcceptsPreEnqueueSummaryAfterOrdinaryPush(t *testing
 	}
 }
 
+func TestCarriedCoReviewWaitKeepsEnqueueBoundaryWithoutHeadTime(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, head := "o/r", 52, "abcdef123"
+	enqueuedAt := base.Add(-2 * time.Minute)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, enqueuedAt, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, base.Add(-time.Hour))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	primaryAt := base.Add(-90 * time.Second)
+	summaryAt := base.Add(-time.Minute)
+	obs := engine.Observation{
+		Open: true, Head: head,
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: primaryAt}},
+		Events:  []dialect.BotEvent{{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: summaryAt}},
+		Co: map[string]engine.CoSeen{
+			dialect.NormalizeBotName(bugbotLogin): {
+				Commands:        []engine.CommandSeen{{ID: 700, CreatedAt: base.Add(-time.Hour)}},
+				ActiveThisRound: true,
+			},
+		},
+	}
+
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+		t.Fatal(err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(primaryAt) {
+		t.Fatalf("zero head time discarded the enqueue boundary: %+v", parked)
+	}
+	if co := parked.Co(bugbotLogin); co.CommandID != 0 {
+		t.Fatalf("zero head time adopted a command before enqueue: %+v", co)
+	}
+	if got := engine.Completion(*parked, obs, f.cfg.policy()); !got.ReviewedBy[bugbotLogin] {
+		t.Fatalf("current-head summary did not satisfy the preserved wait: %+v", got)
+	}
+}
+
 func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 	tests := []struct {

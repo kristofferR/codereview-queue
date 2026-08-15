@@ -433,6 +433,18 @@ func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
 	}
 }
 
+func TestCoActivityDoesNotReplaceCurrentHeadAnswer(t *testing.T) {
+	var r Round
+	answeredAt := t0.Add(time.Second)
+	r.NoteCoAnswer("cursor[bot]", answeredAt)
+	r.NoteCoActivity("cursor[bot]", answeredAt.Add(time.Second))
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt == nil || !co.AnsweredAt.Equal(answeredAt) {
+		t.Fatalf("delayed historical activity replaced current-head provenance: %+v", co)
+	}
+}
+
 func TestNormalizeDoesNotRequeueCompletedRoundForCurrentActivity(t *testing.T) {
 	enqueued := t0.Add(time.Minute)
 	seen := enqueued.Add(time.Second)

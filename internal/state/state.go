@@ -336,6 +336,9 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 // reviewer is active, but cannot satisfy the replacement round's head gate.
 func (r *Round) NoteCoActivity(login string, at time.Time) {
 	c := r.Co(login)
+	if c.AnsweredAt != nil {
+		return
+	}
 	if c.SeenActiveAt == nil {
 		t := at.UTC()
 		c.SeenActiveAt = &t

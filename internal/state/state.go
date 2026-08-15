@@ -1102,8 +1102,8 @@ func (s *State) MoveToFront(repo string, pr int) bool {
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
 // for one PR" cannot happen by accident. Durable co-reviewer activity is
-// restored from the latest archived round so reopening a PR does not forget a
-// silent check-only reviewer that worked on an earlier head.
+// restored from archived rounds so reopening a PR does not forget a silent
+// check-only reviewer that worked on an earlier head.
 func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Round, error) {
 	key := Key(repo, pr)
 	if s.Rounds == nil {
@@ -1151,7 +1151,6 @@ func (s *State) carryArchivedCoActivity(next *Round) {
 			current.SeenActiveAt = &seen
 			next.setCo(login, current)
 		}
-		return
 	}
 }
 

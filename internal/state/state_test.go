@@ -293,6 +293,26 @@ func TestNormalizeRestoresArchivedCoActivityAfterLegacySupersede(t *testing.T) {
 	}
 }
 
+func TestNormalizeRestoresCoActivityBeyondEmptyArchivedRound(t *testing.T) {
+	seen := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 11, Head: "00fedcba9", Phase: PhaseQueued}
+	s := State{
+		Rounds: map[string]Round{Key(current.Repo, current.PR): current},
+		Archive: []Round{
+			{Repo: current.Repo, PR: current.PR, Head: "abcdef123", Phase: PhaseAbandoned,
+				CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}},
+			{Repo: current.Repo, PR: current.PR, Head: "123456789", Phase: PhaseAbandoned},
+		},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	co := s.Round(current.Repo, current.PR).Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("Normalize lost activity beyond an empty archived round: %+v", co)
+	}
+}
+
 func TestSlotRoundStaleness(t *testing.T) {
 	s := New()
 	r := newFired(t, &s)

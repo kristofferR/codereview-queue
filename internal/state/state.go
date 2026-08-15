@@ -1191,7 +1191,7 @@ func (s *State) RememberCoActivity(r Round) {
 }
 
 func carryCoActivity(next *Round, activity map[string]time.Time) bool {
-	changed := false
+	restored := false
 	for login, seenAt := range activity {
 		current := next.Co(login)
 		if current.SeenActiveAt != nil && !current.SeenActiveAt.Before(seenAt) {
@@ -1200,9 +1200,11 @@ func carryCoActivity(next *Round, activity map[string]time.Time) bool {
 		seen := seenAt.UTC()
 		current.SeenActiveAt = &seen
 		next.setCo(login, current)
-		changed = true
+		if current.AnsweredAt == nil || current.AnsweredAt.Before(seenAt) {
+			restored = true
+		}
 	}
-	return changed
+	return restored
 }
 
 func (s *State) carryCoActivity(next *Round) bool {

@@ -369,6 +369,44 @@ func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
 	}
 }
 
+func TestNormalizeDoesNotRequeueCompletedRoundForItsLegacyAnswer(t *testing.T) {
+	answered := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted,
+		CoBots: map[string]CoBotRound{"cursor": {AnsweredAt: &answered}}}
+	s := State{Rounds: map[string]Round{Key(current.Repo, current.PR): current}}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("same-head answer must keep the completed dedupe marker, got %#v", r)
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("Normalize did not migrate the legacy answer to durable activity: %+v", co)
+	}
+}
+
+func TestNormalizeRequeuesCompletedRoundForNewerCarriedActivity(t *testing.T) {
+	answered := t0.Add(time.Second)
+	seen := answered.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted,
+		CoBots: map[string]CoBotRound{"cursor": {AnsweredAt: &answered}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("newer carried activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("Normalize did not restore newer durable activity: %+v", co)
+	}
+}
+
 func TestSlotRoundStaleness(t *testing.T) {
 	s := New()
 	r := newFired(t, &s)

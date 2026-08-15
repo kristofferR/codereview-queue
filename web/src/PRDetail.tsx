@@ -60,15 +60,19 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   // other.
   const [pending, setPending] = useState<"hold" | "cancel" | null>(null);
   const { run: runRoundOperation, running: acting, error: roundErr } = useOperation();
+  const [roundWarning, setRoundWarning] = useState<string | null>(null);
   const liveCursor = useRef({ key: `${repo}#${pr}`, snapshot });
 
-  const runRound = (kind: "hold" | "unhold" | "cancel", reason = "") =>
+  const runRound = (kind: "hold" | "unhold" | "cancel", reason = "") => {
+    setRoundWarning(null);
     runRoundOperation(act(kind, { repo, pr, reason }), {
-      onSuccess: () => {
+      onSuccess: ({ warning }) => {
+        setRoundWarning(warning ?? null);
         setPending(null);
         load(true);
       },
     });
+  };
 
   const runAction = (reason: string) => {
     if (!action) return;
@@ -117,6 +121,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     const key = `${repo}#${pr}`;
     if (liveCursor.current.key !== key) {
       liveCursor.current = { key, snapshot };
+      setRoundWarning(null);
       return;
     }
     if (!isNewLiveSnapshot(liveCursor.current.snapshot, snapshot)) return;
@@ -237,6 +242,14 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
             >
               Dismiss
             </button>
+          </div>
+        )}
+        {roundWarning && (
+          <div
+            role="status"
+            className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn"
+          >
+            {roundWarning}
           </div>
         )}
         {view.round && (

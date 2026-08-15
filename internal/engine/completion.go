@@ -354,11 +354,13 @@ type commandReply struct {
 func commandReplies(obs Observation, p Policy) []commandReply {
 	type kind int
 	const (
-		// GitHub timestamps have only second precision. Put reviews first so a
-		// review immediately followed by a command in that same second remains
-		// prior evidence instead of consuming the new command.
-		kReview kind = iota
-		kCommand
+		// GitHub timestamps have only second precision. Commands sort before
+		// reviews so a tied review is conservatively not treated as prior
+		// evidence. The review loop below also leaves a tied command pending:
+		// without a finer ordering signal, the review must neither prove that
+		// command was a re-review nor consume it as the command's answer.
+		kCommand kind = iota
+		kReview
 		kAutoReply
 	)
 	type event struct {
@@ -402,7 +404,7 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 			ev.priorReview = seenReview
 			pending = append(pending, ev)
 		case kReview:
-			if len(pending) > 0 {
+			if len(pending) > 0 && pending[0].at.Before(ev.at) {
 				pending = pending[1:]
 			}
 			seenReview = true

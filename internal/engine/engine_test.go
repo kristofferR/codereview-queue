@@ -338,6 +338,14 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
 	}
+	// A completed round reopened only to restore co-review activity carries
+	// durable proof that its primary side was already final. Its original
+	// command may have been tidied, so no observable primary evidence need remain.
+	settled := reviewing()
+	settled.PrimarySettled = true
+	if tr := Progress(settled, state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("a settled primary must end the restored co-review wait at its deadline, got %+v", tr)
+	}
 	// A proven decline is also final primary evidence. Once the co-review
 	// deadline passes, retaining this reviewing round would starve every later
 	// reviewing round behind it.
@@ -1321,7 +1329,7 @@ func TestRestoredCoReviewDoesNotRefireSettledPrimary(t *testing.T) {
 	}
 }
 
-func TestEqualTimestampPriorReviewProvesCompletionReply(t *testing.T) {
+func TestEqualTimestampReviewDoesNotProveCompletionReply(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	at := t0.Add(2 * time.Second)
 	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
@@ -1332,8 +1340,16 @@ func TestEqualTimestampPriorReviewProvesCompletionReply(t *testing.T) {
 		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 1000, Commit: "000011122", SubmittedAt: at}},
 		Events:  []dialect.BotEvent{command, completion}}
 
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("an equal-second review has ambiguous ordering and must not prove a re-review reply: %+v", got)
+	}
+	if !CommandHasCompletionReply(obs, policy, command.CommentID) {
+		t.Fatal("an equal-second review must not consume the command's later completion reply")
+	}
+
+	obs.Reviews[0].SubmittedAt = at.Add(-time.Second)
 	if got := Completion(r, obs, policy); !got.Done {
-		t.Fatalf("an equal-second review ordered before the command must prove its completion reply: %+v", got)
+		t.Fatalf("a review strictly before the command must prove its completion reply: %+v", got)
 	}
 
 	obs.Reviews[0].SubmittedAt = at.Add(time.Second)

@@ -1816,15 +1816,15 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		}
 	}
 	if carried {
+		// EnqueuedAt is always a safe current-head boundary. Refine it when the
+		// force-push timeline is available, but do not wedge this quota-free wait
+		// on a transient GraphQL failure.
+		headBoundary = round.EnqueuedAt.UTC()
 		fp, err := s.latestHeadForcePush(ctx, round.Repo, round.PR)
-		if err != nil {
-			return result, err
-		}
 		// The latest force-push is a boundary only when that event installed
 		// this head. A later fast-forward can leave an unrelated event as the
 		// newest one; EnqueuedAt is then the first safe witness for this head.
-		headBoundary = round.EnqueuedAt.UTC()
-		if dialect.SHAPrefixMatch(fp.head, round.Head) {
+		if err == nil && dialect.SHAPrefixMatch(fp.head, round.Head) {
 			headBoundary = fp.at
 		}
 		if headBoundary.After(anchor) {

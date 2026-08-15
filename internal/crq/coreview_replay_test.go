@@ -284,22 +284,35 @@ func TestFeedbackPersistsCoReviewerActivityBeforeRoundExists(t *testing.T) {
 	}
 }
 
-func TestNoteCoAnswersKeepsParticipationAsActivity(t *testing.T) {
+func TestNoteCoAnswersKeepsCurrentParticipationOnCurrentHead(t *testing.T) {
 	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name string
-		obs  engine.Observation
+		name        string
+		obs         engine.Observation
+		seedCarried bool
 	}{
 		{name: "running check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckInProgress}}}},
 		{name: "failed check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckFailed}}}},
 		{name: "auxiliary check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckAuxiliary}}}},
-		{name: "verdict", obs: engine.Observation{Events: []dialect.BotEvent{{Kind: dialect.EvCoVerdict, Bot: bugbotLogin}}}},
+		{name: "verdict", obs: engine.Observation{Events: []dialect.BotEvent{{Kind: dialect.EvCoVerdict, Bot: bugbotLogin, CreatedAt: base}}}},
+		{name: "head check replaces carried activity", seedCarried: true,
+			obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckInProgress}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCoReplayFixture(t, base, onlyBugbot)
 			repo, pr, head := "o/r", 55, "abcdef123"
 			seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base, 0)
+			if tc.seedCarried {
+				if _, err := f.store.Update(f.ctx, func(st *State) error {
+					r := st.Round(repo, pr)
+					r.NoteCoActivity(bugbotLogin, base.Add(-time.Hour))
+					st.PutRound(*r)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			tc.obs.Head = head
 			tc.obs.Co = map[string]engine.CoSeen{
 				dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true},
@@ -309,8 +322,8 @@ func TestNoteCoAnswersKeepsParticipationAsActivity(t *testing.T) {
 				t.Fatal(err)
 			}
 			co := f.round(repo, pr).Co(bugbotLogin)
-			if co.SeenActiveAt == nil || !co.ActivityCarried || co.AnsweredAt != nil {
-				t.Fatalf("participation was not preserved as activity only: %+v", co)
+			if co.SeenActiveAt == nil || co.ActivityCarried || co.AnsweredAt != nil {
+				t.Fatalf("current participation was not preserved with current-head provenance: %+v", co)
 			}
 		})
 	}
@@ -1077,8 +1090,8 @@ func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
 			if err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), obs, base); err != nil {
 				t.Fatal(err)
 			}
-			if co := f.round(repo, pr).Co(bugbotLogin); co.AnsweredAt != nil {
-				t.Fatalf("historical activity answered the replacement round: %+v", co)
+			if co := f.round(repo, pr).Co(bugbotLogin); co.AnsweredAt != nil || !co.ActivityCarried {
+				t.Fatalf("historical activity lost its carried provenance: %+v", co)
 			}
 			if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
 				t.Fatal(err)

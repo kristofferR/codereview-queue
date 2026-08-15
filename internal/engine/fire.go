@@ -101,6 +101,28 @@ func CoReviewedRound(r state.Round, obs Observation, login string) bool {
 	return reviewed
 }
 
+// CoParticipatedRound reports non-terminal activity that can safely be bound
+// to this round. Check runs are head-scoped by construction. Timeline activity
+// needs either the round's fire/command floor or, before either exists, to have
+// arrived after crq enqueued the head; older SHA-less activity may belong to a
+// previous head and must retain its carried provenance.
+func CoParticipatedRound(r state.Round, obs Observation, login string) bool {
+	if r.Head == "" || obs.Head == "" || !dialect.SHAPrefixMatch(r.Head, obs.Head) {
+		return false
+	}
+	if coCheckActivity(obs, login) {
+		return true
+	}
+	if r.FiredAt != nil || roundCoCommandedAt(r, login) != nil {
+		return CoActiveThisRound(r, obs, login)
+	}
+	if r.EnqueuedAt.IsZero() {
+		return false
+	}
+	cutoff := r.EnqueuedAt.UTC()
+	return coCommentedRound(obs, login, cutoff) || coVerdictSince(obs, login, cutoff)
+}
+
 // requiredBot reports whether login is in RequiredBots (normalized).
 func requiredBot(p Policy, login string) bool {
 	norm := dialect.NormalizeBotName(login)

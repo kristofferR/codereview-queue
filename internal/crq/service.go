@@ -3000,9 +3000,12 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		}
 		before, beforePrimary := r.CoBots, r.PrimaryAnsweredAt
 		for _, login := range active {
-			if answered[dialect.NormalizeBotName(login)] {
+			switch {
+			case answered[dialect.NormalizeBotName(login)]:
 				r.NoteCoAnswer(login, now)
-			} else {
+			case engine.CoParticipatedRound(*r, obs, login):
+				r.NoteCoParticipation(login, now)
+			default:
 				r.NoteCoActivity(login, now)
 			}
 		}

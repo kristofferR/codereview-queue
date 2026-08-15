@@ -433,6 +433,19 @@ func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
 	}
 }
 
+func TestCoParticipationReplacesCarriedProvenance(t *testing.T) {
+	var r Round
+	r.NoteCoActivity("cursor[bot]", t0)
+	participatedAt := t0.Add(time.Minute)
+	r.NoteCoParticipation("cursor[bot]", participatedAt)
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt != nil || co.SeenActiveAt == nil ||
+		!co.SeenActiveAt.Equal(participatedAt) {
+		t.Fatalf("current-head participation did not replace carried provenance: %+v", co)
+	}
+}
+
 func TestCoActivityDoesNotReplaceCurrentHeadAnswer(t *testing.T) {
 	var r Round
 	answeredAt := t0.Add(time.Second)
@@ -448,8 +461,8 @@ func TestCoActivityDoesNotReplaceCurrentHeadAnswer(t *testing.T) {
 func TestNormalizeDoesNotRequeueCompletedRoundForCurrentActivity(t *testing.T) {
 	enqueued := t0.Add(time.Minute)
 	seen := enqueued.Add(time.Second)
-	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
-		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued}
+	current.NoteCoParticipation("cursor", seen)
 	s := State{
 		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
 		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},

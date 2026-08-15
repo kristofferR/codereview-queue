@@ -330,6 +330,24 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	r.setCo(login, c)
 }
 
+// NoteCoParticipation records activity bound to this round without claiming
+// the reviewer finished. Unlike NoteCoActivity, this evidence came from the
+// current head and must not be restored as historical activity after the
+// round's bounded wait completes.
+func (r *Round) NoteCoParticipation(login string, at time.Time) {
+	c := r.Co(login)
+	if c.AnsweredAt != nil {
+		return
+	}
+	if c.SeenActiveAt != nil && !c.ActivityCarried {
+		return
+	}
+	t := at.UTC()
+	c.SeenActiveAt = &t
+	c.ActivityCarried = false
+	r.setCo(login, c)
+}
+
 // NoteCoActivity records durable evidence that login has acted on this pull
 // request without claiming it answered this round. It is used when an
 // observation races a supersede: the old head's evidence still proves the
@@ -913,8 +931,10 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 // pending while enqueue keeps skipping the head, and no eligible round exists to
 // trigger it. An optional reviewer also needs an active round for its trigger,
 // self-heal and bounded participation wait. This is the one transition that
-// reopens a finished round, and it keeps the head, the attempts and the
-// co-reviewer bookkeeping — what changed is who runs, not what happened.
+// reopens a finished round, and it keeps the head, the attempts, the settled
+// primary side and the co-reviewer bookkeeping — what changed is who runs, not
+// what happened. A caller whose effective primary changed clears that
+// settlement explicitly.
 //
 // LastAttemptAt is deliberately left alone: it is the adoption floor for a
 // FAILED attempt, and moving it would discard a newly required co-reviewer's own
@@ -930,7 +950,6 @@ func (r *Round) Reopen() error {
 	r.WaitDeadline = nil
 	r.RetryAt = nil
 	r.ReviewersChanged = false
-	r.PrimarySettled = false
 	r.Note = "reviewer configuration changed"
 	return nil
 }

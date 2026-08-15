@@ -516,7 +516,8 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		forced := forcedCoReviewers(round.ForceCoReviewers, before, after)
 		switch round.Phase {
 		case PhaseQueued, PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
-			if !sameLogins(round.ForceCoReviewers, forced) || round.PrimarySettled && primaryChanged {
+			if !sameLogins(round.ForceCoReviewers, forced) ||
+				primaryChanged && (round.PrimarySettled || round.CoOnly) {
 				updated := round
 				updated.ForceCoReviewers = forced
 				if primaryChanged {
@@ -535,10 +536,15 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			continue
 		}
 		if !open[round.PR] {
-			if !round.ReviewersChanged || !sameLogins(round.ForceCoReviewers, forced) {
+			if !round.ReviewersChanged || !sameLogins(round.ForceCoReviewers, forced) ||
+				primaryChanged && (round.PrimarySettled || round.CoOnly) {
 				marked := round
 				marked.ReviewersChanged = true
 				marked.ForceCoReviewers = forced
+				if primaryChanged {
+					marked.PrimarySettled = false
+					marked.CoOnly = false
+				}
 				st.PutRound(marked)
 			}
 			continue
@@ -546,6 +552,10 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		reopened := round
 		if err := reopened.Reopen(); err != nil {
 			continue
+		}
+		if primaryChanged {
+			reopened.PrimarySettled = false
+			reopened.CoOnly = false
 		}
 		reopened.ForceCoReviewers = forced
 		st.PutRound(reopened)

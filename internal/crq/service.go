@@ -1150,6 +1150,14 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
+	// A reviewing round no longer holds the fire slot. Persist an account block
+	// before the less-critical activity bookkeeping so a transient activity write
+	// cannot let another worker fire inside the window we just observed.
+	if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
+		return st, err
+	} else if updated != nil {
+		st = *updated
+	}
 	if err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
 		return st, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(target.Repo, target.PR), err)
 	}
@@ -2052,12 +2060,20 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		return
 	}
 	firedAt := round.FiredAt.UTC()
+	// A quota-free co-review wait uses FiredAt as its evidence floor, which may
+	// be the timestamp of an old commit reached by a reset or force-push. Grace
+	// instead starts when crq first saw this head. Ordinary fired rounds already
+	// have FiredAt at or after EnqueuedAt, so this changes only the parked case.
+	selfHealAt := firedAt
+	if round.EnqueuedAt.After(selfHealAt) {
+		selfHealAt = round.EnqueuedAt.UTC()
+	}
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
 		commandPresent := engine.CoCommandSince(obs, cp.Login, firedAt)
-		if !engine.DecideCoPost(round, obs, cp, commandPresent, firedAt, now) {
+		if !engine.DecideCoPost(round, obs, cp, commandPresent, selfHealAt, now) {
 			continue
 		}
 		// Claim the post under CAS BEFORE the network call: this sweep path is

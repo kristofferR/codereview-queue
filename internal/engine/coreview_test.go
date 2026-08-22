@@ -85,6 +85,15 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}
 	commanded := state.Round{Head: head}
 	commanded.SetCoCommand(bugbotLogin, 42, now.Add(-time.Hour))
+	seenAt := now.Add(-2 * time.Hour)
+	seen := state.Round{Head: head, CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
+	queuedAt := now.Add(-2 * time.Hour)
+	firedAt := now.Add(-30 * time.Minute)
+	firedAfterUnable := seen
+	firedAfterUnable.EnqueuedAt = queuedAt
+	firedAfterUnable.FiredAt = &firedAt
 
 	cases := []struct {
 		name           string
@@ -128,6 +137,16 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 		{name: "selfheal stays quiet when checks are unreadable", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true, ChecksUnknown: true}), anchor: staleAnchor, want: false},
 		{name: "selfheal posts for an active bot that missed the head past grace", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts round activity as active", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{ActiveThisRound: true}), anchor: staleAnchor, want: true},
+		{name: "selfheal counts activity carried from a previous head", cp: policy(TriggerSelfHeal), round: seen, obs: obsWith(CoSeen{}), anchor: staleAnchor, want: true},
+		{name: "selfheal respects an unable notice after carried activity", cp: policy(TriggerSelfHeal), round: seen,
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: staleAnchor.Add(time.Minute), UpdatedAt: staleAnchor.Add(time.Minute)}}}, anchor: staleAnchor, want: false},
+		{name: "selfheal preserves an unable notice received before the primary fired", cp: policy(TriggerSelfHeal), round: firedAfterUnable,
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: queuedAt.Add(time.Minute), UpdatedAt: queuedAt.Add(time.Minute)}}}, anchor: firedAt, want: false},
+		{name: "selfheal ignores an old-head unable notice after a reset to an older commit", cp: policy(TriggerSelfHeal), round: firedAfterUnable,
+			obs: Observation{Head: head, Open: true, HeadAt: queuedAt.Add(-time.Hour), Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+				CreatedAt: queuedAt.Add(-time.Minute), UpdatedAt: queuedAt.Add(-time.Minute)}}}, anchor: firedAt, want: true},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
 		{name: "selfheal needs an anchor", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), want: false},
 		{
@@ -228,6 +247,74 @@ func TestCompletionCheckEvidence(t *testing.T) {
 	activeDone.Checks = []CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean, CompletedAt: fired.Add(2 * time.Minute)}}
 	if got := Completion(round, activeDone, wanted); !got.Done {
 		t.Fatalf("the active bot's completed check must satisfy the gate: %+v", got)
+	}
+	// Activity carried from a previous head is enough for self-heal to nudge a
+	// silent bot. It must also hold this round open through that grace period.
+	carriedAt := fired.Add(-time.Hour)
+	carried := state.Round{Head: head, FiredAt: &fired, CoBots: map[string]state.CoBotRound{
+		bugbotKey: {SeenActiveAt: &carriedAt},
+	}}
+	if got := Completion(carried, silent, wanted); got.Done {
+		t.Fatalf("carried self-heal activity must gate completion: %+v", got)
+	}
+	never := wanted
+	never.CoReviewers[0].Trigger = TriggerNever
+	if got := Completion(carried, silent, never); !got.Done {
+		t.Fatalf("a never-mode reviewer must not gate on carried activity: %+v", got)
+	}
+	unableBeforeFire := carried
+	unableBeforeFire.EnqueuedAt = fired.Add(-10 * time.Minute)
+	unable := silent
+	unable.Events = []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+		CreatedAt: fired.Add(-5 * time.Minute), UpdatedAt: fired.Add(-5 * time.Minute)}}
+	if got := Completion(unableBeforeFire, unable, wanted); !got.Done {
+		t.Fatalf("an unable notice after enqueue must disengage carried activity: %+v", got)
+	}
+}
+
+func TestCarriedSelfHealActivityWaitsDuringQuotaFreeDedupe(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	seenAt := now.Add(-time.Hour)
+	r := state.Round{Head: head, Phase: state.PhaseQueued, EnqueuedAt: now.Add(-time.Minute), CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal, SelfHealGrace: 10 * time.Minute}}}
+	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{{Bot: p.Bot, Commit: head, SubmittedAt: now}}}
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireCoReviewWait {
+		t.Fatalf("carried activity must keep quota-free dedupe waiting, got %+v", got)
+	}
+	obs.Events = []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: bugbotLogin,
+		CreatedAt: now, UpdatedAt: now}}
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireDedupe {
+		t.Fatalf("an unable carried reviewer must not keep quota-free dedupe waiting, got %+v", got)
+	}
+}
+
+func TestCarriedOnlyGateIgnoresUnknownChecksFromAnotherReviewer(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	seenAt := now.Add(-time.Hour)
+	r := state.Round{Head: head, CoBots: map[string]state.CoBotRound{
+		dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+	}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{
+			{Login: bugbotLogin, Trigger: TriggerSelfHeal},
+			{Login: macroLogin, Trigger: TriggerSelfHeal},
+		}}
+	obs := Observation{Head: head, Open: true,
+		Reviews: []ReviewSeen{
+			{Bot: p.Bot, Commit: head, SubmittedAt: now},
+			{Bot: bugbotLogin, Commit: head, SubmittedAt: now},
+		},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(macroLogin): {ChecksUnknown: true},
+		}}
+
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("an unrelated unreadable checks endpoint must not join a carried-only gate: %+v", got)
 	}
 }
 

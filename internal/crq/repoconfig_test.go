@@ -366,6 +366,115 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestChangingPrimaryInvalidatesRestoredRoundSettlement(t *testing.T) {
+	before := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "codex",
+	})
+	tests := []struct {
+		name  string
+		after Config
+	}{
+		{
+			name: "primary becomes required",
+			after: before.ForRepo(RepoReviewers{
+				CoBots: []string{"codex"}, SetCoBots: true,
+				Required: []string{"codex", before.Bot}, SetRequired: true,
+			}),
+		},
+		{
+			name: "configured primary changes",
+			after: func() Config {
+				cfg := before
+				cfg.Bot = "replacement-reviewer[bot]"
+				cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, cfg.RequiredBots, cfg.CoBots, false)
+				return cfg
+			}(),
+		},
+	}
+	for _, tc := range tests {
+		for _, completed := range []bool{false, true} {
+			phase := "active"
+			if completed {
+				phase = "completed"
+			}
+			t.Run(tc.name+"/"+phase, func(t *testing.T) {
+				st := State{}
+				now := time.Now().UTC()
+				r, err := st.NewRound("o/r", 3, "aaaaaaaa1", now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if completed {
+					if err := r.Reserve("token", "writer", now); err != nil {
+						t.Fatal(err)
+					}
+					if err := r.Fire(42, now); err != nil {
+						t.Fatal(err)
+					}
+					if err := r.Complete(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.PrimarySettled = true
+				r.CoOnly = true
+				st.PutRound(*r)
+				svc := NewService(before, newFakeGitHub(), NewMemoryStore(before), nil)
+
+				svc.reopenForChangedReviewers(&st, "o/r", before, tc.after, map[int]bool{3: true})
+
+				if got := st.Round("o/r", 3); got == nil || got.PrimarySettled || got.CoOnly {
+					t.Fatalf("round = %+v, want stale primary settlement cleared", got)
+				}
+			})
+		}
+	}
+}
+
+func TestChangingPrimaryInvalidatesClosedRoundSettlement(t *testing.T) {
+	before := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "codex",
+	})
+	after := before.ForRepo(RepoReviewers{
+		CoBots: []string{"codex"}, SetCoBots: true,
+		Required: []string{"codex", before.Bot}, SetRequired: true,
+	})
+	now := time.Now().UTC()
+	st := State{}
+	r, err := st.NewRound("o/r", 3, "aaaaaaaa1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reserve("token", "writer", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Fire(42, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	r.PrimarySettled = true
+	r.CoOnly = true
+	st.PutRound(*r)
+	svc := NewService(before, newFakeGitHub(), NewMemoryStore(before), nil)
+
+	svc.reopenForChangedReviewers(&st, "o/r", before, after, nil)
+	marked := st.Round("o/r", 3)
+	if marked == nil || marked.Phase != PhaseCompleted || !marked.ReviewersChanged ||
+		marked.PrimarySettled || marked.CoOnly {
+		t.Fatalf("closed round = %+v, want its stale primary settlement invalidated and reopen deferred", marked)
+	}
+	if !requeueIfReviewersChanged(&st, marked) {
+		t.Fatal("reopened PR did not requeue its marked round")
+	}
+	if got := st.Round("o/r", 3); got == nil || got.Phase != PhaseQueued ||
+		got.PrimarySettled || got.CoOnly {
+		t.Fatalf("reopened round = %+v, want stale primary settlement to stay cleared", got)
+	}
+}
+
 func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{
@@ -537,6 +646,15 @@ func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
 	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.PrimarySettled = true
+		r.CoOnly = true
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil, nil); err != nil {
 		t.Fatal(err)
@@ -546,8 +664,8 @@ func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	round := st.Round(repo, pr)
-	if round == nil || round.Phase != PhaseQueued {
-		t.Fatalf("round = %#v, want it requeued so the newly enabled co-reviewer can run", round)
+	if round == nil || round.Phase != PhaseQueued || !round.PrimarySettled || !round.CoOnly {
+		t.Fatalf("round = %#v, want it requeued with the settled primary preserved", round)
 	}
 }
 

@@ -338,6 +338,26 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
 	}
+	// A completed round reopened only to restore co-review activity carries
+	// durable proof that its primary side was already final. Its original
+	// command may have been tidied, so no observable primary evidence need remain.
+	settled := reviewing()
+	settled.PrimarySettled = true
+	if tr := Progress(settled, state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("a settled primary must end the restored co-review wait at its deadline, got %+v", tr)
+	}
+	// A proven decline is also final primary evidence. Once the co-review
+	// deadline passes, retaining this reviewing round would starve every later
+	// reviewing round behind it.
+	declined := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "000011122", SubmittedAt: t0.Add(-time.Hour)}},
+		Events: []dialect.BotEvent{
+			{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001, CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)},
+			{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1002, AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)},
+		}}
+	if tr := Progress(reviewing(), state.AccountQuota{}, declined, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("proven primary decline past the deadline must complete, got %+v", tr)
+	}
 	// Before the deadline the bound must not fire: keep waiting on the co-bot —
 	// KeepWaiting, not a re-emitted OutReviewing, so the sweep doesn't write the
 	// same state and re-sync the dashboard on every pump.
@@ -458,6 +478,51 @@ func TestRateLimitBeatsAlreadyReviewedAck(t *testing.T) {
 	}
 }
 
+// A changed head can receive a final refusal instead of another submitted
+// review. It is safe to accept only as a paired re-review response: the prior
+// review proves this is not the first-round instant-ack case that can precede a
+// real review still queued behind it.
+func TestDeclinedRereviewCompletesOnlyWithPriorReview(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
+	declined := dialect.BotEvent{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)}
+	obs := Observation{Head: r.Head, Open: true, Events: []dialect.BotEvent{command, declined}}
+
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a refusal with no prior review must not hide a queued first review: %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy); tr.Outcome != KeepWaiting {
+		t.Fatalf("an unproven refusal released the fire slot: %+v", tr)
+	}
+
+	// A delayed review of the old head does not retroactively prove that the
+	// earlier refusal was a re-review response. The proof must already exist
+	// when this command is posted.
+	obs.Reviews = []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 9,
+		Commit: "000011122", SubmittedAt: t0.Add(10 * time.Second)}}
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a review submitted after the refusal's command must not validate it: %+v", got)
+	}
+	if !PrimaryAckPending(r, obs, policy) {
+		t.Fatal("an unproven refusal must keep the loop's fire-slot hold")
+	}
+
+	obs.Reviews = []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 9,
+		Commit: "000011122", SubmittedAt: t0.Add(-time.Hour)}}
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("a paired refusal on a re-review must complete the head: %+v", got)
+	}
+	if PrimaryAckPending(r, obs, policy) {
+		t.Fatal("a proven refusal must acknowledge the loop's fire-slot hold")
+	}
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
+	if tr.Outcome != OutComplete || tr.Reason != "re-review declined" {
+		t.Fatalf("a proven refusal must complete instead of timing out blocked: %+v", tr)
+	}
+}
+
 // TestPreFireReviewOfHeadCompletes ports botsReviewedHead: a required bot's
 // review of the head counts even when it landed before the round was fired.
 func TestPreFireReviewOfHeadCompletes(t *testing.T) {
@@ -512,6 +577,17 @@ func TestCommandHasCompletionReply(t *testing.T) {
 		dialect.BotEvent{Kind: dialect.EvInProgress, Bot: "coderabbitai[bot]", CommentID: 900, CreatedAt: t0.Add(-time.Hour), UpdatedAt: t0.Add(9 * time.Second)})
 	if CommandHasCompletionReply(Observation{Events: withProcessing}, policy, 1001) {
 		t.Fatal("an in-progress summary after the reply must reopen the command")
+	}
+	declined := append([]dialect.BotEvent{base[0]}, dialect.BotEvent{
+		Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1003,
+		AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second),
+	})
+	if CommandHasCompletionReply(Observation{Events: declined}, policy, 1001) {
+		t.Fatal("an unproven declined reply must remain adoptable while a first review may be queued")
+	}
+	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef123", SubmittedAt: t0.Add(-time.Minute)}
+	if !CommandHasCompletionReply(Observation{Events: declined, Reviews: []ReviewSeen{priorReview}}, policy, 1001) {
+		t.Fatal("a proven declined re-review must not be re-adopted")
 	}
 }
 
@@ -697,6 +773,22 @@ func TestDecideFireForcedCoReviewerGate(t *testing.T) {
 				t.Fatalf("PostCo = %v, want the forced reviewer", got.PostCo)
 			}
 		})
+	}
+}
+
+func TestProgressCompletesExpiredCoWaitOnPrimaryCompletionEvidence(t *testing.T) {
+	fired := t0.Add(-time.Hour)
+	deadline := t0.Add(-time.Minute)
+	head := "abcdef123"
+	seenAt := t0.Add(-2 * time.Hour)
+	r := state.Round{Head: head, Phase: state.PhaseReviewing, FiredAt: &fired, WaitDeadline: &deadline,
+		CoBots: map[string]state.CoBotRound{dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt}}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal}}}
+	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvNoAction, Bot: p.Bot,
+		CreatedAt: fired.Add(time.Minute), UpdatedAt: fired.Add(time.Minute)}}}
+	if got := Progress(r, state.AccountQuota{}, obs, t0, p); got.Outcome != OutComplete {
+		t.Fatalf("expired co-review wait must complete on a clean primary summary, got %+v", got)
 	}
 }
 
@@ -1134,6 +1226,8 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
 	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
 		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
+	declined := dialect.BotEvent{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1004,
+		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
 	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "0000000099", SubmittedAt: t0.Add(-time.Hour)}
 
 	cases := []struct {
@@ -1146,6 +1240,12 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 			name: "completion reply with a prior review",
 			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
 				Events: []dialect.BotEvent{command, completion}},
+			want: FireDedupe,
+		},
+		{
+			name: "declined re-review with a prior review",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, declined}},
 			want: FireDedupe,
 		},
 		{
@@ -1202,6 +1302,62 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 				t.Fatalf("verdict = %v, want %v (%+v)", d.Verdict, tc.want, d)
 			}
 		})
+	}
+}
+
+func TestRestoredCoReviewDoesNotRefireSettledPrimary(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	seenAt := t0.Add(-time.Hour)
+	firedAt := t0.Add(-time.Minute)
+	r := state.Round{Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseQueued,
+		CommandID: 42, FiredAt: &firedAt, PrimarySettled: true, CoBots: map[string]state.CoBotRound{
+			dialect.NormalizeBotName(bugbotLogin): {SeenActiveAt: &seenAt},
+		}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{bugbotLogin},
+		CoReviewers: []CoReviewerPolicy{
+			{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerAlways},
+			{Login: macroLogin, Command: "macroscope run", Trigger: TriggerSelfHeal},
+		}}
+	obs := Observation{Head: r.Head, Open: true,
+		Reviews: []ReviewSeen{{Bot: bugbotLogin, Commit: r.Head, SubmittedAt: now}},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(macroLogin): {ChecksUnknown: true},
+		}}
+
+	if got := DecideFire(Global{SlotFree: true}, r, obs, now, p); got.Verdict != FireCoReviewWait {
+		t.Fatalf("restored co-review work must not spend another primary request: %+v", got)
+	}
+}
+
+func TestEqualTimestampReviewDoesNotProveCompletionReply(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	at := t0.Add(2 * time.Second)
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: at, UpdatedAt: at}
+	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: at.Add(time.Second), UpdatedAt: at.Add(time.Second)}
+	obs := Observation{Head: r.Head, Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", ReviewID: 1000, Commit: "000011122", SubmittedAt: at}},
+		Events:  []dialect.BotEvent{command, completion}}
+
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("an equal-second review has ambiguous ordering and must not prove a re-review reply: %+v", got)
+	}
+	if !CommandHasCompletionReply(obs, policy, command.CommentID) {
+		t.Fatal("an equal-second review must not consume the command's later completion reply")
+	}
+
+	obs.Reviews[0].SubmittedAt = at.Add(-time.Second)
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("a review strictly before the command must prove its completion reply: %+v", got)
+	}
+
+	obs.Reviews[0].SubmittedAt = at.Add(time.Second)
+	completion.CreatedAt = at.Add(2 * time.Second)
+	completion.UpdatedAt = completion.CreatedAt
+	obs.Events[1] = completion
+	if got := Completion(r, obs, policy); got.Done {
+		t.Fatalf("a review after the command must not become prior evidence: %+v", got)
 	}
 }
 

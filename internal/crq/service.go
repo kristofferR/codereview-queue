@@ -565,13 +565,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
-	// Record which co-reviewers have answered, from the observation this pass
-	// already paid for. Done HERE and not only on the reviewing sweep: a round
-	// that never fires — because the account is blocked, or because the primary
-	// does not run here — is observed on this path and nowhere else, so a
-	// co-reviewer could review it every time and crq would never notice. That
-	// is exactly the case that made a working Codex read as "never answered".
-	s.noteCoAnswers(ctx, cfg, *next, obs.eng, now)
 	// Record a rate-limit notice before deciding, whichever round it answered.
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the
@@ -581,6 +574,30 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if updated != nil {
 		st = *updated
 	}
+	// Record which co-reviewers have answered, from the observation this pass
+	// already paid for. Done HERE and not only on the reviewing sweep: a round
+	// that never fires — because the account is blocked, or because the primary
+	// does not run here — is observed on this path and nowhere else, so a
+	// co-reviewer could review it every time and crq would never notice. That
+	// is exactly the case that made a working Codex read as "never answered".
+	// The account block above is more urgent: this round does not hold the fire
+	// slot, so another worker must see that window even if this write fails.
+	if _, err := s.noteCoAnswers(ctx, cfg, *next, obs.eng, now); err != nil {
+		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(next.Repo, next.PR), err)
+	}
+	// noteCoAnswers can add the first durable proof that a self-heal reviewer
+	// is active. Reload it before deciding: a dedupe chosen without that proof
+	// may now need to wait for this head.
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	current := fresh.Round(next.Repo, next.PR)
+	if !sameRound(current, *next) {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	st = fresh
+	next = current
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
 	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
@@ -650,6 +667,25 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
 		}
+		if _, err := s.noteCoAnswers(ctx, cfg, round, obs.eng, now); err != nil {
+			return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
+		}
+		// noteCoAnswers can add the first durable proof that a self-heal
+		// reviewer is active. Reload it before applying the verdict: a dedupe
+		// chosen without that proof may now need to wait for this head.
+		fresh, _, err := s.store.Load(ctx)
+		if err != nil {
+			return PumpResult{}, false, err
+		}
+		current := fresh.Round(round.Repo, round.PR)
+		if !sameRound(current, round) {
+			continue
+		}
+		round = *current
+		d = engine.DecideFire(s.global(fresh, now), round, obs.eng, now, cfg.policy())
+		if !quotaFreeVerdict(d.Verdict) {
+			continue
+		}
 		res, err := s.applyFire(ctx, cfg, round, obs.eng, d, now)
 		if err != nil {
 			return PumpResult{}, false, err
@@ -687,6 +723,22 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		return PumpResult{}, false, err
 	}
 	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, cfg.policy())
+	if !quotaFreeVerdict(d.Verdict) {
+		return PumpResult{}, false, nil
+	}
+	if _, err := s.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
+		return PumpResult{}, false, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(round.Repo, round.PR), err)
+	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	current := fresh.Round(round.Repo, round.PR)
+	if !sameRound(current, *round) {
+		return PumpResult{}, false, nil
+	}
+	round = current
+	d = engine.DecideFire(s.global(fresh, now), *round, obs.eng, now, cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
 	}
@@ -939,7 +991,20 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	// straight from fired to completed, and a completed round is never looked at
 	// again. The co-reviewer that answered it would be lost with it, leaving a
 	// working bot shown as silent for want of the one field that says otherwise.
-	s.noteCoAnswers(ctx, cfg, slot, obs.eng, now)
+	if _, err := s.noteCoAnswers(ctx, cfg, slot, obs.eng, now); err != nil {
+		return PumpResult{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(slot.Repo, slot.PR), err)
+	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	current := fresh.Round(slot.Repo, slot.PR)
+	if !sameRound(current, slot) || fresh.FireSlot == nil || fresh.FireSlot.Token != slot.Token ||
+		(current.Phase != PhaseFired && current.Phase != PhaseReviewing) {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	slot = *current
+	st = fresh
 	tr := engine.Progress(slot, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -1163,7 +1228,28 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
-	s.noteCoAnswers(ctx, cfg, *target, obs.eng, now)
+	// A reviewing round no longer holds the fire slot. Persist an account block
+	// before the less-critical activity bookkeeping so a transient activity write
+	// cannot let another worker fire inside the window we just observed.
+	if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
+		return st, err
+	} else if updated != nil {
+		st = *updated
+	}
+	if _, err := s.noteCoAnswers(ctx, cfg, *target, obs.eng, now); err != nil {
+		return st, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(target.Repo, target.PR), err)
+	}
+	fresh, _, err := s.store.Load(ctx)
+	if err != nil {
+		return st, err
+	}
+	current := fresh.Round(target.Repo, target.PR)
+	if !sameRound(current, *target) ||
+		(current.Phase != PhaseFired && current.Phase != PhaseReviewing) {
+		return fresh, nil
+	}
+	target = current
+	st = fresh
 	tr := engine.Progress(*target, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
@@ -1723,16 +1809,57 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	if s.cfg.DryRun {
 		return result, nil
 	}
-	// The anchor is the wait's evidence floor, so it must be when this HEAD
-	// appeared — not when crq happened to notice it. Defaulting to now was a
-	// repeatable 20-minute timeout on a primary-unavailable round: with no
-	// CodeRabbit review to anchor on and no trigger posted (the co-reviewer
-	// auto-reviews), the floor landed after the co-reviewer's existing answer
-	// for this head, so the wait could never be satisfied and the bot had no
-	// reason to speak again. The candidates below only narrow it further.
+	// The anchor is the wait's evidence floor. Prefer when this HEAD appeared;
+	// when no event proves that boundary, EnqueuedAt below is the conservative
+	// witness that crq had seen it. Defaulting to now was a repeatable 20-minute
+	// timeout on a primary-unavailable round: with no CodeRabbit review to anchor
+	// on and no trigger posted (the co-reviewer auto-reviews), the floor landed
+	// after the co-reviewer's existing answer for this head, so the wait could
+	// never be satisfied and the bot had no reason to speak again.
 	anchor := now
 	if !obs.HeadAt.IsZero() {
 		anchor = obs.HeadAt
+	}
+	// A carried reviewer can make a SHA-less clean summary from an earlier head
+	// gate this wait. If the PR was reset to an old commit, the commit date is
+	// older than that stale summary, so require a boundary tied to this head.
+	carried := false
+	var headBoundary time.Time
+	for _, cp := range cfg.policy().CoReviewerPolicies() {
+		co := round.Co(cp.Login)
+		if cp.Trigger != engine.TriggerNever && co.SeenActiveAt != nil && co.AnsweredAt == nil {
+			carried = true
+			break
+		}
+	}
+	if carried {
+		// A matching force-push is the exact head boundary. With no force-push,
+		// HeadAt is the evidence boundary when the observation already contains
+		// activity for this round: an auto-review can legitimately finish after an
+		// ordinary push but before crq enqueues the head. Otherwise EnqueuedAt keeps
+		// the self-heal grace tied to when crq saw an old commit. It is also the safe
+		// fallback when the timeline is unavailable or its newest force-push belongs
+		// to an intermediate head.
+		headBoundary = round.EnqueuedAt.UTC()
+		fp, err := s.latestHeadForcePush(ctx, round.Repo, round.PR)
+		switch {
+		case err != nil:
+		case dialect.SHAPrefixMatch(fp.head, round.Head):
+			headBoundary = fp.at
+		case !fp.at.IsZero():
+		default:
+			for _, cp := range cfg.policy().CoReviewerPolicies() {
+				co := round.Co(cp.Login)
+				if co.SeenActiveAt != nil && co.AnsweredAt == nil &&
+					obs.CoSeenFor(cp.Login).ActiveThisRound && !obs.HeadAt.IsZero() {
+					headBoundary = obs.HeadAt.UTC()
+					break
+				}
+			}
+		}
+		if headBoundary.After(anchor) {
+			anchor = headBoundary
+		}
 	}
 	// cfg.Bot, not this process's startup one: the primary is a fleet setting
 	// like any other, and reading the stale one made a review by the primary
@@ -1741,7 +1868,8 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	// and the round waited out its timeout for an answer it already had.
 	for _, rv := range obs.Reviews {
 		if isConfiguredBotLogin(cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
-			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {
+			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) &&
+			(headBoundary.IsZero() || !rv.SubmittedAt.Before(headBoundary)) {
 			anchor = rv.SubmittedAt
 		}
 	}
@@ -1758,6 +1886,9 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 			continue
 		}
 		at := commandCreatedAt(cmds, id, now)
+		if !headBoundary.IsZero() && at.Before(headBoundary) {
+			continue
+		}
 		adopts = append(adopts, adoptCmd{login: cp.Login, id: id, at: at})
 		// The anchor is the round's evidence FLOOR, so it takes the earliest
 		// candidate. Overwriting it per co-reviewer both discarded the primary
@@ -2063,12 +2194,21 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		return
 	}
 	firedAt := round.FiredAt.UTC()
+	// A quota-free co-review wait uses FiredAt as its evidence floor, which may
+	// be the timestamp of an old commit reached by a reset or force-push. Grace
+	// and live-command detection instead start when crq first saw this head.
+	// Ordinary fired rounds already have FiredAt at or after EnqueuedAt, so this
+	// changes only the parked case.
+	selfHealAt := firedAt
+	if round.EnqueuedAt.After(selfHealAt) {
+		selfHealAt = round.EnqueuedAt.UTC()
+	}
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
-		commandPresent := engine.CoCommandSince(obs, cp.Login, firedAt)
-		if !engine.DecideCoPost(round, obs, cp, commandPresent, firedAt, now) {
+		commandPresent := engine.CoCommandSince(obs, cp.Login, selfHealAt)
+		if !engine.DecideCoPost(round, obs, cp, commandPresent, selfHealAt, now) {
 			continue
 		}
 		// Claim the post under CAS BEFORE the network call: this sweep path is
@@ -2805,44 +2945,103 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 // thing left to read it from was the phase — and a required set that omits the
 // primary completes on its co-reviewers' answers while the primary has done
 // nothing but acknowledge the command.
-func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
+func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) (*State, error) {
 	if s.cfg.DryRun {
-		return // DryRun writes nothing, bookkeeping included
+		return nil, nil // DryRun writes nothing, bookkeeping included
 	}
-	var answered []string
+	var active []string
+	answered := map[string]bool{}
 	for _, cb := range cfg.CoBots {
 		// Setup status is not head-scoped: activity on an earlier head still
 		// proves that the reviewer is installed and working.
 		if engine.CoReviewerActive(obs, cb.Login) {
-			answered = append(answered, cb.Login)
+			active = append(active, cb.Login)
+			answered[dialect.NormalizeBotName(cb.Login)] = engine.CoReviewedRound(round, obs, cb.Login)
 		}
 	}
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
-	if len(answered) == 0 && !primary {
-		return
+	if len(active) == 0 && !primary {
+		return nil, nil
 	}
-	if _, err := s.store.Update(ctx, func(st *State) error {
+	updated, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || !sameRound(r, round) {
-			return ErrNoChange
+		if r == nil {
+			for i := len(st.Archive) - 1; i >= 0; i-- {
+				archived := &st.Archive[i]
+				if !sameRound(archived, round) {
+					continue
+				}
+				before := archived.CoBots
+				for _, login := range active {
+					archived.NoteCoActivity(login, now)
+				}
+				if sameCoActivity(before, archived.CoBots) {
+					return ErrNoChange
+				}
+				st.RememberCoActivity(*archived)
+				return nil
+			}
+			// A busy concurrent batch can evict the source round from the
+			// bounded archive before this callback runs. Preserve the activity
+			// directly in the per-PR index so a later round can still carry it.
+			before := round.CoBots
+			for _, login := range active {
+				round.NoteCoActivity(login, now)
+			}
+			if sameCoActivity(before, round.CoBots) {
+				return ErrNoChange
+			}
+			st.RememberCoActivity(round)
+			return nil
+		}
+		if !sameRound(r, round) {
+			// The evidence belongs to the old head, so it cannot answer the
+			// replacement round. It still proves this reviewer is active —
+			// essential for a silent check-only reviewer to be eligible for
+			// self-heal on the new head.
+			before := r.CoBots
+			for _, login := range active {
+				r.NoteCoActivity(login, now)
+			}
+			if sameCoActivity(before, r.CoBots) {
+				return ErrNoChange
+			}
+			if r.Phase == PhaseCompleted {
+				if err := r.ReopenForRestoredActivity(); err != nil {
+					return err
+				}
+			}
+			st.PutRound(*r)
+			return nil
 		}
 		before, beforePrimary := r.CoBots, r.PrimaryAnsweredAt
-		for _, login := range answered {
-			r.NoteCoAnswer(login, now)
+		for _, login := range active {
+			switch {
+			case answered[dialect.NormalizeBotName(login)]:
+				r.NoteCoAnswer(login, now)
+			case engine.CoParticipatedRound(*r, obs, login):
+				r.NoteCoParticipation(login, now)
+			default:
+				r.NoteCoActivity(login, now)
+			}
 		}
 		if primary {
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
-		if sameCoAnswers(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
+		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
 			return ErrNoChange
 		}
 		st.PutRound(*r)
 		return nil
-	}); err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
-		// Display-only bookkeeping: worth a line, never worth failing a round.
-		s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		if s.log != nil {
+			s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+		}
+		return nil, err
 	}
+	return &updated, nil
 }
 
 func sameCoAnswers(before, after map[string]CoBotRound) bool {
@@ -2853,6 +3052,26 @@ func sameCoAnswers(before, after map[string]CoBotRound) bool {
 		case a.AnsweredAt == nil || b.AnsweredAt == nil:
 			return false
 		case !a.AnsweredAt.Equal(*b.AnsweredAt):
+			return false
+		}
+	}
+	return true
+}
+
+func sameCoActivity(before, after map[string]CoBotRound) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for login, a := range after {
+		b := before[login]
+		if a.ActivityCarried != b.ActivityCarried {
+			return false
+		}
+		switch {
+		case a.SeenActiveAt == nil && b.SeenActiveAt == nil:
+		case a.SeenActiveAt == nil || b.SeenActiveAt == nil:
+			return false
+		case !a.SeenActiveAt.Equal(*b.SeenActiveAt):
 			return false
 		}
 	}

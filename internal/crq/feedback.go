@@ -118,6 +118,11 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	if err != nil {
 		return FeedbackReport{}, err
 	}
+	pull := obs.pull
+	head := ""
+	if len(pull.Head.SHA) >= 9 {
+		head = pull.Head.SHA[:9]
+	}
 	// A rate-limit notice is evidence about the ACCOUNT, and this is the only
 	// place that looks at a PR the queue is not about to fire. Pump records the
 	// notice on the round it selects; a notice sitting on a PR that was
@@ -131,11 +136,27 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		} else if updated != nil {
 			st = *updated
 		}
-	}
-	pull := obs.pull
-	head := ""
-	if len(pull.Head.SHA) >= 9 {
-		head = pull.Head.SHA[:9]
+		// Feedback can be the only path that observes a co-reviewer's response
+		// before the loop creates or completes the round. Persist the same durable
+		// activity proof Pump records so a subsequent head can self-heal a missed
+		// automatic review. A preview supplies the identity needed to write the
+		// per-PR activity index without publishing a fire-eligible round.
+		observedRound := round
+		if observedRound == nil {
+			preview := st.PreviewRound(repo, pr, head, now)
+			observedRound = &preview
+		}
+		updated, err := s.noteCoAnswers(ctx, cfg, *observedRound, obs.eng, now)
+		if err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording reviewer answers for %s: %w", QueueKey(repo, pr), err)
+		}
+		if updated != nil {
+			// noteCoAnswers can add the first durable proof that a self-heal
+			// reviewer is active. Use the post-update state for completion so the
+			// same observation cannot converge past the reviewer it just restored.
+			st = *updated
+			round = st.Round(repo, pr)
+		}
 	}
 	report := FeedbackReport{
 		Status:     "feedback",
@@ -152,10 +173,12 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	}
 
 	// The completion anchor is the current round only when it still tracks this
-	// head. A stale or missing round yields a headless anchor (FiredAt nil), so
-	// only head-matching reviews and SHA-bound Codex summaries can count — the
-	// engine's rule set reproduces v2's "no wait context" behavior.
-	completionRound := Round{Repo: repo, PR: pr, Head: head}
+	// head. Before enqueue, preview the replacement round so durable activity
+	// from a silent co-reviewer still gates the first decision for this head.
+	// Otherwise Next can decide "done", enqueue a round that restores that
+	// activity, park it awaiting the co-reviewer, and still return the stale
+	// pre-enqueue verdict.
+	completionRound := st.PreviewRound(repo, pr, head, now)
 	if round != nil && round.Head == head {
 		completionRound = *round
 	}

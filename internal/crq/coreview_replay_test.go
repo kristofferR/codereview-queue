@@ -68,6 +68,25 @@ func requireBugbot(cfg *Config) {
 	}
 }
 
+func onlyBugbot(cfg *Config) {
+	for i := range cfg.CoBots {
+		if cfg.CoBots[i].Login == bugbotLogin {
+			cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+			break
+		}
+	}
+	cfg.FeedbackBots = cfg.RequiredBots
+}
+
+func seedCarriedBugbotEvidence(f *replayFixture, repo string, pr int, base time.Time) {
+	f.t.Helper()
+	f.humanComment(repo, pr, 700, "bugbot run", base.Add(-31*time.Minute))
+	oldReview := ghapi.Review{ID: 701, CommitID: "1111111111111111", State: "COMMENTED",
+		SubmittedAt: base.Add(-30 * time.Minute), Body: "[review body]"}
+	oldReview.User.Login = bugbotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], oldReview)
+}
+
 // macroscopeSettled appends Macroscope's settled marker to a finding body,
 // taking the wording from the golden corpus rather than a literal — this
 // file's invariant is that a reword which breaks the classifier breaks the
@@ -215,6 +234,933 @@ func TestCoReplayBugbotSilentCleanConvergesOnCheckRun(t *testing.T) {
 	}
 	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 0 {
 		t.Fatalf("no trigger may ever post for an auto-reviewing clean round, got %d", got)
+	}
+}
+
+func TestFeedbackPersistsCoReviewerActivity(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 40, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the CodeRabbit fire, got %+v", res)
+	}
+
+	f.clk.advance(time.Minute)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = f.clk.now()
+	f.gh.setCheckRuns(sha, clean)
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Co(bugbotLogin).SeenActiveAt == nil || r.Co(bugbotLogin).AnsweredAt == nil {
+		t.Fatalf("Feedback did not persist observed Bugbot activity: %+v", r)
+	}
+}
+
+func TestFeedbackPersistsCoReviewerActivityBeforeRoundExists(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	repo, pr, sha := "o/r", 54, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.botReview(repo, pr, 703, sha, base)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+
+	f.wantAction(f.next(repo, pr), engine.ActionPush)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := st.Round(repo, pr); r != nil {
+		t.Fatalf("Feedback must not enqueue its activity preview: %+v", r)
+	}
+	if seen := st.CoActivity[QueueKey(repo, pr)][dialect.NormalizeBotName(bugbotLogin)]; !seen.Equal(base) {
+		t.Fatalf("pre-round reviewer activity = %v, want %v", seen, base)
+	}
+}
+
+func TestNoteCoAnswersKeepsCurrentParticipationOnCurrentHead(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		obs         engine.Observation
+		seedCarried bool
+	}{
+		{name: "running check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckInProgress}}}},
+		{name: "failed check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckFailed}}}},
+		{name: "auxiliary check", obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckAuxiliary}}}},
+		{name: "verdict", obs: engine.Observation{Events: []dialect.BotEvent{{Kind: dialect.EvCoVerdict, Bot: bugbotLogin, CreatedAt: base}}}},
+		{name: "head check replaces carried activity", seedCarried: true,
+			obs: engine.Observation{Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckInProgress}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, onlyBugbot)
+			repo, pr, head := "o/r", 55, "abcdef123"
+			seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base, 0)
+			if tc.seedCarried {
+				if _, err := f.store.Update(f.ctx, func(st *State) error {
+					r := st.Round(repo, pr)
+					r.NoteCoActivity(bugbotLogin, base.Add(-time.Hour))
+					st.PutRound(*r)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tc.obs.Head = head
+			tc.obs.Co = map[string]engine.CoSeen{
+				dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true},
+			}
+
+			if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), tc.obs, base); err != nil {
+				t.Fatal(err)
+			}
+			co := f.round(repo, pr).Co(bugbotLogin)
+			if co.SeenActiveAt == nil || co.ActivityCarried || co.AnsweredAt != nil {
+				t.Fatalf("current participation was not preserved with current-head provenance: %+v", co)
+			}
+		})
+	}
+}
+
+func TestFeedbackDoesNotBindCurrentHeadCheckToStaleRound(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	repo, pr := "o/r", 56
+	oldHead, newHead := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, oldHead)
+	f.setCommitDate(oldHead, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+
+	f.setHead(repo, pr, newHead)
+	f.setCommitDate(newHead, base)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(newHead, clean)
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	round := f.round(repo, pr)
+	if round == nil || round.Head != oldHead[:9] {
+		t.Fatalf("Feedback unexpectedly replaced the stale state round: %+v", round)
+	}
+	co := round.Co(bugbotLogin)
+	if co.SeenActiveAt == nil || !co.ActivityCarried || co.AnsweredAt != nil {
+		t.Fatalf("new-head check must be activity, not an answer for the stale round: %+v", co)
+	}
+}
+
+func TestFeedbackRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, sha := "o/r", 53, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedCarriedBugbotEvidence(f, repo, pr, base)
+	f.botReview(repo, pr, 702, sha, base)
+	f.enqueue(repo, pr)
+
+	report, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged || report.ReviewedBy[bugbotLogin] {
+		t.Fatalf("Feedback skipped the carried reviewer wait: %+v", report)
+	}
+	round := f.round(repo, pr)
+	if round == nil || round.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("Feedback did not persist the carried reviewer activity: %+v", round)
+	}
+}
+
+func TestNoteCoAnswersCarriesActivityThroughConcurrentSupersede(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, oldHead, newHead := "o/r", 45, "abcdef1234567890", "fedcba9876543210"
+	f.openPull(repo, pr, oldHead)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &supersedeBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		head:       newHead[:9],
+		now:        base.Add(time.Minute),
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	carried := f.round(repo, pr)
+	if carried == nil || carried.Head != newHead[:9] {
+		t.Fatalf("round was not superseded: %+v", carried)
+	}
+	co := carried.Co(bugbotLogin)
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("superseding round lost observed reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("old-head evidence must not answer the replacement round: %+v", co)
+	}
+}
+
+func TestNoteCoAnswersReopensCompletedConcurrentSupersede(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, oldHead, newHead := "o/r", 51, "abcdef1234567890", "fedcba9876543210"
+	f.openPull(repo, pr, oldHead)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &supersedeBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		head:       newHead[:9],
+		now:        base.Add(time.Minute),
+		complete:   true,
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := f.round(repo, pr)
+	if reopened == nil || reopened.Head != newHead[:9] || reopened.Phase != PhaseQueued {
+		t.Fatalf("completed replacement was not reopened for carried activity: %+v", reopened)
+	}
+	if co := reopened.Co(bugbotLogin); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("reopened replacement lost observed reviewer activity: %+v", co)
+	}
+}
+
+func TestNoteCoAnswersPersistsArchivedActivityBeyondEviction(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, head := "o/r", 46, "abcdef1234567890"
+	f.openPull(repo, pr, head)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.EndRound(repo, pr, "pr closed")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		for otherPR := 100; otherPR < 100+ArchiveMax; otherPR++ {
+			other, err := st.NewRound("o/other", otherPR, "123456789", base)
+			if err != nil {
+				return err
+			}
+			st.PutRound(*other)
+			st.EndRound("o/other", otherPR, "pr closed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activity := st.CoActivity[QueueKey(repo, pr)]["cursor"]; !activity.Equal(base.Add(time.Minute)) {
+		t.Fatalf("archived reviewer activity was not indexed: %v", activity)
+	}
+	reopened, err := st.NewRound(repo, pr, "fedcba9876543210", base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if co := reopened.Co(bugbotLogin); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("reopened round lost evicted archived activity: %+v", co)
+	}
+}
+
+func TestNoteCoAnswersPersistsActivityAfterConcurrentArchiveEviction(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, head := "o/r", 47, "abcdef1234567890"
+	f.openPull(repo, pr, head)
+	f.enqueue(repo, pr)
+	round := *f.round(repo, pr)
+
+	f.svc.store = &evictBeforeUpdateStore{
+		StateStore: f.store,
+		repo:       repo,
+		pr:         pr,
+		now:        base.Add(time.Minute),
+	}
+	obs := engine.Observation{Head: round.Head, Open: true,
+		Checks: []engine.CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckDoneClean}}}
+	if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, round, obs, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activity := st.CoActivity[QueueKey(repo, pr)]["cursor"]; !activity.Equal(base.Add(time.Minute)) {
+		t.Fatalf("evicted reviewer activity was not indexed: %v", activity)
+	}
+	reopened, err := st.NewRound(repo, pr, "fedcba9876543210", base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if co := reopened.Co(bugbotLogin); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("reopened round lost concurrently evicted activity: %+v", co)
+	}
+}
+
+func TestFeedbackReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 41, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the CodeRabbit fire, got %+v", res)
+	}
+
+	f.clk.advance(time.Minute)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = f.clk.now()
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); !errors.Is(err, writeErr) {
+		t.Fatalf("Feedback error = %v, want the reviewer-activity persistence failure", err)
+	}
+}
+
+func TestPumpReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 42, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	if _, err := f.svc.Pump(f.ctx); !errors.Is(err, writeErr) {
+		t.Fatalf("Pump error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestPumpRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, onlyBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, sha := "o/r", 52, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedCarriedBugbotEvidence(f, repo, pr, base)
+	f.botReview(repo, pr, 702, sha, base)
+	f.enqueue(repo, pr)
+
+	res := f.pump()
+	if res.Action != "waiting" {
+		t.Fatalf("Pump did not recompute the carried reviewer wait: %+v", res)
+	}
+	round := f.round(repo, pr)
+	if round == nil || round.Phase != PhaseReviewing || round.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("stale dedupe skipped the carried reviewer wait: %+v", round)
+	}
+}
+
+func TestDaemonProgressRecomputesAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		phase Phase
+		run   func(*replayFixture, string, int) error
+	}{
+		{
+			name:  "slot round",
+			phase: PhaseFired,
+			run: func(f *replayFixture, repo string, pr int) error {
+				_, err := f.svc.progressSlotRound(f.ctx, *f.round(repo, pr))
+				return err
+			},
+		},
+		{
+			name:  "reviewing sweep",
+			phase: PhaseReviewing,
+			run: func(f *replayFixture, _ string, _ int) error {
+				st, _, err := f.store.Load(f.ctx)
+				if err != nil {
+					return err
+				}
+				_, err = f.svc.sweepReviewing(f.ctx, st, f.clk.now())
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, onlyBugbot)
+			repo, pr, sha := "o/r", 54, "abcdef1234567890"
+			f.openPull(repo, pr, sha)
+			f.setCommitDate(sha, base.Add(-time.Hour))
+			seedCarriedBugbotEvidence(f, repo, pr, base)
+			f.botReview(repo, pr, 702, sha, base)
+			seedRound(t, f.store, f.cfg, repo, pr, sha[:9], tc.phase, base.Add(-time.Minute), 400)
+
+			if err := tc.run(f, repo, pr); err != nil {
+				t.Fatal(err)
+			}
+			round := f.round(repo, pr)
+			if round == nil || round.Phase != PhaseReviewing || round.Co(bugbotLogin).SeenActiveAt == nil {
+				t.Fatalf("stale completion skipped the carried reviewer wait: %+v", round)
+			}
+		})
+	}
+}
+
+func TestProgressSlotRoundReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 43, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the CodeRabbit fire, got %+v", res)
+	}
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	if _, err := f.svc.progressSlotRound(f.ctx, *f.round(repo, pr)); !errors.Is(err, writeErr) {
+		t.Fatalf("progressSlotRound error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseFired {
+		t.Fatalf("progressSlotRound advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestSweepReviewingReturnsCoReviewerActivityPersistenceFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 44, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedRound(t, f.store, f.cfg, repo, pr, sha[:9], PhaseReviewing, base.Add(-time.Minute), 400)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	writeErr := errors.New("transient state write failure")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.svc.sweepReviewing(f.ctx, st, base); !errors.Is(err, writeErr) {
+		t.Fatalf("sweepReviewing error = %v, want the reviewer-activity persistence failure", err)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
+		t.Fatalf("sweepReviewing advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestSweepReviewingRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 45, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedRound(t, f.store, f.cfg, repo, pr, sha[:9], PhaseReviewing, base.Add(-time.Minute), 400)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	f.botComment(repo, pr, 901, replayFairUsage(t, 40), base)
+	writeErr := errors.New("transient state write failure")
+	// The account-block write succeeds; the following activity write fails.
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 2, err: writeErr}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.svc.sweepReviewing(f.ctx, st, base); !errors.Is(err, writeErr) {
+		t.Fatalf("sweepReviewing error = %v, want the reviewer-activity persistence failure", err)
+	}
+	st, _, err = f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute)) {
+		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute))
+	}
+	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseReviewing {
+		t.Fatalf("sweepReviewing advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestPumpRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, sha := "o/r", 47, "abcdef1234567890"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = base
+	f.gh.setCheckRuns(sha, clean)
+	f.botComment(repo, pr, 901, replayFairUsage(t, 40), base)
+	writeErr := errors.New("transient state write failure")
+	// The account-block write succeeds; the following activity write fails.
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 2, err: writeErr}
+
+	if _, err := f.svc.Pump(f.ctx); !errors.Is(err, writeErr) {
+		t.Fatalf("Pump error = %v, want the reviewer-activity persistence failure", err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute)) {
+		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute))
+	}
+	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
+	}
+}
+
+func TestQuotaFreePathsPersistActivityBeforeCompletion(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		run  func(*replayFixture, string, int) (bool, error)
+	}{
+		{
+			name: "sweep",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				st, _, err := f.store.Load(f.ctx)
+				if err != nil {
+					return false, err
+				}
+				_, handled, err := f.svc.sweepQuotaFree(f.ctx, st, f.clk.now(), "", 0)
+				return handled, err
+			},
+		},
+		{
+			name: "advance",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				_, handled, err := f.svc.advanceQuotaFree(f.ctx, repo, pr)
+				return handled, err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, func(cfg *Config) {
+				requireBugbot(cfg)
+				for i := range cfg.CoBots {
+					if cfg.CoBots[i].Name == "bugbot" {
+						cfg.CoBots = []CoBotConfig{cfg.CoBots[i]}
+						break
+					}
+				}
+				cfg.FeedbackBots = cfg.RequiredBots
+			})
+			repo, pr, sha := "o/private", 48, "abcdef1234567890"
+			f.openPull(repo, pr, sha)
+			f.setCommitDate(sha, base.Add(-time.Hour))
+			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base.Add(-30*time.Minute))
+			clean := corpusCheckRun(t, "bugbot/check-clean.json")
+			clean.CompletedAt = base
+			f.gh.setCheckRuns(sha, clean)
+			f.enqueue(repo, pr)
+
+			handled, err := tc.run(f, repo, pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handled {
+				t.Fatal("quota-free path did not handle the completed round")
+			}
+			r := f.round(repo, pr)
+			if r == nil || r.Phase != PhaseCompleted || r.Co(bugbotLogin).SeenActiveAt == nil {
+				t.Fatalf("quota-free completion lost reviewer activity: %+v", r)
+			}
+		})
+	}
+}
+
+func TestQuotaFreePathsRecomputeAfterPersistingActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		run  func(*replayFixture, string, int) (bool, error)
+	}{
+		{
+			name: "sweep",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				st, _, err := f.store.Load(f.ctx)
+				if err != nil {
+					return false, err
+				}
+				_, handled, err := f.svc.sweepQuotaFree(f.ctx, st, f.clk.now(), "", 0)
+				return handled, err
+			},
+		},
+		{
+			name: "advance",
+			run: func(f *replayFixture, repo string, pr int) (bool, error) {
+				_, handled, err := f.svc.advanceQuotaFree(f.ctx, repo, pr)
+				return handled, err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, onlyBugbot)
+			f.gh.graphQL = noForcePush
+			repo, pr, sha := "o/private", 50, "abcdef1234567890"
+			f.openPull(repo, pr, sha)
+			f.setCommitDate(sha, base)
+			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base.Add(-5*time.Minute))
+			seedCarriedBugbotEvidence(f, repo, pr, base)
+			f.enqueue(repo, pr)
+
+			handled, err := tc.run(f, repo, pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handled {
+				t.Fatal("quota-free path did not handle the carried reviewer wait")
+			}
+			r := f.round(repo, pr)
+			if r == nil || r.Phase != PhaseReviewing || r.Co(bugbotLogin).SeenActiveAt == nil {
+				t.Fatalf("stale dedupe skipped the carried reviewer wait: %+v", r)
+			}
+		})
+	}
+}
+
+func TestParkedCoReviewWaitPreservesSelfHealGraceForOldCommit(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, head := "o/r", 46, "abcdef123"
+	seenAt := base.Add(-time.Hour)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base.Add(-time.Minute), 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, seenAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	round := *f.round(repo, pr)
+	obs := engine.Observation{
+		Open:   true,
+		Head:   head,
+		HeadAt: base.AddDate(0, -1, 0),
+		Reviews: []engine.ReviewSeen{
+			{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base},
+			{Bot: bugbotLogin, Commit: "111111111", SubmittedAt: base.Add(-30 * time.Minute)},
+		},
+		Events: []dialect.BotEvent{{
+			Kind: dialect.EvCoCommand, For: bugbotLogin, CommentID: 700,
+			CreatedAt: base.Add(-time.Hour),
+		}},
+	}
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, round, obs, "awaiting co-review", base); err != nil {
+		t.Fatal(err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(round.EnqueuedAt) {
+		t.Fatalf("co-review wait did not use the safe head boundary: %+v", parked)
+	}
+
+	f.svc.selfHealCoReviewers(f.ctx, f.cfg, *parked, obs, base)
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 0 {
+		t.Fatalf("self-heal fired before grace from enqueue elapsed, got %d posts", got)
+	}
+	f.svc.selfHealCoReviewers(f.ctx, f.cfg, *f.round(repo, pr), obs, base.Add(11*time.Minute))
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 1 {
+		t.Fatalf("self-heal did not fire after grace from enqueue elapsed, got %d posts", got)
+	}
+}
+
+func TestCarriedCoReviewWaitFallsBackWhenForcePushLookupFails(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr, head := "o/r", 50, "abcdef123"
+	seenAt := base.Add(-time.Hour)
+	enqueuedAt := base.Add(-time.Minute)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, enqueuedAt, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, seenAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The fake's default GraphQL handler fails, as a transient outage or
+	// throttle would. EnqueuedAt still safely identifies the current head.
+	obs := engine.Observation{
+		Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-30 * time.Second)}},
+	}
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+		t.Fatalf("force-push lookup failure must fall back to EnqueuedAt: %v", err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(enqueuedAt) {
+		t.Fatalf("co-review wait did not use EnqueuedAt fallback: %+v", parked)
+	}
+}
+
+func TestCarriedCoReviewWaitAcceptsPreEnqueueSummaryAfterOrdinaryPush(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, head := "o/r", 51, "abcdef123"
+	seenAt := base.Add(-time.Hour)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, base, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, seenAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	summaryAt := base.Add(-time.Minute)
+	obs := engine.Observation{
+		Open: true, Head: head, HeadAt: base.Add(-2 * time.Minute),
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-90 * time.Second)}},
+		Events:  []dialect.BotEvent{{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: summaryAt}},
+		Co: map[string]engine.CoSeen{
+			dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true},
+		},
+	}
+
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+		t.Fatal(err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(obs.HeadAt) {
+		t.Fatalf("ordinary-push wait discarded the pre-enqueue head boundary: %+v", parked)
+	}
+	if got := engine.Completion(*parked, obs, f.cfg.policy()); !got.ReviewedBy[bugbotLogin] {
+		t.Fatalf("pre-enqueue current-head summary did not satisfy the wait: %+v", got)
+	}
+}
+
+func TestCarriedCoReviewWaitKeepsEnqueueBoundaryWithoutHeadTime(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	f.gh.graphQL = noForcePush
+	repo, pr, head := "o/r", 52, "abcdef123"
+	enqueuedAt := base.Add(-2 * time.Minute)
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, enqueuedAt, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, base.Add(-time.Hour))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	primaryAt := base.Add(-90 * time.Second)
+	summaryAt := base.Add(-time.Minute)
+	obs := engine.Observation{
+		Open: true, Head: head,
+		Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: primaryAt}},
+		Events:  []dialect.BotEvent{{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: summaryAt}},
+		Co: map[string]engine.CoSeen{
+			dialect.NormalizeBotName(bugbotLogin): {
+				Commands:        []engine.CommandSeen{{ID: 700, CreatedAt: base.Add(-time.Hour)}},
+				ActiveThisRound: true,
+			},
+		},
+	}
+
+	if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+		t.Fatal(err)
+	}
+	parked := f.round(repo, pr)
+	if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(primaryAt) {
+		t.Fatalf("zero head time discarded the enqueue boundary: %+v", parked)
+	}
+	if co := parked.Co(bugbotLogin); co.CommandID != 0 {
+		t.Fatalf("zero head time adopted a command before enqueue: %+v", co)
+	}
+	if got := engine.Completion(*parked, obs, f.cfg.policy()); !got.ReviewedBy[bugbotLogin] {
+		t.Fatalf("current-head summary did not satisfy the preserved wait: %+v", got)
+	}
+}
+
+func TestCarriedCoReviewWaitRejectsOldSHALessSummaryAfterReset(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		forcePushHead string
+		forcePushAt   time.Time
+		oldSummaryAt  time.Time
+		enqueuedAt    time.Time
+		wantBoundary  time.Time
+	}{
+		{
+			name: "force-push installed current head", forcePushHead: "abcdef123",
+			forcePushAt: base.Add(-time.Minute), oldSummaryAt: base.Add(-30 * time.Minute),
+			enqueuedAt: base, wantBoundary: base.Add(-time.Minute),
+		},
+		{
+			name: "fast-forward followed force-push to intermediate head", forcePushHead: "111111111",
+			forcePushAt: base.Add(-10 * time.Minute), oldSummaryAt: base.Add(-5 * time.Minute),
+			enqueuedAt: base.Add(-time.Minute), wantBoundary: base.Add(-time.Minute),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCoReplayFixture(t, base, nil)
+			repo, pr, head := "o/r", 49, "abcdef123"
+			seenAt := base.Add(-time.Hour)
+			seedRound(t, f.store, f.cfg, repo, pr, head, PhaseQueued, tc.enqueuedAt, 0)
+			if _, err := f.store.Update(f.ctx, func(st *State) error {
+				r := st.Round(repo, pr)
+				r.NoteCoActivity(bugbotLogin, seenAt)
+				st.PutRound(*r)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			f.gh.graphQL = func(_ string, _ map[string]any, out any) error {
+				payload := `{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"createdAt":"` + tc.forcePushAt.Format(time.RFC3339) + `","afterCommit":{"oid":"` + tc.forcePushHead + `"}}]}}}}`
+				return json.Unmarshal([]byte(payload), out)
+			}
+			oldSummary := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin, CreatedAt: tc.oldSummaryAt}
+			oldCommand := engine.CommandSeen{ID: 700, CreatedAt: tc.oldSummaryAt.Add(-time.Minute)}
+			// The queued round's zero cutoff makes the stale SHA-less summary
+			// appear active in the real observation path.
+			obs := engine.Observation{
+				Open: true, Head: head, HeadAt: base.AddDate(0, -1, 0),
+				Reviews: []engine.ReviewSeen{{Bot: f.cfg.Bot, Commit: head, SubmittedAt: base.Add(-2 * time.Minute)}},
+				Events:  []dialect.BotEvent{oldSummary},
+				Co: map[string]engine.CoSeen{
+					dialect.NormalizeBotName(bugbotLogin): {
+						Commands:        []engine.CommandSeen{oldCommand},
+						ActiveThisRound: true,
+					},
+				},
+			}
+
+			// Pump records activity before it parks the wait. The stale summary
+			// must retain its historical provenance rather than claim that the
+			// reviewer answered this unanchored round.
+			if _, err := f.svc.noteCoAnswers(f.ctx, f.cfg, *f.round(repo, pr), obs, base); err != nil {
+				t.Fatal(err)
+			}
+			if co := f.round(repo, pr).Co(bugbotLogin); co.AnsweredAt != nil || !co.ActivityCarried {
+				t.Fatalf("historical activity lost its carried provenance: %+v", co)
+			}
+			if _, err := f.svc.fireCoReviewWait(f.ctx, f.cfg, *f.round(repo, pr), obs, "awaiting co-review", base); err != nil {
+				t.Fatal(err)
+			}
+			parked := f.round(repo, pr)
+			if parked == nil || parked.FiredAt == nil || !parked.FiredAt.Equal(tc.wantBoundary) {
+				t.Fatalf("co-review wait used the wrong head boundary: %+v", parked)
+			}
+			if co := parked.Co(bugbotLogin); co.CommandID != 0 {
+				t.Fatalf("co-review wait adopted a command before the head boundary: %+v", co)
+			}
+			if got := engine.Completion(*parked, obs, f.cfg.policy()); got.ReviewedBy[bugbotLogin] {
+				t.Fatalf("old SHA-less summary satisfied the reset head: %+v", got)
+			}
+			obs.Events = append(obs.Events, dialect.BotEvent{Kind: dialect.EvCoClean, Bot: bugbotLogin,
+				CreatedAt: base.Add(time.Minute)})
+			if got := engine.Completion(*parked, obs, f.cfg.policy()); !got.ReviewedBy[bugbotLogin] {
+				t.Fatalf("new SHA-less summary did not satisfy the reset head: %+v", got)
+			}
+		})
+	}
+}
+
+// A silent clean Bugbot round leaves no timeline evidence, and observe fetches
+// checks only for the current head. The durable activity proof carried by
+// Supersede is therefore the only signal self-heal can use when Bugbot misses
+// the next head.
+func TestCoReplaySelfHealRemembersSilentCleanPreviousHead(t *testing.T) {
+	base := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, requireBugbot)
+	repo, pr := "o/r", 39
+	first, second := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, first)
+	f.setCommitDate(first, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the first CodeRabbit fire, got %+v", res)
+	}
+	f.clk.advance(2 * time.Minute)
+	f.botReview(repo, pr, 500, first, f.clk.now())
+	clean := corpusCheckRun(t, "bugbot/check-clean.json")
+	clean.CompletedAt = f.clk.now()
+	f.gh.setCheckRuns(first, clean)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted || r.Co(bugbotLogin).SeenActiveAt == nil {
+		t.Fatalf("silent clean round did not persist Bugbot activity: %+v", r)
+	}
+
+	// The next head has no Bugbot review, comment, or check run at all.
+	f.openPull(repo, pr, second)
+	f.setCommitDate(second, f.clk.now())
+	f.enqueue(repo, pr)
+	carried := f.round(repo, pr)
+	if carried == nil || carried.Co(bugbotLogin).SeenActiveAt == nil || carried.Co(bugbotLogin).AnsweredAt != nil {
+		t.Fatalf("new head did not carry only the durable activity proof: %+v", carried)
+	}
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected the second CodeRabbit fire, got %+v", res)
+	}
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 0 {
+		t.Fatalf("self-heal fired before its grace period, got %d posts", got)
+	}
+
+	f.clk.advance(11 * time.Minute)
+	f.pump()
+	if got := f.coPostedBody(repo, pr, "bugbot run"); got != 1 {
+		t.Fatalf("silent-clean activity did not recover the missed next head, got %d posts", got)
 	}
 }
 

@@ -60,6 +60,69 @@ func (p Policy) CoReviewerPolicies() []CoReviewerPolicy { return p.coReviewers()
 // feedback layer surfaces it as per-bot status.
 func CoReviewedHead(obs Observation, login string) bool { return coReviewedHead(obs, login) }
 
+// CoReviewedRound reports completed review evidence that binds to this round.
+// In addition to explicit head evidence, it accepts legacy SHA-less reviews and
+// clean summaries after the round's evidence floor. Participation alone — a
+// running/failed/auxiliary check or informational verdict — never satisfies it.
+func CoReviewedRound(r state.Round, obs Observation, login string) bool {
+	cutoff := coCutoff(r, login)
+	observedHead := r.Head != "" && obs.Head != "" && dialect.SHAPrefixMatch(r.Head, obs.Head)
+	for _, review := range obs.Reviews {
+		if !sameBot(review.Bot, login) {
+			continue
+		}
+		if r.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, r.Head) {
+			return true
+		}
+		if observedHead && review.Commit == "" && !review.SubmittedAt.IsZero() &&
+			notBefore(review.SubmittedAt, cutoff) {
+			return true
+		}
+	}
+	for _, ev := range obs.Events {
+		if ev.Kind != dialect.EvCoClean || !eventConcerns(ev, login) {
+			continue
+		}
+		if ev.SHA != "" {
+			if r.Head != "" && dialect.SHAPrefixMatch(ev.SHA, r.Head) {
+				return true
+			}
+			continue
+		}
+		if observedHead && (r.FiredAt != nil || roundCoCommandedAt(r, login) != nil) &&
+			notBefore(ev.ObservedTime(), cutoff) {
+			return true
+		}
+	}
+	if !observedHead {
+		return false
+	}
+	_, reviewed := coCheckReviewedAt(obs, login)
+	return reviewed
+}
+
+// CoParticipatedRound reports non-terminal activity that can safely be bound
+// to this round. Check runs are head-scoped by construction. Timeline activity
+// needs either the round's fire/command floor or, before either exists, to have
+// arrived after crq enqueued the head; older SHA-less activity may belong to a
+// previous head and must retain its carried provenance.
+func CoParticipatedRound(r state.Round, obs Observation, login string) bool {
+	if r.Head == "" || obs.Head == "" || !dialect.SHAPrefixMatch(r.Head, obs.Head) {
+		return false
+	}
+	if coCheckActivity(obs, login) {
+		return true
+	}
+	if r.FiredAt != nil || roundCoCommandedAt(r, login) != nil {
+		return CoActiveThisRound(r, obs, login)
+	}
+	if r.EnqueuedAt.IsZero() {
+		return false
+	}
+	cutoff := r.EnqueuedAt.UTC()
+	return coCommentedRound(obs, login, cutoff) || coVerdictSince(obs, login, cutoff)
+}
+
 // requiredBot reports whether login is in RequiredBots (normalized).
 func requiredBot(p Policy, login string) bool {
 	norm := dialect.NormalizeBotName(login)
@@ -143,6 +206,13 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 			reason = "cooling down until " + r.RetryAt.UTC().Format(time.RFC3339)
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}
+	}
+	// Normalization can reopen a completed marker solely because it recovered
+	// co-reviewer activity that an older writer lost. The primary side already
+	// reached its terminal state; firing it again would spend a second request
+	// for the same head after its original command was tidied.
+	if r.PrimarySettled {
+		return coAwareDedupe(r, obs, p, now, false)
 	}
 	// No review of this head is coming from the configured bot, ever — its plan
 	// produces a walkthrough only, or it skipped this head outright. Resolve the
@@ -314,7 +384,9 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable || r.ForceCoReviewer(cp.Login)
+		carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
+		checksUnknown := r.FiredAt != nil && co.ChecksUnknown
+		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable || r.ForceCoReviewer(cp.Login)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -326,7 +398,8 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// running on this head. Without it the round dedupes to completed while
 		// the co-review is still in flight, discarding the findings it is about
 		// to publish.
-		if co.AutoActive || co.ActiveThisRound || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
+		unable := coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) || coCheckUnable(obs, cp.Login)
+		if !unable && (co.AutoActive || co.ActiveThisRound || carried || checksUnknown || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0) {
 			wait = true
 			continue
 		}

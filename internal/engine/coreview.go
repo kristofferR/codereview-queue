@@ -71,6 +71,20 @@ func coCutoff(r state.Round, login string) time.Time {
 	return cut
 }
 
+// coSelfHealCutoff includes the queued portion of this round. EnqueuedAt is
+// when crq first saw this head, so unlike the commit timestamp it cannot point
+// at an earlier head after a force-push or reset. A co-reviewer can report that
+// it is unable to finish while the round waits for the primary fire slot; that
+// answer must still suppress a later nudge.
+func coSelfHealCutoff(r state.Round, login string) time.Time {
+	cut := coCutoff(r, login)
+	enqueued := r.EnqueuedAt.UTC()
+	if !enqueued.IsZero() && (cut.IsZero() || enqueued.Before(cut)) {
+		cut = enqueued
+	}
+	return cut
+}
+
 // coChecks yields login's check runs from the observation.
 func coChecks(obs Observation, login string) []CheckSeen {
 	var out []CheckSeen
@@ -389,9 +403,10 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 // head (including in-progress — a running check will deliver evidence).
 //
 // Modes: never — false. always — post whenever the common current-head guards
-// above allow it. selfheal — post only for a bot observed active that missed
-// the head, once the anchor (the round's fire) is older than the grace period;
-// the caller passes anchor and now so the fire path and the sweep share the rule.
+// above allow it. selfheal — post only for a bot observed active now or on a
+// prior head that missed this one, once the anchor (the round's fire) is older
+// than the grace period; the caller passes anchor and now so the fire path and
+// the sweep share the rule.
 func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPresent bool, anchor, now time.Time) bool {
 	if roundCoCommandID(r, cp.Login) != 0 {
 		return false
@@ -429,7 +444,10 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 			return true
 		}
 		co := obs.co(cp.Login)
-		if !co.AutoActive && !co.ActiveThisRound {
+		if coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) {
+			return false
+		}
+		if !co.AutoActive && !co.ActiveThisRound && r.Co(cp.Login).SeenActiveAt == nil {
 			return false
 		}
 		if anchor.IsZero() {

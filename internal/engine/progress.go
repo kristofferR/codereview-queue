@@ -60,13 +60,14 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	}
 	firedAt := r.FiredAt.UTC()
 	completion := Completion(r, obs, p)
+	declined := primaryDeclinedRound(obs, p, firedAt)
 
-	// A reviewing round past its wait deadline whose primary review already
-	// stands: a gating co-bot (Codex) has gone silent too long, so give up on it —
-	// the primary review stands, and re-firing a head the primary already reviewed
+	// A reviewing round past its wait deadline whose primary review or proven
+	// re-review decline already stands: a gating co-bot (Codex) has gone silent
+	// too long, so give up on it. Re-firing a head the primary already answered
 	// would spam. Checked before the review loop below, which would otherwise hold
-	// a co-review wait open forever on the primary review's ack. A reviewing round
-	// with NO primary review is deliberately left to the fall-through (KeepWaiting):
+	// a co-review wait open forever on the primary's ack. A reviewing round with
+	// NO primary evidence is deliberately left to the fall-through (KeepWaiting):
 	// the loop bounds and times out its own wait (exit 2), so an expired deadline
 	// never resets or re-fires the same head.
 	//
@@ -78,8 +79,14 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	// OLDEST reviewing round per pump, it would also starve every reviewing round
 	// behind it. Its deadline is the only thing that can end it.
 	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) {
-		if primaryReviewedHead(r, obs, p) {
+		if r.PrimarySettled {
+			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary was already settled"}
+		}
+		if primaryReviewedHead(r, obs, p) || PrimaryCompletedRound(r, obs, p) {
 			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+		}
+		if declined {
+			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary re-review decline stands"}
 		}
 		if PrimaryReviewUnavailable(obs, p, r.Head) {
 			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; no primary review is coming for this head"}
@@ -127,7 +134,6 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		}
 		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
 	}
-
 	// Convergence and slot release answer different questions. A repository may
 	// leave the primary out of its required set (required Codex only), and then
 	// completion is done the moment that co-reviewer answers — while the
@@ -143,6 +149,15 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	}
 
 	if r.Phase == state.PhaseFired {
+		// A proven re-review refusal is the final answer for the metered
+		// command. Release the slot immediately, but keep waiting when another
+		// configured reviewer still owes evidence for this head.
+		if declined {
+			if completion.Done {
+				return Transition{Outcome: OutComplete, Reason: "re-review declined"}
+			}
+			return Transition{Outcome: OutReviewing, Reason: "re-review declined; awaiting remaining bots"}
+		}
 		if reason, acked := primaryAck(r, obs, p, firedAt); acked {
 			if completion.Done {
 				return Transition{Outcome: OutComplete, Reason: "feedback complete"}
@@ -173,10 +188,11 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 // and how — the condition that releases the fire slot.
 //
 // A bare reaction acknowledges it; so does any other comment of the bot's in the
-// round window — but an account-block/paused/already-reviewed notice is not an
-// ack (v2), and neither is the in-progress summary of a PREVIOUS round edit...
+// round window — but an account-block/paused/unproven already-reviewed notice is
+// not an ack, and neither is the in-progress summary of a PREVIOUS round edit...
 // which it cannot be: UpdatedAt gates the window. An in-progress summary IS an
-// ack that reviewing started.
+// ack that reviewing started. Progress handles a proven declined re-review
+// before calling this helper.
 func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (string, bool) {
 	if obs.Reacted {
 		return "bot reacted", true
@@ -217,7 +233,11 @@ func PrimaryAckPending(r state.Round, obs Observation, p Policy) bool {
 	if r.Phase != state.PhaseFired || r.FiredAt == nil || r.CoOnly {
 		return false
 	}
-	_, acked := primaryAck(r, obs, p, r.FiredAt.UTC())
+	firedAt := r.FiredAt.UTC()
+	if primaryDeclinedRound(obs, p, firedAt) {
+		return false
+	}
+	_, acked := primaryAck(r, obs, p, firedAt)
 	return !acked
 }
 

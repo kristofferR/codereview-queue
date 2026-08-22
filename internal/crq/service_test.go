@@ -409,6 +409,24 @@ func noForcePush(_ string, _ map[string]any, out any) error {
 	return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}`), out)
 }
 
+func TestLatestHeadForcePushRejectsInvalidRepository(t *testing.T) {
+	for _, repo := range []string{"owner", "owner/", "/repo", "owner/repo/extra"} {
+		t.Run(repo, func(t *testing.T) {
+			gh := newFakeGitHub()
+			gh.graphQL = func(_ string, _ map[string]any, _ any) error {
+				t.Fatal("invalid repository must not make a GraphQL request")
+				return nil
+			}
+			svc := &Service{gh: gh}
+
+			got, err := svc.latestHeadForcePush(t.Context(), repo, 1)
+			if err != nil || got != (headForcePush{}) {
+				t.Fatalf("latestHeadForcePush() = %+v, %v; want zero result", got, err)
+			}
+		})
+	}
+}
+
 // --- test store fakes (v3) ---
 
 type failNthUpdateStore struct {
@@ -416,6 +434,75 @@ type failNthUpdateStore struct {
 	n     int
 	err   error
 	calls int
+}
+
+type supersedeBeforeUpdateStore struct {
+	StateStore
+	repo     string
+	pr       int
+	head     string
+	now      time.Time
+	complete bool
+	done     bool
+}
+
+type evictBeforeUpdateStore struct {
+	StateStore
+	repo string
+	pr   int
+	now  time.Time
+	done bool
+}
+
+func TestSameCoActivityDetectsRemovedReviewer(t *testing.T) {
+	seen := time.Now().UTC()
+	before := map[string]CoBotRound{"bugbot": {SeenActiveAt: &seen}}
+	if sameCoActivity(before, map[string]CoBotRound{}) {
+		t.Fatal("removed reviewer activity must be a change")
+	}
+}
+
+func (s *supersedeBeforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if !s.done {
+		s.done = true
+		if _, err := s.StateStore.Update(ctx, func(st *State) error {
+			round, err := st.Supersede(s.repo, s.pr, s.head, s.now)
+			if err != nil {
+				return err
+			}
+			if s.complete {
+				if err := round.Dedupe(s.now); err != nil {
+					return err
+				}
+				st.PutRound(*round)
+			}
+			return nil
+		}); err != nil {
+			return State{}, err
+		}
+	}
+	return s.StateStore.Update(ctx, mutate)
+}
+
+func (s *evictBeforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if !s.done {
+		s.done = true
+		if _, err := s.StateStore.Update(ctx, func(st *State) error {
+			st.EndRound(s.repo, s.pr, "pr closed")
+			for otherPR := 100; otherPR < 100+ArchiveMax; otherPR++ {
+				round, err := st.NewRound("o/other", otherPR, "123456789", s.now)
+				if err != nil {
+					return err
+				}
+				st.PutRound(*round)
+				st.EndRound("o/other", otherPR, "pr closed")
+			}
+			return nil
+		}); err != nil {
+			return State{}, err
+		}
+	}
+	return s.StateStore.Update(ctx, mutate)
 }
 
 func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {

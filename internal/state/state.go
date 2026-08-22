@@ -143,6 +143,11 @@ type Round struct {
 	// the two claims exactly backwards. The identity travels as data here for
 	// the same reason it does in CoBots.
 	PrimaryAnsweredBy string `json:"primary_answered_by,omitempty"`
+	// PrimarySettled marks a completed round reopened solely to restore a lost
+	// co-reviewer gate. The primary side of that round is final: its metered
+	// request may have produced only an acknowledgement because the primary was
+	// not required, and its trigger comment may already have been tidied.
+	PrimarySettled bool `json:"primary_settled,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -211,6 +216,15 @@ type CoBotRound struct {
 	CommandID   int64      `json:"command_id,omitempty"`
 	CommandedAt *time.Time `json:"commanded_at,omitempty"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+	// SeenActiveAt is durable proof that crq has observed this reviewer act on
+	// the pull request. Unlike AnsweredAt it carries across supersede, so a bot
+	// whose clean output exists only as a previous head's check run remains
+	// eligible for self-heal when it silently misses the next head.
+	SeenActiveAt *time.Time `json:"seen_active_at,omitempty"`
+	// ActivityCarried says SeenActiveAt came from another head. The timestamp
+	// alone cannot prove that during a supersede race: the old-head observation
+	// may be recorded on the replacement after it was enqueued.
+	ActivityCarried bool `json:"activity_carried,omitempty"`
 	// AnsweredAt is when crq FIRST observed this bot produce head evidence — a
 	// review, a clean summary at the SHA, a completed check run.
 	//
@@ -229,7 +243,8 @@ type CoBotRound struct {
 }
 
 func (c CoBotRound) empty() bool {
-	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil &&
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil &&
+		c.SeenActiveAt == nil && !c.ActivityCarried && c.AnsweredAt == nil &&
 		len(c.unknown) == 0
 }
 
@@ -298,13 +313,56 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 // FIRST such observation wins: a round is one head, so the evidence does not
 // change, and re-stamping it with each sweep's clock would both rewrite state
 // on every pass and make a bot that answered days ago read as freshly active.
+// SeenActiveAt is initialized beside it and then carried to later heads.
 func (r *Round) NoteCoAnswer(login string, at time.Time) {
+	c := r.Co(login)
+	if c.AnsweredAt != nil && c.SeenActiveAt != nil && !c.ActivityCarried {
+		return
+	}
+	t := at.UTC()
+	if c.AnsweredAt == nil {
+		c.AnsweredAt = &t
+	}
+	if c.SeenActiveAt == nil {
+		c.SeenActiveAt = &t
+	}
+	c.ActivityCarried = false
+	r.setCo(login, c)
+}
+
+// NoteCoParticipation records activity bound to this round without claiming
+// the reviewer finished. Unlike NoteCoActivity, this evidence came from the
+// current head and must not be restored as historical activity after the
+// round's bounded wait completes.
+func (r *Round) NoteCoParticipation(login string, at time.Time) {
 	c := r.Co(login)
 	if c.AnsweredAt != nil {
 		return
 	}
+	if c.SeenActiveAt != nil && !c.ActivityCarried {
+		return
+	}
 	t := at.UTC()
-	c.AnsweredAt = &t
+	c.SeenActiveAt = &t
+	c.ActivityCarried = false
+	r.setCo(login, c)
+}
+
+// NoteCoActivity records durable evidence that login has acted on this pull
+// request without claiming it answered this round. It is used when an
+// observation races a supersede: the old head's evidence still proves the
+// reviewer is active, but cannot satisfy the replacement round's head gate.
+func (r *Round) NoteCoActivity(login string, at time.Time) {
+	c := r.Co(login)
+	if c.AnsweredAt != nil {
+		return
+	}
+	if c.SeenActiveAt != nil {
+		return
+	}
+	t := at.UTC()
+	c.SeenActiveAt = &t
+	c.ActivityCarried = true
 	r.setCo(login, c)
 }
 
@@ -343,6 +401,7 @@ func (r *Round) foldLegacyCodex() {
 	prev := r.Co(codexCoBotKey)
 	r.setCo(codexCoBotKey, CoBotRound{
 		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
+		SeenActiveAt: prev.SeenActiveAt, ActivityCarried: prev.ActivityCarried,
 		AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
 	})
 }
@@ -522,6 +581,11 @@ type State struct {
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
+	// CoActivity keeps the latest observed activity for each co-reviewer on a
+	// pull request. Unlike Archive, it is not bounded: a closed PR may be
+	// reopened after its historical rounds have been evicted, and a silent
+	// check-only reviewer still needs to be eligible for self-heal then.
+	CoActivity map[string]map[string]time.Time `json:"co_activity,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -594,7 +658,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 10
+const WriterCaps = 12
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -885,8 +949,10 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 // pending while enqueue keeps skipping the head, and no eligible round exists to
 // trigger it. An optional reviewer also needs an active round for its trigger,
 // self-heal and bounded participation wait. This is the one transition that
-// reopens a finished round, and it keeps the head, the attempts and the
-// co-reviewer bookkeeping — what changed is who runs, not what happened.
+// reopens a finished round, and it keeps the head, the attempts, the settled
+// primary side and the co-reviewer bookkeeping — what changed is who runs, not
+// what happened. A caller whose effective primary changed clears that
+// settlement explicitly.
 //
 // LastAttemptAt is deliberately left alone: it is the adoption floor for a
 // FAILED attempt, and moving it would discard a newly required co-reviewer's own
@@ -903,6 +969,17 @@ func (r *Round) Reopen() error {
 	r.RetryAt = nil
 	r.ReviewersChanged = false
 	r.Note = "reviewer configuration changed"
+	return nil
+}
+
+// ReopenForRestoredActivity puts a completed round back in the queue when a
+// rolling-upgrade repair restores reviewer activity it had lost.
+func (r *Round) ReopenForRestoredActivity() error {
+	if err := r.Reopen(); err != nil {
+		return err
+	}
+	r.PrimarySettled = true
+	r.Note = "restored reviewer activity"
 	return nil
 }
 
@@ -990,6 +1067,14 @@ func (r *Round) AwaitCoReview(deadline, anchor time.Time) error {
 func (r *Round) Complete() error {
 	if r.Phase != PhaseFired && r.Phase != PhaseReviewing {
 		return r.illegal(PhaseCompleted)
+	}
+	if r.WaitDeadline != nil {
+		for _, co := range r.CoBots {
+			if co.AnsweredAt == nil && co.ActivityCarried {
+				r.PrimarySettled = true
+				break
+			}
+		}
 	}
 	r.Phase = PhaseCompleted
 	r.ForceCoReviewers = nil
@@ -1079,6 +1164,7 @@ func (s *State) PutRound(r Round) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
 	}
+	s.rememberCoActivity(r)
 	s.Rounds[Key(r.Repo, r.PR)] = r
 }
 
@@ -1106,7 +1192,10 @@ func (s *State) MoveToFront(repo string, pr int) bool {
 
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
-// for one PR" cannot happen by accident.
+// for one PR" cannot happen by accident. Durable co-reviewer activity is
+// restored from the per-PR index (and archived rounds written before that
+// index existed) so reopening a PR does not forget a silent check-only reviewer
+// that worked on an earlier head.
 func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Round, error) {
 	key := Key(repo, pr)
 	if s.Rounds == nil {
@@ -1124,8 +1213,114 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 		Phase:      PhaseQueued,
 		EnqueuedAt: now.UTC(),
 	}
+	s.carryCoActivity(&r)
 	s.Rounds[key] = r
 	return &r, nil
+}
+
+func (s *State) rememberCoActivity(r Round) {
+	key := Key(r.Repo, r.PR)
+	for login, co := range r.CoBots {
+		seenAt := co.SeenActiveAt
+		if co.AnsweredAt != nil && (seenAt == nil || seenAt.Before(*co.AnsweredAt)) {
+			seenAt = co.AnsweredAt
+		}
+		if seenAt == nil {
+			continue
+		}
+		if s.CoActivity == nil {
+			s.CoActivity = map[string]map[string]time.Time{}
+		}
+		activity := s.CoActivity[key]
+		if activity == nil {
+			activity = map[string]time.Time{}
+			s.CoActivity[key] = activity
+		}
+		login = coBotKey(login)
+		seen := seenAt.UTC()
+		if previous, ok := activity[login]; !ok || previous.Before(seen) {
+			activity[login] = seen
+		}
+	}
+}
+
+// RememberCoActivity folds a round's reviewer activity into the durable per-PR
+// index. Callers that mutate an archived round in place need this because
+// PutRound, EndRound, and Normalize do not observe that mutation.
+func (s *State) RememberCoActivity(r Round) {
+	s.rememberCoActivity(r)
+}
+
+func carryCoActivity(next *Round, activity map[string]time.Time) bool {
+	restored := false
+	for login, seenAt := range activity {
+		current := next.Co(login)
+		if current.SeenActiveAt != nil && !current.SeenActiveAt.Before(seenAt) {
+			// The activity may already be present because a newer writer carried
+			// it before an older writer completed this replacement round. Its
+			// timestamp predating the round preserves that provenance even when
+			// there is nothing left to copy from the activity index.
+			if current.AnsweredAt == nil && (current.ActivityCarried ||
+				!next.EnqueuedAt.IsZero() && current.SeenActiveAt.Before(next.EnqueuedAt)) {
+				restored = true
+			}
+			continue
+		}
+		seen := seenAt.UTC()
+		current.SeenActiveAt = &seen
+		current.ActivityCarried = current.AnsweredAt == nil || current.AnsweredAt.Before(seenAt)
+		next.setCo(login, current)
+		if current.AnsweredAt == nil || current.AnsweredAt.Before(seenAt) {
+			restored = true
+		}
+	}
+	return restored
+}
+
+func (s *State) carryCoActivity(next *Round) bool {
+	key := Key(next.Repo, next.PR)
+	if activity, ok := s.CoActivity[key]; ok {
+		return carryCoActivity(next, activity)
+	}
+	changed := false
+	for i := len(s.Archive) - 1; i >= 0; i-- {
+		previous := s.Archive[i]
+		if Key(previous.Repo, previous.PR) != key {
+			continue
+		}
+		activity := make(map[string]time.Time, len(previous.CoBots))
+		for login, co := range previous.CoBots {
+			seenAt := co.SeenActiveAt
+			if seenAt == nil {
+				// Rounds written before SeenActiveAt existed still carry the
+				// head-scoped observation that originally proved activity.
+				seenAt = co.AnsweredAt
+			}
+			if seenAt == nil {
+				continue
+			}
+			activity[login] = seenAt.UTC()
+		}
+		if carryCoActivity(next, activity) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// PreviewRound builds the round NewRound would create without changing state.
+// Read-only decisions use it before enqueue so durable reviewer activity is
+// visible on the same pass that first observes a replacement head.
+func (s *State) PreviewRound(repo string, pr int, head string, now time.Time) Round {
+	r := Round{
+		Repo:       strings.ToLower(repo),
+		PR:         pr,
+		Head:       head,
+		Phase:      PhaseQueued,
+		EnqueuedAt: now.UTC(),
+	}
+	s.carryCoActivity(&r)
+	return r
 }
 
 // EndRound abandons the current round (superseded/closed/cancelled) and moves
@@ -1137,6 +1332,7 @@ func (s *State) EndRound(repo string, pr int, reason string) {
 		return
 	}
 	r.Abandon(reason)
+	s.rememberCoActivity(r)
 	delete(s.Rounds, key)
 	s.Archive = append(s.Archive, r)
 	if len(s.Archive) > ArchiveMax {
@@ -2153,17 +2349,26 @@ func (s *State) Normalize(now time.Time) {
 		s.FireSlot = nil
 		s.ClearSlotHold()
 	}
-	for key, r := range s.Rounds {
-		r.foldLegacyCodex()
-		r.inferCoOnly()
-		s.Rounds[key] = r
-	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()
+		s.rememberCoActivity(s.Archive[i])
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
+	}
+	for key, r := range s.Rounds {
+		r.foldLegacyCodex()
+		r.inferCoOnly()
+		s.rememberCoActivity(r)
+		// During a rolling upgrade, an older writer can archive a round while
+		// preserving SeenActiveAt as an unknown member, then create its
+		// replacement without copying it. Repair that replacement on load, unless
+		// its restored-activity wait already completed and consumed the gate.
+		if s.carryCoActivity(&r) && r.Phase == PhaseCompleted && !r.PrimarySettled {
+			_ = r.ReopenForRestoredActivity()
+		}
+		s.Rounds[key] = r
 	}
 }
 

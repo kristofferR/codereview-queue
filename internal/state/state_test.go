@@ -195,9 +195,13 @@ func TestAwaitCoReviewBoundsTheWait(t *testing.T) {
 
 func TestOneRoundPerPR(t *testing.T) {
 	s := New()
-	if _, err := s.NewRound("Owner/Repo", 7, "abcdef123", t0); err != nil {
+	first, err := s.NewRound("Owner/Repo", 7, "abcdef123", t0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	first.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	first.SetCoCommand("cursor[bot]", 42, t0.Add(2*time.Second))
+	s.PutRound(*first)
 	if _, err := s.NewRound("owner/repo", 7, "00fedcba9", t0); err == nil {
 		t.Fatal("second round for the same PR must be refused (case-insensitive key)")
 	}
@@ -208,8 +212,342 @@ func TestOneRoundPerPR(t *testing.T) {
 	if r.Head != "00fedcba9" || r.Phase != PhaseQueued || r.Seq != 2 {
 		t.Fatalf("superseded round: %+v", r)
 	}
+	co := r.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(t0.Add(time.Second)) {
+		t.Fatalf("superseded round lost prior reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil || co.CommandID != 0 || co.CommandedAt != nil {
+		t.Fatalf("supersede carried head-scoped reviewer state: %+v", co)
+	}
 	if len(s.Archive) != 1 || s.Archive[0].Phase != PhaseAbandoned || s.Archive[0].Head != "abcdef123" {
 		t.Fatalf("old round must be archived abandoned: %+v", s.Archive)
+	}
+}
+
+func TestSupersedeMigratesLegacyCoAnswerAsActivity(t *testing.T) {
+	s := New()
+	first, err := s.NewRound("owner/repo", 8, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(time.Second)
+	first.setCo("cursor[bot]", CoBotRound{AnsweredAt: &answered})
+	s.PutRound(*first)
+
+	next, err := s.Supersede("owner/repo", 8, "00fedcba9", t0.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := next.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("supersede did not migrate legacy answer as durable activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("supersede carried head-scoped legacy answer: %+v", co)
+	}
+}
+
+func TestNewRoundRestoresArchivedCoActivityAfterReopen(t *testing.T) {
+	s := New()
+	first, err := s.NewRound("owner/repo", 9, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(time.Second)
+	first.NoteCoAnswer("cursor[bot]", answered)
+	s.PutRound(*first)
+	s.EndRound("owner/repo", 9, "pr closed")
+
+	reopened, err := s.NewRound("owner/repo", 9, "00fedcba9", t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := reopened.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("reopened round lost archived reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("reopened round carried head-scoped reviewer state: %+v", co)
+	}
+}
+
+func TestNewRoundRestoresCoActivityAfterArchiveEviction(t *testing.T) {
+	s := New()
+	first, err := s.NewRound("owner/repo", 9, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(time.Second)
+	first.NoteCoAnswer("cursor[bot]", answered)
+	s.PutRound(*first)
+	s.EndRound("owner/repo", 9, "pr closed")
+
+	for pr := 100; pr < 100+ArchiveMax; pr++ {
+		if _, err := s.NewRound("owner/other", pr, "123456789", t0); err != nil {
+			t.Fatal(err)
+		}
+		s.EndRound("owner/other", pr, "pr closed")
+	}
+	for _, archived := range s.Archive {
+		if Key(archived.Repo, archived.PR) == Key("owner/repo", 9) {
+			t.Fatal("original round was not evicted from the bounded archive")
+		}
+	}
+
+	reopened, err := s.NewRound("owner/repo", 9, "00fedcba9", t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := reopened.Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("reopened round lost durable reviewer activity: %+v", co)
+	}
+	if co.AnsweredAt != nil {
+		t.Fatalf("reopened round carried head-scoped reviewer state: %+v", co)
+	}
+}
+
+func TestNormalizeRestoresArchivedCoActivityAfterLegacySupersede(t *testing.T) {
+	seen := t0.Add(time.Second)
+	commanded := t0.Add(time.Minute)
+	current := Round{Repo: "owner/repo", PR: 10, Head: "00fedcba9", Phase: PhaseQueued,
+		CoBots: map[string]CoBotRound{"cursor": {CommandID: 42, CommandedAt: &commanded}}}
+	s := State{
+		Rounds: map[string]Round{Key(current.Repo, current.PR): current},
+		Archive: []Round{{Repo: current.Repo, PR: current.PR, Head: "abcdef123", Phase: PhaseAbandoned,
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	co := s.Round(current.Repo, current.PR).Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("Normalize lost activity preserved by the archived round: %+v", co)
+	}
+	if co.CommandID != 42 || co.CommandedAt == nil || !co.CommandedAt.Equal(commanded) {
+		t.Fatalf("Normalize overwrote current-round reviewer state: %+v", co)
+	}
+}
+
+func TestNormalizeRestoresCoActivityBeyondEmptyArchivedRound(t *testing.T) {
+	seen := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 11, Head: "00fedcba9", Phase: PhaseQueued}
+	s := State{
+		Rounds: map[string]Round{Key(current.Repo, current.PR): current},
+		Archive: []Round{
+			{Repo: current.Repo, PR: current.PR, Head: "abcdef123", Phase: PhaseAbandoned,
+				CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}},
+			{Repo: current.Repo, PR: current.PR, Head: "123456789", Phase: PhaseAbandoned},
+		},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	co := s.Round(current.Repo, current.PR).Co("cursor[bot]")
+	if co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("Normalize lost activity beyond an empty archived round: %+v", co)
+	}
+}
+
+func TestNormalizeRequeuesCompletedRoundAfterRestoringCoActivity(t *testing.T) {
+	seen := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted}
+	s := State{
+		Rounds: map[string]Round{Key(current.Repo, current.PR): current},
+		Archive: []Round{{Repo: current.Repo, PR: current.PR, Head: "abcdef123", Phase: PhaseAbandoned,
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("restored activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if !r.PrimarySettled {
+		t.Fatal("restored co-review work must preserve the completed primary side")
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("requeued round lost restored activity: %+v", co)
+	}
+}
+
+func TestNormalizeRequeuesCompletedRoundWithPreservedRestoredActivity(t *testing.T) {
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, ActivityCarried: true}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("preserved restored activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if !r.PrimarySettled {
+		t.Fatal("restored co-review work must preserve the completed primary side")
+	}
+}
+
+func TestNormalizeKeepsCompletedRoundAfterRestoredActivityWaitExpires(t *testing.T) {
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued,
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, ActivityCarried: true}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+	r := s.Round(current.Repo, current.PR)
+	deadline := t0.Add(3 * time.Minute)
+	if err := r.AwaitCoReview(deadline, enqueued); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	s.PutRound(*r)
+
+	s.Normalize(deadline)
+
+	if r := s.Round(current.Repo, current.PR); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("an expired restored-activity wait must stay completed, got %#v", r)
+	}
+}
+
+func TestNormalizeKeepsCompletedNewRoundAfterCarriedActivityWaitExpires(t *testing.T) {
+	seen := t0.Add(time.Second)
+	s := State{
+		CoActivity: map[string]map[string]time.Time{Key("owner/repo", 12): {"cursor": seen}},
+	}
+	r, err := s.NewRound("owner/repo", 12, "00fedcba9", t0.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := t0.Add(3 * time.Minute)
+	if err := r.AwaitCoReview(deadline, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	s.PutRound(*r)
+
+	s.Normalize(deadline)
+
+	if r := s.Round("owner/repo", 12); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("an initial carried-activity wait must stay completed, got %#v", r)
+	}
+}
+
+func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
+	var r Round
+	r.NoteCoActivity("cursor[bot]", t0)
+	if co := r.Co("cursor[bot]"); !co.ActivityCarried {
+		t.Fatalf("historical activity was not marked as carried: %+v", co)
+	}
+	r.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	if co := r.Co("cursor[bot]"); co.ActivityCarried || co.AnsweredAt == nil {
+		t.Fatalf("current-head answer did not replace carried provenance: %+v", co)
+	}
+}
+
+func TestCoParticipationReplacesCarriedProvenance(t *testing.T) {
+	var r Round
+	r.NoteCoActivity("cursor[bot]", t0)
+	participatedAt := t0.Add(time.Minute)
+	r.NoteCoParticipation("cursor[bot]", participatedAt)
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt != nil || co.SeenActiveAt == nil ||
+		!co.SeenActiveAt.Equal(participatedAt) {
+		t.Fatalf("current-head participation did not replace carried provenance: %+v", co)
+	}
+}
+
+func TestCoActivityDoesNotReplaceCurrentHeadParticipation(t *testing.T) {
+	var r Round
+	participatedAt := t0.Add(time.Minute)
+	r.NoteCoParticipation("cursor[bot]", participatedAt)
+	r.NoteCoActivity("cursor[bot]", participatedAt.Add(time.Minute))
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt != nil || co.SeenActiveAt == nil ||
+		!co.SeenActiveAt.Equal(participatedAt) {
+		t.Fatalf("delayed historical activity replaced current-head participation: %+v", co)
+	}
+}
+
+func TestCoActivityDoesNotReplaceCurrentHeadAnswer(t *testing.T) {
+	var r Round
+	answeredAt := t0.Add(time.Second)
+	r.NoteCoAnswer("cursor[bot]", answeredAt)
+	r.NoteCoActivity("cursor[bot]", answeredAt.Add(time.Second))
+
+	co := r.Co("cursor[bot]")
+	if co.ActivityCarried || co.AnsweredAt == nil || !co.AnsweredAt.Equal(answeredAt) {
+		t.Fatalf("delayed historical activity replaced current-head provenance: %+v", co)
+	}
+}
+
+func TestNormalizeDoesNotRequeueCompletedRoundForCurrentActivity(t *testing.T) {
+	enqueued := t0.Add(time.Minute)
+	seen := enqueued.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted, EnqueuedAt: enqueued}
+	current.NoteCoParticipation("cursor", seen)
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	if r := s.Round(current.Repo, current.PR); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("current-round activity must keep the completed dedupe marker, got %#v", r)
+	}
+}
+
+func TestNormalizeDoesNotRequeueCompletedRoundForItsLegacyAnswer(t *testing.T) {
+	answered := t0.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted,
+		CoBots: map[string]CoBotRound{"cursor": {AnsweredAt: &answered}}}
+	s := State{Rounds: map[string]Round{Key(current.Repo, current.PR): current}}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("same-head answer must keep the completed dedupe marker, got %#v", r)
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(answered) {
+		t.Fatalf("Normalize did not migrate the legacy answer to durable activity: %+v", co)
+	}
+}
+
+func TestNormalizeRequeuesCompletedRoundForNewerCarriedActivity(t *testing.T) {
+	answered := t0.Add(time.Second)
+	seen := answered.Add(time.Second)
+	current := Round{Repo: "owner/repo", PR: 12, Head: "00fedcba9", Phase: PhaseCompleted,
+		CoBots: map[string]CoBotRound{"cursor": {AnsweredAt: &answered}}}
+	s := State{
+		Rounds:     map[string]Round{Key(current.Repo, current.PR): current},
+		CoActivity: map[string]map[string]time.Time{Key(current.Repo, current.PR): {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(2 * time.Minute))
+
+	r := s.Round(current.Repo, current.PR)
+	if r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("newer carried activity must requeue the completed dedupe marker, got %#v", r)
+	}
+	if co := r.Co("cursor[bot]"); co.SeenActiveAt == nil || !co.SeenActiveAt.Equal(seen) {
+		t.Fatalf("Normalize did not restore newer durable activity: %+v", co)
 	}
 }
 
@@ -335,6 +673,22 @@ func TestNormalizeFoldsLegacyCodex(t *testing.T) {
 	co := r.Co(dialect.CodexBotLogin)
 	if co.CommandID != 11 || co.CommandedAt == nil {
 		t.Fatalf("fold produced %+v, want command 11", co)
+	}
+
+	// Activity provenance has no legacy counterpart, so folding the legacy
+	// trigger fields must preserve it with the other observation fields.
+	carried := *r
+	seenAt := t0.Add(time.Second)
+	co.SeenActiveAt = &seenAt
+	co.ActivityCarried = true
+	carried.CoBots = map[string]CoBotRound{codexCoBotKey: co}
+	carried.foldLegacyCodex()
+	got := carried.Co(dialect.CodexBotLogin)
+	if !got.ActivityCarried {
+		t.Fatal("fold cleared Codex carried-activity provenance")
+	}
+	if got.SeenActiveAt == nil || !got.SeenActiveAt.Equal(seenAt) {
+		t.Fatalf("fold lost Codex activity timestamp: %+v", got)
 	}
 
 	// Stale mirror: an old binary moved the legacy command on; fold overwrites.

@@ -31,11 +31,12 @@ type CompletionStatus struct {
 //     (coReviewersSatisfied): if a co-bot gates or participates in this
 //     round, its silence must not let the round converge on CodeRabbit's
 //     word alone.
-//  4. The completion-reply fallback: a "Review finished." reply pairs to this
-//     round's command and stands in for a no-findings re-review — only if the
-//     bot has ANY prior submitted review, the pairing is chronologically
-//     sound, and no in-progress/rate-limited/paused/failed top-summary state
-//     contradicts it (the c22eb4b/e2aa2f0 gates).
+//  4. The completion-reply fallback: a completion or declined re-review reply
+//     pairs to this round's command and stands in for a no-findings re-review —
+//     only if the bot has a submitted review predating that command, the
+//     pairing is chronologically sound, and no in-progress/rate-limited/
+//     paused/failed top-summary state contradicts it (the c22eb4b/e2aa2f0
+//     gates).
 func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	reviewedBy := map[string]bool{}
 	for _, bot := range p.RequiredBots {
@@ -61,9 +62,20 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	// Such a round need not have fired to engage this gate: CodeRabbit cannot
 	// review, so crq resolves the round without ever posting its command and
 	// FiredAt stays nil while the co-reviewers do all of the work. The gate
-	// still keys on observed participation, never on mere configuration — an
-	// enabled-but-absent co-bot must not wedge a round nothing else will finish.
-	if r.FiredAt != nil || primaryUnavailable {
+	// also applies to durable activity previewed before enqueue: otherwise the
+	// first decision for a replacement head can return done before enqueue
+	// restores the reviewer and parks a wait. It still keys on participation,
+	// never on mere configuration — an enabled-but-absent co-bot must not wedge
+	// a round nothing else will finish.
+	carriedReviewer := false
+	for _, cp := range p.coReviewers() {
+		if cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil {
+			carriedReviewer = true
+			break
+		}
+	}
+	roundActivated := r.FiredAt != nil || primaryUnavailable
+	if roundActivated || carriedReviewer {
 		for _, cp := range p.coReviewers() {
 			if requiredBot(p, cp.Login) {
 				continue
@@ -82,8 +94,13 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// leaving the bot out of reviewedBy meant an unreadable in-flight
 			// check was neither asked for nor waited on, and a clean primary
 			// could converge the round straight past it.
-			if (co.AutoActive || co.ActiveThisRound || commanded || co.ChecksUnknown) &&
-				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) &&
+			carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
+			engaged := co.AutoActive || co.ActiveThisRound || carried || commanded
+			if roundActivated {
+				engaged = engaged || co.ChecksUnknown
+			}
+			if engaged &&
+				!coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) &&
 				!coCheckUnable(obs, cp.Login) {
 				reviewedBy[cp.Login] = false
 			}
@@ -208,16 +225,15 @@ func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.
 }
 
 // completionReplyForRound ports v2's completionReplyForFiredCommand: replies
-// pair chronologically with the earliest unanswered command, submitted
-// reviews consume the command they answered, and a completion only stands
-// when the bot has a prior submitted review and no nonterminal or failed
-// top-summary state contradicts it.
+// pair chronologically with the earliest unanswered command, submitted reviews
+// consume the command they answered, and a completion (including an explicit
+// refusal to re-review commits the bot says it already covered) only stands
+// when the bot has a submitted review predating the paired command and no
+// nonterminal or failed top-summary state contradicts it.
 func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool {
-	if !botHasAnyReview(obs.Reviews, p.Bot) {
-		return false
-	}
 	for _, reply := range commandReplies(obs, p) {
-		if reply.completion && notBefore(reply.commandAt, firedAt) &&
+		if reply.completion && reply.priorReview &&
+			notBefore(reply.commandAt, firedAt) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvFailed) {
 			return true
@@ -226,21 +242,46 @@ func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool 
 	return false
 }
 
+// primaryDeclinedRound is the narrower completion-reply case Progress needs to
+// release the metered fire slot with an honest reason. The prior-review and
+// contradictory-state gates are deliberately identical to
+// completionReplyForRound: a first-ever instant acknowledgement can arrive
+// while the real review is still queued, and must not release the slot.
+func primaryDeclinedRound(obs Observation, p Policy, firedAt time.Time) bool {
+	for _, reply := range commandReplies(obs, p) {
+		if reply.declined && reply.priorReview &&
+			notBefore(reply.commandAt, firedAt) &&
+			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
+			return true
+		}
+	}
+	return false
+}
+
 // CommandHasCompletionReply reports whether the specific command comment was
-// answered by a completion reply with no in-progress/rate-limited/paused top
-// summary contradicting it since. It ports v2's reviewCommandHasCompletionReply
-// (the adoption guard: a command already answered by a completion reply belongs
-// to a finished round and must not be re-adopted as a fresh fire). Unlike the
-// convergence fallback it does not require a prior submitted review or gate on
-// a failed summary — adoption only asks "was this exact command already spoken
-// for".
+// answered by a completion or a proven declined re-review reply with no
+// contradictory top summary since. It ports
+// v2's reviewCommandHasCompletionReply (the adoption guard: a command already
+// answered by a final reply belongs to a finished round and must not be
+// re-adopted as a fresh fire). A first-ever declined reply can arrive while a
+// real review is still queued, so it needs the same prior-review proof as the
+// convergence fallback; an explicit completion reply remains final on its own.
 func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool {
 	if commandID == 0 {
 		return false
 	}
 	for _, reply := range commandReplies(obs, p) {
-		if reply.commandID == commandID && reply.completion &&
-			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) {
+		if reply.commandID != commandID || !reply.completion {
+			continue
+		}
+		states := []dialect.EventKind{dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused}
+		if reply.declined {
+			if !reply.priorReview {
+				continue
+			}
+			states = append(states, dialect.EvFailed)
+		}
+		if !stateSince(obs, p, reply.commandAt, states...) {
 			return true
 		}
 	}
@@ -272,22 +313,11 @@ func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
 	if r.CommandID == 0 {
 		return false
 	}
-	if !botHasAnyReview(obs.Reviews, p.Bot) {
-		return false
-	}
 	for _, reply := range commandReplies(obs, p) {
 		if reply.commandID == r.CommandID && reply.completion &&
+			reply.priorReview &&
 			notBefore(reply.commandAt, cutoff) &&
 			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
-			return true
-		}
-	}
-	return false
-}
-
-func botHasAnyReview(reviews []ReviewSeen, bot string) bool {
-	for _, review := range reviews {
-		if sameBot(review.Bot, bot) {
 			return true
 		}
 	}
@@ -312,9 +342,11 @@ func stateSince(obs Observation, p Policy, since time.Time, kinds ...dialect.Eve
 }
 
 type commandReply struct {
-	commandID  int64
-	commandAt  time.Time
-	completion bool
+	commandID   int64
+	commandAt   time.Time
+	completion  bool
+	declined    bool
+	priorReview bool
 }
 
 // commandReplies folds the classified event stream (plus submitted reviews)
@@ -322,15 +354,21 @@ type commandReply struct {
 func commandReplies(obs Observation, p Policy) []commandReply {
 	type kind int
 	const (
+		// GitHub timestamps have only second precision. Commands sort before
+		// reviews so a tied review is conservatively not treated as prior
+		// evidence. The review loop below also leaves a tied command pending:
+		// without a finer ordering signal, the review must neither prove that
+		// command was a re-review nor consume it as the command's answer.
 		kCommand kind = iota
-		kAutoReply
 		kReview
+		kAutoReply
 	)
 	type event struct {
-		kind kind
-		at   time.Time
-		id   int64
-		ev   dialect.BotEvent
+		kind        kind
+		at          time.Time
+		id          int64
+		ev          dialect.BotEvent
+		priorReview bool
 	}
 	var events []event
 	for _, ev := range obs.Events {
@@ -359,14 +397,17 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 
 	var out []commandReply
 	var pending []event
+	seenReview := false
 	for _, ev := range events {
 		switch ev.kind {
 		case kCommand:
+			ev.priorReview = seenReview
 			pending = append(pending, ev)
 		case kReview:
-			if len(pending) > 0 {
+			if len(pending) > 0 && pending[0].at.Before(ev.at) {
 				pending = pending[1:]
 			}
+			seenReview = true
 		case kAutoReply:
 			if len(pending) == 0 {
 				continue
@@ -374,9 +415,11 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 			cmd := pending[0]
 			pending = pending[1:]
 			out = append(out, commandReply{
-				commandID:  cmd.id,
-				commandAt:  cmd.at,
-				completion: ev.ev.Kind == dialect.EvCompletion,
+				commandID:   cmd.id,
+				commandAt:   cmd.at,
+				completion:  ev.ev.Kind == dialect.EvCompletion || ev.ev.Kind == dialect.EvAlreadyReviewed,
+				declined:    ev.ev.Kind == dialect.EvAlreadyReviewed,
+				priorReview: cmd.priorReview,
 			})
 		}
 	}

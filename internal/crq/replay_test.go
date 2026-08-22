@@ -785,3 +785,47 @@ func TestReplaySkippedRefusalNeverBlocksTheAccount(t *testing.T) {
 		t.Fatal("an unrelated PR must still fire: one oversized PR cannot stall the fleet")
 	}
 }
+
+// CodeRabbit may answer a changed head by declining to review commits it says
+// an earlier round already covered. Once that response is paired to this
+// command and a prior review proves it really is a re-review, the round is
+// complete: retrying cannot produce different evidence and eventually left
+// `crq next` at a terminal blocked verdict.
+func TestReplayDeclinedRereviewCompletesChangedHead(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 702
+	oldHead, head := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.botReview(repo, pr, 700, oldHead, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("changed head should request its re-review, got %#v", res)
+	}
+	r := f.round(repo, pr)
+	if r == nil || r.FiredAt == nil || r.CommandID == 0 {
+		t.Fatalf("fired round missing its command anchor: %#v", r)
+	}
+	f.humanComment(repo, pr, r.CommandID, f.cfg.ReviewCommand, *r.FiredAt)
+	f.clk.advance(time.Minute)
+	f.botComment(repo, pr, 701, corpusMessage(t, "coderabbit/already-reviewed.md"), f.clk.now())
+	feedback, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !feedback.Converged {
+		t.Fatalf("declined re-review still reports the primary pending: %#v", feedback.ReviewedBy)
+	}
+
+	if res := f.pump(); res.Action != "cleared" || res.Reason != "re-review declined" {
+		t.Fatalf("declined re-review should clear the round, got %#v", res)
+	}
+	if r = f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("declined re-review left the head waiting for a retry: %#v", r)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 1 {
+		t.Fatalf("declined re-review was re-fired %d times", got)
+	}
+}

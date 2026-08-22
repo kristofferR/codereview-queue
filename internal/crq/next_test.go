@@ -549,6 +549,33 @@ func TestNextResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	}
 }
 
+func TestNextDoesNotReturnDoneAfterRestoringCarriedReviewerActivity(t *testing.T) {
+	base := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, nil)
+	f.gh.graphQL = noForcePush
+	repo, pr := "o/r", 509
+	oldHead, head := "1111111111111111", "2222222222222222"
+	seedRound(t, f.store, f.cfg, repo, pr, oldHead[:9], PhaseCompleted, base.Add(-time.Hour), 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.NoteCoActivity(bugbotLogin, base.Add(-time.Hour))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.botReview(repo, pr, 900, head, base)
+	f.setLocalWork(false, "")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionWait)
+	if r := f.round(repo, pr); r == nil || r.Head != head[:9] || r.Phase != PhaseReviewing {
+		t.Fatalf("carried reviewer wait was not persisted for the new head: %+v", r)
+	}
+}
+
 // A finding with no review thread cannot be resolved or declined — GitHub offers
 // nothing to act on — so fix-first blocks every future round on it. The
 // observed end state was a PR reporting "no review was ever requested" for its

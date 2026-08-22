@@ -45,6 +45,67 @@ func (f *replayFixture) wantAction(report NextReport, want engine.ActionKind) {
 	}
 }
 
+func TestNextRevalidatesAnExpiredClaimAfterDeciding(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 500, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.workOwnerFn = func() (string, string) { return "session-a", "mac:feature" }
+	f.svc.dispatchTokenFn = func() string { return "" }
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  1,
+		mutate: func() {
+			f.clk.advance(WorkClaimTTL + time.Minute)
+			if _, err := f.store.Update(f.ctx, func(st *State) error {
+				now := f.clk.now()
+				st.SetWorkClaim(repo, pr, WorkClaim{
+					Owner: "session-b", By: "linux:other", ClaimedAt: now,
+					ExpiresAt: now.Add(WorkClaimTTL),
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+
+	report, err := f.svc.Next(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionWait) || !strings.Contains(report.Reason, "linux:other") {
+		t.Fatalf("report after lost claim = %+v, want wait for the new owner", report)
+	}
+}
+
+func TestNextRefreshesClaimBeforeReturningFix(t *testing.T) {
+	base := time.Date(2026, 8, 15, 8, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 509, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.wantAction(f.next(repo, pr), engine.ActionWait)
+
+	f.clk.advance(time.Hour)
+	f.botReview(repo, pr, 900, head, f.clk.now())
+	f.botReviewComment(repo, pr, 901, head, "internal/state/state.go", 42,
+		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := st.WorkClaim(repo, pr, f.clk.now())
+	if !ok || !claim.ExpiresAt.Equal(f.clk.now().Add(WorkClaimTTL)) {
+		t.Fatalf("claim before returning fix = %+v, %t", claim, ok)
+	}
+}
+
 // A whole review round driven only by `crq next`: the caller never chooses a
 // delay, never decides when the head may move, and never reads an exit code.
 // Each step asserts the instruction crq returns for a state an agent would
@@ -121,6 +182,13 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	if len(done.Findings) != 0 {
 		t.Errorf("done must carry no findings, got %d", len(done.Findings))
 	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatal("done left the interactive work claim behind")
+	}
 }
 
 func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
@@ -154,6 +222,59 @@ func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
 	}
 	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil || !st.SlotHeld(f.clk.now()) {
 		t.Fatalf("push returned without preserving the unanswered primary slot: %+v", st.FireSlot)
+	}
+}
+
+func TestNextDryRunDoesNotClaimOrCompleteWaitRound(t *testing.T) {
+	base := time.Now().UTC()
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{dialect.CodexBotLogin}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	repo, pr, head := "owner/repo", 507, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.next(repo, pr)
+	if _, err := f.svc.UnclaimWork(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	f.clk.advance(time.Minute)
+	f.gh.mu.Lock()
+	review := ghapi.Review{
+		ID: 901, CommitID: head, State: "COMMENTED",
+		SubmittedAt: f.clk.now(), Body: "[review body]",
+	}
+	review.User.Login = dialect.CodexBotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], review)
+	f.gh.mu.Unlock()
+
+	cfg := f.cfg
+	cfg.DryRun = true
+	dry := NewService(cfg, f.gh, f.store, nil)
+	dry.now = f.clk.now
+	dry.localWorkFn = func(context.Context, string) (bool, string) {
+		return true, "uncommitted changes in the working tree"
+	}
+	before, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := dry.Next(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.wantAction(report, engine.ActionPush)
+	after, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run Next changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+	if _, ok := after.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatal("dry-run Next persisted an interactive work claim")
 	}
 }
 
@@ -231,6 +352,32 @@ func TestNextNeverSchedulesAHotLoop(t *testing.T) {
 		if got := report.RecheckAfter.Sub(f.clk.now()); got < f.cfg.PollInterval {
 			t.Fatalf("recheck in %s, want at least the poll interval %s", got, f.cfg.PollInterval)
 		}
+	}
+}
+
+func TestNextWaitingRenewsClaimBeforeLongRecheck(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 508, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.cfg.PollInterval = 3 * time.Hour
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.NextWaiting(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop next --wait")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
 	}
 }
 

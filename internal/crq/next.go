@@ -26,6 +26,9 @@ type NextReport struct {
 	// `crq next` wire contract: Next does not fetch the head repository, while
 	// watch already has the Pull object and must carry that fact into the CAS.
 	Fork bool `json:"-"`
+	// dispatchUntil is the locally known expiry of a watch-only dispatch claim.
+	// It lets the session stop at the lease boundary if shared-state writes fail.
+	dispatchUntil time.Time
 
 	// RecheckAfter is when to call `crq next` again — the ONE time field, set
 	// for both hold and wait so there is never a question of which to read. crq
@@ -63,6 +66,39 @@ type NextReport struct {
 // non-blocking is the point: there is no long-lived process for a harness to
 // kill, and a caller that dies mid-loop simply calls again.
 func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, error) {
+	outcome, err := s.claimInteractiveWork(ctx, repo, pr)
+	if err != nil {
+		return NextReport{}, err
+	}
+	if !outcome.acquired {
+		return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
+	}
+	report, err := s.nextAutomated(ctx, repo, pr)
+	if err == nil {
+		// GitHub transport retries can outlive the claim. Revalidate after the
+		// decision so a caller never receives actionable work after another host
+		// legitimately took over the expired lease.
+		if report.Action == string(engine.ActionFix) || report.Action == string(engine.ActionPush) {
+			outcome, err = s.refreshInteractiveWork(ctx, repo, pr)
+		} else {
+			outcome, err = s.claimInteractiveWork(ctx, repo, pr)
+		}
+		if err == nil && !outcome.acquired {
+			return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
+		}
+	}
+	if err == nil && terminalInteractiveAction(report.Action) {
+		if releaseErr := s.releaseInteractiveWork(ctx, repo, pr); releaseErr != nil {
+			return report, releaseErr
+		}
+	}
+	return report, err
+}
+
+// nextAutomated is the queue-driving path for autoreview/autofix. It performs
+// the same decision and mutations as Next without taking interactive ownership
+// of the PR. The autofix dispatch CAS separately refuses live WorkClaims.
+func (s *Service) nextAutomated(ctx context.Context, repo string, pr int) (NextReport, error) {
 	repo = NormalizeRepo(repo)
 	report := NextReport{Repo: repo, PR: pr, Findings: []dialect.Finding{}, CheckedAt: s.clock()}
 
@@ -80,7 +116,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	// the push supersedes this round, so leaving the hold attached only to the
 	// live round would let Normalize release it while the review is still in
 	// flight.
-	if action.Kind == engine.ActionPush && feedback.PrimaryAckPending {
+	if action.Kind == engine.ActionPush && feedback.PrimaryAckPending && !s.cfg.DryRun {
 		if err := s.completeWaitRound(ctx, repo, pr, report.Head, true, &feedback.config); err != nil {
 			return report, err
 		}
@@ -312,7 +348,10 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 				if wait <= 0 {
 					wait = s.cfg.PollInterval
 				}
-				if serr := ghapi.SleepCtx(ctx, wait); serr != nil {
+				if wait > workClaimRenewalInterval {
+					wait = workClaimRenewalInterval
+				}
+				if serr := s.sleep(ctx, wait); serr != nil {
 					return report, serr
 				}
 				continue
@@ -328,11 +367,14 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 			if delay <= 0 {
 				delay = s.cfg.PollInterval
 			}
+			if delay > workClaimRenewalInterval {
+				delay = workClaimRenewalInterval
+			}
 			if s.log != nil {
 				s.log.Printf("%s#%d %s — %s; rechecking at %s",
 					repo, pr, report.Action, report.Reason, report.RecheckAfter.Format(time.RFC3339))
 			}
-			if serr := ghapi.SleepCtx(ctx, delay); serr != nil {
+			if serr := s.sleep(ctx, delay); serr != nil {
 				return report, serr
 			}
 		default:

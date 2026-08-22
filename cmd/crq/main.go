@@ -228,6 +228,23 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(report)
 		return code
+	case "unclaim":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		repo, pr, err := target(ctx, service, args[1:], "crq unclaim [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		result, err := service.UnclaimWork(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(result)
+		return 0
 	case "resolve":
 		threads, ok := parseResolveArgs(args[1:])
 		if !ok {
@@ -960,6 +977,7 @@ QUEUE WORKFLOWS
   crq next [<repo> <pr>]           ask what to do next about a PR (the agent loop)
   crq wait [<repo> <pr>]           block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
+  crq unclaim [<repo> <pr>]        abandon this interactive loop so autofix may take over
   crq autoreview                   keep open PRs reviewed through the same queue
   crq serve                        the live web dashboard (--read-only to refuse writes)
   crq status [--line]              show the queue, in-flight review, and quota state
@@ -976,8 +994,10 @@ DRIVING A PR REVIEW
     blocked  needs a human; .reason says why
 
   crq next is non-blocking and idempotent, so nothing is lost if it is interrupted.
+  It claims the PR against unattended autofix for two hours, renewed by each loop call.
+  Use crq unclaim when abandoning the loop before done or blocked.
   On wait or hold, hand the delay to crq wait — run it as your harness's background
-  task and let its EXIT wake you. It owns nothing, so being killed costs only itself.
+  task and let its EXIT wake you. It owns no review round; its work claim expires.
   Never invent a delay of your own, and never post @coderabbitai review directly.
 
 USAGE
@@ -987,6 +1007,7 @@ USAGE
                                    remote and branch to find the pull request
   crq wait <repo> <pr>             block until actionable, then emit that action as JSON
   crq loop [<repo> <pr>]           coordinated trigger -> wait -> JSON feedback/convergence
+  crq unclaim [<repo> <pr>]        release an abandoned interactive work claim
   crq feedback [<repo> <pr>]       emit normalized actionable review findings as JSON
   crq resolve <thread-id> [<thread-id>...]
                                    resolve addressed GitHub review threads
@@ -1043,6 +1064,10 @@ exactly that, then you call it again. Non-blocking, idempotent, and it advances 
 queue by one step as a side effect — so a PR outside the autoreview fleet still
 progresses, and an interrupted caller loses nothing by calling again.
 
+Before reading feedback it takes a two-hour renewable PR work claim. Autofix
+checks that claim atomically before starting a session, so the two cannot edit
+the same PR. done and blocked release it; crq unclaim abandons it early.
+
 Always exits 0 on success. Read .action; the exit code carries no information.
 
   fix      .findings[] are actionable for the current head. Fix them, validate, then
@@ -1080,8 +1105,8 @@ Block until there is something to DO about this PR, then print that instruction
 
 This is how an ephemeral agent waits. Run it as your harness's background task and
 end your turn: its EXIT is the wake event, so you burn no tokens idling and invent
-no delay. It holds no round, so if it is killed the round is untouched — just run
-it again, or call crq next.
+no delay. It holds no review round, so if it is killed the round is untouched.
+It renews only the two-hour interactive work claim; run it again, or call crq next.
 
 It is read-only in the steady state, but NOT unconditionally: if nothing is
 advancing this PR (no round for the head, or no daemon holding the leader lease)
@@ -1091,8 +1116,9 @@ review and spend account quota.
 It returns on fix, push, done and blocked. wait and hold are the two states it
 waits THROUGH, because they mean "come back later" and that is its whole job.
 
-While idle it watches the shared state ref with a conditional request, which costs
-no rate-limit quota, and re-evaluates when the queue moves. If no autoreview daemon
+While idle it watches the shared state ref with an authenticated conditional
+request. A 304 Not Modified response does not count against GitHub's primary REST
+rate limit. If no autoreview daemon
 holds the leader lease it drives the queue itself instead, which works but spends
 more of the shared budget — run the daemon.
 `)
@@ -1126,6 +1152,13 @@ Loop contract:
   #   only after the held head advances, call crq loop for the next round
 
 Never post @coderabbitai review directly; crq is the only trigger.
+`)
+	case "unclaim":
+		fmt.Print(`crq unclaim [<repo> <pr>]
+
+Release the interactive work claim for a pull request before its two-hour lease
+expires. Use this when abandoning a manual/agent review loop before it reaches
+done or blocked. The target is inferred when run inside the pull request checkout.
 `)
 	case "feedback":
 		fmt.Print(`crq feedback <repo> <pr>

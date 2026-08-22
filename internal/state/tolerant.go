@@ -36,9 +36,34 @@ var (
 	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
 	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
 	dispatchFields      = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
+	workClaimFields     = jsonFieldNames(reflect.TypeOf(WorkClaim{}))
 	hostReportFields    = jsonFieldNames(reflect.TypeOf(HostReport{}))
 	toolReportFields    = jsonFieldNames(reflect.TypeOf(ToolReport{}))
 )
+
+// UnmarshalJSON decodes an interactive work claim and preserves fields written
+// by a newer binary. State recognises the surrounding map, so the record needs
+// its own tolerant carrier just like dispatch and repository settings do.
+func (c *WorkClaim) UnmarshalJSON(raw []byte) error {
+	type plain WorkClaim
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, workClaimFields)
+	if err != nil {
+		return err
+	}
+	*c = WorkClaim(decoded)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a work claim with unknown members intact.
+func (c WorkClaim) MarshalJSON() ([]byte, error) {
+	type plain WorkClaim
+	return mergeUnknown(plain(c), c.unknown)
+}
 
 // UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
 func (s *FireSlot) UnmarshalJSON(raw []byte) error {

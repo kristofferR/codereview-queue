@@ -62,6 +62,11 @@ idempotent, and it advances the queue by one step as a side effect, so a PR in a
 autoreview fleet still progresses. There is no long-lived process to keep alive: if the harness kills
 the agent mid-loop, the next `crq next` returns the correct action from persisted state.
 
+Before reading feedback, interactive `next`, `wait`, and `loop` calls take a two-hour renewable work
+claim on the PR. Autofix checks the same state in the CAS that grants a fix session, so it cannot
+duplicate work the interactive caller has already taken. `done` and `blocked` release it. If you
+abandon the loop sooner, run `crq unclaim [OWNER/REPO PR_NUMBER]`; otherwise it expires on its own.
+
 ## Waiting
 
 On `wait` or `hold` there is nothing to do yet. Do not sleep, poll, or guess a delay — hand the
@@ -75,9 +80,12 @@ It blocks until there IS something to do (`fix`, `push`, `done`, `blocked`), the
 JSON and exits 0. Run it as your harness's background task: its **exit is the wake event**, so you
 burn no tokens idling.
 
-It owns nothing — no round, no state, no writes — so being killed costs only the process. If that
-happens, run it again or call `crq next`; the answer comes from persisted state either way. While
-idle it watches the shared state ref with a conditional request that costs no rate-limit quota.
+It owns no review round. It renews only the interactive work claim described above, so being killed
+cannot wedge review state; the claim expires after two hours. Run it again or call `crq next` to
+renew and continue. While idle it watches the shared state ref with an authenticated conditional
+request. When GitHub answers that ETag check with 304 Not Modified, it does not count against the
+primary REST rate limit. If no review round or live autoreview leader is progressing the PR, `wait`
+advances the queue itself and may request a review rather than wait forever.
 
 `crq next --wait` is the same thing inline, for a human at a terminal.
 
@@ -253,6 +261,12 @@ queue. While a session holds a PR its round leaves the fire queue (and no second
 for that PR, even after its own push supersedes the round): the review would be of a head about to
 move. `--once` exits non-zero if any PR or repository could not be checked, so cron cannot mistake a
 partial scan for a clean one; a daemon pass logs the failure and carries on to the rest of the fleet.
+
+That dispatch claim is mutually exclusive with the interactive work claim. If an agent has already
+called `next`, `wait`, or `loop`, autofix skips the PR. If autofix won first, the interactive caller
+receives a conflict or wait action from plain `crq next`; commands that explicitly wait block instead
+of editing concurrently. Claim creation fails closed when a recently active autofix host runs an
+older binary that does not understand work claims; upgrade that daemon first.
 
 A PR whose head branch lives in a FORK is reviewed like any other but not dispatched: the session
 would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set
@@ -438,10 +452,11 @@ re-emitted. Unresolved cross-commit threads remain visible.
 Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
 network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
 
-Keeping a loop alive is not your problem. `crq next` returns immediately, and `crq wait` owns
-nothing, so neither leaves anything for a harness to orphan: if either is killed, run it again and
-the answer comes from persisted state. Never substitute a `crq status` polling loop, a `gh api`
-poll, a timer, or a guessed review latency for `crq wait`.
+Keeping a loop alive is not your problem. `crq next` returns immediately, and `crq wait` owns no
+review round, so neither leaves queue state for a harness to orphan. Their work claim is deliberately
+temporary. If either is killed, run it again and the answer comes from persisted state. Never
+substitute a `crq status` polling loop, a `gh api` poll, a timer, or a guessed review latency for
+`crq wait`.
 
 Agent communication rule: do not relay every stderr progress line or send repeated "still waiting"
 updates. Report a real state change — fired, findings, `push`, convergence, timeout, a

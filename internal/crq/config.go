@@ -103,6 +103,10 @@ type Config struct {
 	// working copy means. Set programmatically by a caller working in a
 	// worktree it made, since that caller is not standing in one.
 	WorkDir string
+	// WorkOwner is the optional stable identity for interactive work claims.
+	// It is parsed with the rest of the configuration so ~/.config/crq/env and
+	// the process environment follow the same precedence.
+	WorkOwner string
 	// FeedbackBotsExplicit records that CRQ_FEEDBACK_BOTS was set. It is the one
 	// list an operator may widen beyond who reviews, so neither LoadConfig's
 	// derivation nor a per-repo override may quietly replace it.
@@ -351,6 +355,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
+		WorkOwner:           strings.TrimSpace(env["CRQ_WORK_OWNER"]),
 		Tidy:                stringEnv(env, "CRQ_TIDY", "0") == "1",
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",

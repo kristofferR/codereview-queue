@@ -2,11 +2,15 @@ package crq
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // leader marks an autoreview daemon as live, which is what tells the waiter
@@ -33,14 +37,14 @@ func (f *replayFixture) writeCount() int {
 	return len(f.gh.posted) + len(f.gh.deleted) + len(f.gh.createdIssues)
 }
 
-// The waiter's whole value is that it can be killed. It must therefore hold no
-// state and write nothing — so a harness that SIGTERMs it between turns leaves
-// the round exactly as it was, and re-running it (or crq next) is correct.
+// The waiter's whole value is that it can be killed. It holds only the bounded
+// interactive claim, so a harness that SIGTERMs it between turns leaves the
+// review round exactly as it was and re-running it (or crq next) is correct.
 //
 // The observed failures were the opposite: killing `crq loop` either re-fired a
 // review on restart, spending account quota, or hit the dedupe and reported a
 // converged round whose findings were never collected.
-func TestWaitOwnsNothingAndWritesNothing(t *testing.T) {
+func TestWaitOwnsNoReviewRoundAndDoesNotMutateIt(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr := "owner/repo", 601
@@ -77,7 +81,7 @@ func TestWaitOwnsNothingAndWritesNothing(t *testing.T) {
 	<-done
 
 	if got := f.writeCount(); got != before {
-		t.Errorf("the wait wrote to GitHub (%d -> %d); it must own nothing", before, got)
+		t.Errorf("the wait wrote review data to GitHub (%d -> %d)", before, got)
 	}
 	after := f.round(repo, pr)
 	if after == nil || after.Phase != roundBefore.Phase || after.Head != roundBefore.Head || after.Seq != roundBefore.Seq {
@@ -87,6 +91,186 @@ func TestWaitOwnsNothingAndWritesNothing(t *testing.T) {
 	// And the killed wait cost nothing: the answer is still there for the asking.
 	f.svc.sleepFn = nil
 	f.wantAction(f.next(repo, pr), engine.ActionWait)
+}
+
+type refAdvancingStore struct {
+	StateStore
+	gh      *fakeGitHub
+	updates int
+}
+
+type throttledLoadStore struct {
+	StateStore
+	err   error
+	loads int
+}
+
+type pullMutatingGitHub struct {
+	GitHubAPI
+	mutateAt int
+	reads    int
+	mutate   func()
+}
+
+func (g *pullMutatingGitHub) GetPull(ctx context.Context, repo string, pr int) (ghapi.Pull, error) {
+	g.reads++
+	if g.reads == g.mutateAt {
+		g.mutate()
+	}
+	return g.GitHubAPI.GetPull(ctx, repo, pr)
+}
+
+func (s *throttledLoadStore) Load(ctx context.Context) (State, Revision, error) {
+	s.loads++
+	if s.loads == 1 {
+		return State{}, Revision{}, s.err
+	}
+	return s.StateStore.Load(ctx)
+}
+
+func TestWaitDoesNotReturnActionableWorkAfterLosingItsClaim(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 600, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.workOwnerFn = func() (string, string) { return "session-a", "mac:feature" }
+	f.svc.dispatchTokenFn = func() string { return "" }
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  1,
+		mutate: func() {
+			f.clk.advance(WorkClaimTTL + time.Minute)
+			f.closePull(repo, pr)
+			if _, err := f.store.Update(f.ctx, func(st *State) error {
+				now := f.clk.now()
+				st.SetWorkClaim(repo, pr, WorkClaim{
+					Owner: "session-b", By: "linux:other", ClaimedAt: now,
+					ExpiresAt: now.Add(WorkClaimTTL),
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	ctx, cancel := context.WithCancel(f.ctx)
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+
+	report, err := f.svc.WaitForAction(ctx, repo, pr)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want cancellation after resuming the wait", err)
+	}
+	if report.Action != string(engine.ActionWait) || !strings.Contains(report.Reason, "linux:other") {
+		t.Fatalf("report after lost claim = %+v, want wait for the new owner", report)
+	}
+}
+
+func (s *refAdvancingStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	st, err := s.StateStore.Update(ctx, mutate)
+	if err == nil {
+		s.updates++
+		// Two moving refs are enough to expose self-wake loops without allowing a
+		// regressed test to spin forever.
+		if s.updates <= 2 {
+			s.gh.setStateRef(fmt.Sprintf("ref%d", s.updates))
+		}
+	}
+	return st, err
+}
+
+func TestWaitSamplesStateRefAfterRenewingItsClaim(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 605, "dddddddd1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.next(repo, pr)
+	f.leader(f.clk.now().Add(time.Hour))
+
+	f.gh.setStateRef("ref0")
+	tracking := &refAdvancingStore{StateStore: f.store, gh: f.gh}
+	f.svc.store = tracking
+	ctx, cancel := context.WithCancel(f.ctx)
+	slept := false
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		slept = true
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.WaitForAction(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop the waiter")
+	}
+	if !slept {
+		t.Fatal("unchanged waiting state never reached the idle sleep")
+	}
+	if tracking.updates != 1 {
+		t.Fatalf("wait renewed its claim %d times before idling, want 1", tracking.updates)
+	}
+}
+
+func TestWaitRenewsClaimBeforeLongStateWatch(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 606, "eeeeeeeee1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.svc.cfg.FeedbackWaitTimeout = 6 * time.Hour
+	f.svc.cfg.LeaderTTL = 3 * time.Hour
+	f.svc.cfg.PollInterval = 3 * time.Hour
+	f.next(repo, pr)
+	f.leader(f.clk.now().Add(3 * time.Hour))
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.WaitForAction(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop the waiter")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
+	}
+}
+
+func TestWaitRenewsClaimBeforeLongThrottleDelay(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	throttled := &throttledLoadStore{
+		StateStore: f.store,
+		err: &ghapi.RateLimitError{
+			Kind: "primary", Until: time.Now().Add(2 * workClaimRenewalInterval),
+		},
+	}
+	f.svc.store = throttled
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
+		cancel()
+		return context.Canceled
+	}
+
+	if _, err := f.svc.WaitForAction(ctx, "owner/repo", 607); err == nil {
+		t.Fatal("expected cancellation to stop the waiter")
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
+	}
 }
 
 // The waiter returns the moment there is something to act on, and returns the
@@ -144,6 +328,33 @@ func TestWaitReturnsOnConvergence(t *testing.T) {
 	}
 	if report.Action != string(engine.ActionDone) {
 		t.Fatalf("action = %q (%s), want %q", report.Action, report.Reason, engine.ActionDone)
+	}
+}
+
+func TestWaitReturnsActionableResultFromNestedDrive(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/outside-the-fleet", 704, "ffffffff1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  2,
+		mutate:    func() { f.closePull(repo, pr) },
+	}
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		t.Fatal("waiter slept after its nested drive produced an actionable result")
+		return nil
+	}
+
+	report, err := f.svc.WaitForAction(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if report.Action != string(engine.ActionBlocked) {
+		t.Fatalf("action = %q (%s), want %q", report.Action, report.Reason, engine.ActionBlocked)
 	}
 }
 
@@ -229,6 +440,7 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Minute))
 	f.setLocalWork(false, "")
+	f.svc.cfg.PollInterval = 3 * time.Hour
 
 	// A daemon holds the lease, but has never heard of this PR.
 	f.leader(f.clk.now().Add(time.Hour))
@@ -239,7 +451,9 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	// Idle exactly once so the test cannot hang if the fix regresses.
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
-	f.svc.sleepFn = func(context.Context, time.Duration) error {
+	var slept time.Duration
+	f.svc.sleepFn = func(_ context.Context, d time.Duration) error {
+		slept = d
 		cancel()
 		return context.Canceled
 	}
@@ -250,6 +464,9 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 1 {
 		t.Errorf("the untracked head must get its review requested, posted %d", got)
+	}
+	if slept != workClaimRenewalInterval {
+		t.Fatalf("slept %s, want claim renewal after %s", slept, workClaimRenewalInterval)
 	}
 }
 
@@ -285,5 +502,41 @@ func TestWaitParksAnAdministrativelyHeldPR(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 0 {
 		t.Fatalf("held waiter posted %d reviews", got)
+	}
+}
+
+func TestWaitDryRunDoesNotClaimThePR(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 703, "cccccccc1"
+	f.openPull(repo, pr, head)
+	f.closePull(repo, pr)
+	f.setCommitDate(head, base.Add(-time.Minute))
+
+	cfg := f.cfg
+	cfg.DryRun = true
+	dry := NewService(cfg, f.gh, f.store, nil)
+	dry.now = f.clk.now
+	dry.localWorkFn = func(context.Context, string) (bool, string) { return false, "" }
+	before, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := dry.WaitForAction(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionBlocked) {
+		t.Fatalf("action = %q (%s), want blocked", report.Action, report.Reason)
+	}
+	after, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("dry-run wait changed state revision %d -> %d", before.Rev, after.Rev)
+	}
+	if _, ok := after.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatal("dry-run wait persisted an interactive work claim")
 	}
 }

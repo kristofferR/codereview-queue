@@ -43,8 +43,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.json")
 	script := filepath.Join(t.TempDir(), "session.sh")
 	body := "#!/bin/sh\n" +
-		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\"}' " +
-		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" > " + record + "\n"
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" > " + record + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	pool.wait()
 
-	var got struct{ Repo, PR, Head, Cwd, Findings string }
+	var got struct{ Repo, PR, Head, Cwd, Findings, Token string }
 	data, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatalf("the session did not run: %v", err)
@@ -79,6 +79,9 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	if got.Findings == "" {
 		t.Fatal("the session was given no findings file")
+	}
+	if got.Token == "" {
+		t.Fatal("the session was given no dispatch token for its crq next calls")
 	}
 	// OUTSIDE the worktree: at the repository root it is an untracked file, and
 	// a session following the documented `git add -A` push would commit crq's
@@ -108,6 +111,124 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestDispatchHeartbeatLosesToWorkClaimAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)
+	repo, pr, head := "owner/thing", 4, "abcdef123"
+	st := DefaultState(firingConfig())
+	round := Round{Repo: repo, PR: pr, Head: head, Phase: PhaseQueued}
+	if ok, why := round.ClaimDispatch("autofix", "old-token", now, 3); !ok {
+		t.Fatalf("claim dispatch: %s", why)
+	}
+	st.PutRound(round)
+
+	reconnected := now.Add(DispatchTTL + time.Minute)
+	st.SetWorkClaim(repo, pr, WorkClaim{
+		Owner: "interactive", By: "mac:feature", ClaimedAt: reconnected,
+		ExpiresAt: reconnected.Add(WorkClaimTTL),
+	})
+	updated, taken, gone := refreshDispatch(&st, NextReport{
+		Repo: repo, PR: pr, Head: head,
+	}, "old-token", reconnected)
+	if updated || !taken || gone {
+		t.Fatalf("heartbeat = updated %v, taken %v, gone %v; want loss to work claim", updated, taken, gone)
+	}
+	if got := st.Round(repo, pr).Dispatch.Heartbeat; !got.Equal(now) {
+		t.Fatalf("heartbeat restored expired dispatch at %s, want %s", got, now)
+	}
+}
+
+func TestDispatchHeartbeatStopsAtKnownLeaseExpiry(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := make(chan struct{})
+	report := NextReport{
+		Repo: "owner/thing", PR: 4, Head: "abcdef123",
+		dispatchUntil: time.Now().Add(20 * time.Millisecond),
+	}
+	lost := svc.beatDispatch(ctx, report, "old-token", func() {
+		cancel()
+		close(stopped)
+	})
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch continued past its locally known lease expiry")
+	}
+	if !lost() {
+		t.Fatal("expired dispatch was not reported as lost")
+	}
+}
+
+func TestClaimDispatchRefreshesLeaseAfterDelayedUpdate(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	repo, pr, head := "owner/thing", 4, "abcdef123"
+	seedRound(t, baseStore, cfg, repo, pr, head, PhaseQueued, base, 0)
+	store := &delayedWorkClaimStore{StateStore: baseStore}
+	store.afterFirstUpdate = func() { now = base.Add(DispatchTTL + time.Minute) }
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
+
+	ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "dispatch-token", 3)
+	if !ok {
+		t.Fatalf("claim after delayed update failed: %s", why)
+	}
+	st, _, err := baseStore.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Dispatch == nil || !round.Dispatch.Heartbeat.Equal(now) {
+		t.Fatalf("dispatch after delayed update = %#v, want heartbeat %s", round, now)
+	}
+	if round.Dispatch.Attempts != 1 {
+		t.Fatalf("dispatch attempts = %d, want renewal not a second attempt", round.Dispatch.Attempts)
+	}
+	if !report.dispatchUntil.Equal(now.Add(DispatchTTL)) {
+		t.Fatalf("dispatch expiry = %s, want %s", report.dispatchUntil, now.Add(DispatchTTL))
+	}
+}
+
+func TestClaimDispatchRenewsLeaseBeforeFirstHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	base := time.Now().UTC()
+	now := base
+	cfg := firingConfig()
+	baseStore := NewMemoryStore(cfg)
+	repo, pr, head := "owner/thing", 6, "abcdef125"
+	seedRound(t, baseStore, cfg, repo, pr, head, PhaseQueued, base, 0)
+	store := &delayedWorkClaimStore{StateStore: baseStore}
+	store.afterFirstUpdate = func() { now = base.Add(2*DispatchTTL/3 + time.Minute) }
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
+
+	ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "dispatch-token", 3)
+	if !ok {
+		t.Fatalf("claim after delayed update failed: %s", why)
+	}
+	st, _, err := baseStore.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Dispatch == nil || !round.Dispatch.Heartbeat.Equal(now) {
+		t.Fatalf("dispatch after delayed update = %#v, want heartbeat %s", round, now)
+	}
+	if round.Dispatch.Attempts != 1 {
+		t.Fatalf("dispatch attempts = %d, want renewal not a second attempt", round.Dispatch.Attempts)
+	}
+	if !report.dispatchUntil.Equal(now.Add(DispatchTTL)) {
+		t.Fatalf("dispatch expiry = %s, want %s", report.dispatchUntil, now.Add(DispatchTTL))
+	}
 }
 
 func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
@@ -303,7 +424,8 @@ func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	pull.State, pull.Number, pull.Head.SHA = "open", 3, "aaaaaaaa1"
 	gh.pulls[fakeKey("owner/thing", 3)] = pull
 	said := &recordingLogger{}
-	svc := NewService(cfg, gh, NewMemoryStore(cfg), said)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, said)
 
 	var events []WatchEvent
 	err := svc.Watch(context.Background(), WatchOptions{Once: true}, func(e WatchEvent) error {
@@ -323,6 +445,13 @@ func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	}
 	if !said.contains("observing only") {
 		t.Errorf("the watcher did not say it was observing only: %q", said.lines)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report, ok := st.HostReports[cfg.Host]; ok && report.RolesFresh([]string{"autofix"}, time.Now().UTC(), HostReportTTL) {
+		t.Fatal("observation-only watcher reported the autofix role")
 	}
 }
 
@@ -1735,6 +1864,9 @@ func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
 	}
 	if model != "new-model" {
 		t.Fatalf("selected model = %q, want the ranking written immediately before the CAS", model)
+	}
+	if report.dispatchUntil.IsZero() {
+		t.Fatal("dispatch claim did not retain its locally known lease expiry")
 	}
 	svc.releaseDispatch(ctx, report, "first", true)
 

@@ -1997,6 +1997,9 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	if state.WaitingHead("owner/repo", 12) != "" {
 		t.Fatalf("expired feedback wait should clear after timeout")
 	}
+	if _, ok := state.WorkClaim("owner/repo", 12, time.Now().UTC()); ok {
+		t.Fatal("timed-out loop left the interactive work claim behind")
+	}
 }
 
 func TestPumpEveryForNeverPumpsMoreThanOncePerMinute(t *testing.T) {

@@ -2757,6 +2757,9 @@ func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
 	if !st.ContainsActive("o/carrier", 91) {
 		t.Fatal("the coderabbit review must stay owed (round active)")
 	}
+	if _, ok := st.WorkClaim("o/carrier", 91, time.Now().UTC()); ok {
+		t.Fatal("deferred loop left the interactive work claim behind")
+	}
 }
 
 // TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit: during a block the

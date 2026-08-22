@@ -182,7 +182,10 @@ crq next "$REPO" "$PR"   # ✅ tells you the one thing to do next
 answers with a single instruction: `fix` (findings are attached), `hold` (a required reviewer is
 still pending — don't move the head), `push`, `wait` until a time crq computed, `done`, or `blocked`.
 Call it, do what it says, call it again. It is non-blocking and idempotent, so there is no long-lived
-process to babysit.
+process to babysit. It also takes a two-hour renewable work claim on the PR before reading feedback.
+The unattended autofix daemon checks that claim in the same atomic update that starts a fix session,
+so it cannot duplicate work an interactive agent has already taken. `done` and `blocked` release the
+claim; use `crq unclaim` when abandoning a loop early.
 
 `crq loop` is still there as the blocking one-shot form for humans and scripts.
 
@@ -392,6 +395,7 @@ least 10 minutes of silence.
 
 ```bash
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
+crq unclaim [<repo> <pr>] # abandon an interactive loop early and let autofix take over
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
 crq threads <repo> <pr>                                     # every unresolved thread, outdated included
@@ -447,6 +451,11 @@ crq version               # print the version
 crq help [command]        # help, optionally for one command
 ```
 
+`crq preflight` avoids a doomed local review when shared state already records a live CodeRabbit
+account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocked_until`. If shared
+state cannot be read, it falls back to running the local CLI normally. Set
+`CRQ_PREFLIGHT_SKIP_BLOCKED=0` to force the CLI request instead.
+
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
 the exit code. **`crq loop` exit codes:** `0` converged, no
 actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in
@@ -459,6 +468,14 @@ primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons 
 so fleet autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a
 live autoreview daemon that advertises hold support; this keeps an older standby from acquiring the
 fleet lease while the active daemon maintains it.
+
+Interactive `next`, `wait`, and `loop` calls also take a short-lived PR work claim. Autofix dispatch
+checks it in the same compare-and-swap update that grants its own session claim, so whichever path
+starts first owns the fix. Plain `crq next` returns a conflict or wait action to the losing caller;
+commands that explicitly wait block until the claim is available. Interactive claims renew on each
+call, expire after two hours if the caller disappears, and release automatically at `done` or `blocked`. Run `crq
+unclaim [<repo> <pr>]` when intentionally abandoning the loop sooner. Claim creation fails closed if
+a recently active autofix host is too old to honour this guarantee; upgrade that daemon first.
 
 <details>
 <summary>Feedback JSON shape</summary>
@@ -525,6 +542,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_COBOT_<NAME>_CMD` | `@codex review` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
 | `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
 | `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
+| `CRQ_PREFLIGHT_SKIP_BLOCKED` | on | skip local CodeRabbit preflight successfully while shared quota state is blocked; set `0` to force the CLI request |
 | `CRQ_FEEDBACK_BOTS` | required bots + enabled co-reviewers | bots whose findings are surfaced — a superset of required bots, so co-reviewer findings show up without gating convergence on repos where those bots aren't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
@@ -538,6 +556,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_LEADER_TTL` | `3m` | when a crashed `autoreview` leader is considered gone |
 | `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | GitHub rate-limit / 5xx backoff budget per request |
 | `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
+| `CRQ_WORK_OWNER` | session ID, then checkout | optional stable identity for an interactive work claim; normally inferred automatically |
 
 The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
 working: `CRQ_CODEX_CMD` is an alias of `CRQ_COBOT_CODEX_CMD` (the per-bot key wins when both are

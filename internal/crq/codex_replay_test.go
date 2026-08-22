@@ -60,6 +60,7 @@ func newCodexReplayFixture(t *testing.T, base time.Time, mutate func(*Config)) *
 	gh := newFakeGitHub()
 	gh.now = clk.now
 	store := NewMemoryStore(cfg)
+	store.SetClock(clk.now)
 	svc := NewService(cfg, gh, store, nil)
 	svc.now = clk.now
 	return &replayFixture{t: t, ctx: t.Context(), clk: clk, gh: gh, store: store, svc: svc, cfg: cfg, bot: cfg.Bot}

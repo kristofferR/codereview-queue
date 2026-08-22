@@ -21,6 +21,7 @@ type (
 	AccountQuota   = crqstate.AccountQuota
 	LeaderLease    = crqstate.LeaderLease
 	PostedCommand  = crqstate.PostedCommand
+	WorkClaim      = crqstate.WorkClaim
 	RepoReviewers  = crqstate.RepoReviewers
 	RepoEnrollment = crqstate.RepoEnrollment
 	FleetDefaults  = crqstate.FleetDefaults
@@ -50,6 +51,9 @@ const (
 
 	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
 	DispatchTTL = crqstate.DispatchTTL
+	// CapsWorkClaims is the capability an autofix host needs to honour
+	// interactive PR ownership.
+	CapsWorkClaims = crqstate.CapsWorkClaims
 	// AutofixUnhealthyAfter is how many passes may fail to dispatch before crq says so.
 	AutofixUnhealthyAfter = crqstate.AutofixUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
@@ -63,6 +67,9 @@ const (
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
 	// CapsSolver is the capability a host needs to honour solver settings.
 	CapsSolver = crqstate.CapsSolver
+	// CapsPreflightSkipBlocked is the capability a host needs to honour the
+	// shared blocked-preflight policy.
+	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked
 	// WriterCaps is what THIS binary understands, recorded in each host's
 	// self-report so a fleet can see why a host ignores a setting.
 	WriterCaps = crqstate.WriterCaps

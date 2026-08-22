@@ -558,7 +558,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	return report, nil
 }
 
-func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
+func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
 	repo = NormalizeRepo(repo)
 	// Do not spend a new review slot while actionable feedback from an earlier
 	// round is still open. Feedback intentionally carries unresolved threads

@@ -109,6 +109,7 @@ func newReplayFixture(t *testing.T, base time.Time) *replayFixture {
 	gh := newFakeGitHub()
 	gh.now = clk.now
 	store := NewMemoryStore(cfg)
+	store.SetClock(clk.now)
 	svc := NewService(cfg, gh, store, nil)
 	svc.now = clk.now
 	return &replayFixture{t: t, ctx: context.Background(), clk: clk, gh: gh, store: store, svc: svc, cfg: cfg, bot: cfg.Bot}

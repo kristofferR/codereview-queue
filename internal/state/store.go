@@ -346,6 +346,7 @@ type MemoryStore struct {
 	cfg   StoreConfig
 	state State
 	rev   int64
+	now   func() time.Time
 }
 
 func NewMemoryStore(cfg StoreConfig) *MemoryStore {
@@ -356,11 +357,26 @@ func NewMemoryStore(cfg StoreConfig) *MemoryStore {
 	return &MemoryStore{cfg: cfg, state: st}
 }
 
+// SetClock keeps deterministic replay state on the same clock as the service
+// under test. Production memory stores use the wall clock.
+func (m *MemoryStore) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+}
+
+func (m *MemoryStore) clock() time.Time {
+	if m.now != nil {
+		return m.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func (m *MemoryStore) Load(context.Context) (State, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := Clone(m.state)
-	st.Normalize(time.Now().UTC())
+	st.Normalize(m.clock())
 	return st, Revision{CommitSHA: fmt.Sprintf("%d", m.rev)}, nil
 }
 
@@ -368,14 +384,14 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := Clone(m.state)
-	st.Normalize(time.Now().UTC())
+	st.Normalize(m.clock())
 	if err := mutate(&st); err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return st, nil
 		}
 		return State{}, err
 	}
-	now := time.Now().UTC()
+	now := m.clock()
 	st.Rev++
 	st.UpdatedAt = &now
 	st.Normalize(now)

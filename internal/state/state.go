@@ -599,6 +599,12 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// WorkClaims are short-lived PR-level leases held by interactive `crq next`,
+	// `crq wait`, and `crq loop` callers. Autofix dispatch consults them in its
+	// claiming CAS, so an unattended session cannot start work an agent has
+	// already taken. They are independent of the head because one interactive
+	// loop owns the PR across its fix, push, and re-review cycle.
+	WorkClaims map[string]WorkClaim `json:"work_claims,omitempty"`
 	// Fleet is what every repository inherits, recorded once for the whole fleet
 	// rather than in each host's env file. See fleet.go.
 	Fleet FleetDefaults `json:"fleet,omitempty"`
@@ -687,6 +693,17 @@ const CapsFleetDefaults = 4
 // inheritance, so the dashboard must name it before claiming the saved answer
 // applies fleet-wide.
 const CapsSolver = 8
+
+// CapsPreflightSkipBlocked is the capability that makes the shared
+// CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local
+// CLI even when the fleet has recorded an account block, so operators need to
+// see them before relying on the shared skip.
+const CapsPreflightSkipBlocked = 10
+
+// CapsWorkClaims is the capability an autofix watcher needs to honour
+// interactive PR ownership. Claim creation refuses to promise exclusivity
+// while a recently active autofix host predates it.
+const CapsWorkClaims = 9
 
 // CapsDispatchClarification is the capability that makes a head-scoped
 // clarification marker terminal for autofix dispatch. Older watchers preserve
@@ -1502,6 +1519,63 @@ func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	return false
 }
 
+// LiveDispatchUntil reports when the latest live unattended claim for repo#pr
+// expires. A session can move its claim into the archive when it pushes, so
+// callers coordinating work must consider the current round, mirror, and
+// archived rounds together.
+func (s *State) LiveDispatchUntil(repo string, pr int, now time.Time) (time.Time, bool) {
+	var until time.Time
+	consider := func(claim *DispatchClaim) {
+		if claim == nil || !claim.Live(now) {
+			return
+		}
+		expires := claim.Heartbeat.Add(DispatchTTL)
+		if expires.After(until) {
+			until = expires
+		}
+	}
+
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok {
+		consider(&claim)
+	}
+	if round := s.Round(repo, pr); round != nil {
+		consider(round.Dispatch)
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key {
+			consider(round.Dispatch)
+		}
+	}
+	return until, !until.IsZero()
+}
+
+// OwnsLiveDispatch reports whether token is the unattended session currently
+// entitled to work on repo#pr. The claim may be on the current round, its
+// top-level mirror, or an archived round after the session pushed a new head.
+func (s *State) OwnsLiveDispatch(repo string, pr int, token string, now time.Time) bool {
+	if token == "" {
+		return false
+	}
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token && claim.Live(now) {
+		return true
+	}
+	if round := s.Round(repo, pr); round != nil && round.Dispatch != nil &&
+		round.Dispatch.Token == token && round.DispatchHeld(now) {
+		return true
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Dispatch != nil &&
+			round.Dispatch.Token == token && round.DispatchHeld(now) {
+			return true
+		}
+	}
+	return false
+}
+
 // HeartbeatArchivedDispatch refreshes the archived claim owned by token. A
 // successful session archives its own round when its push moves the head, but
 // it still owns the PR until thread resolution and the process both finish.
@@ -2247,6 +2321,15 @@ func (s *State) Normalize(now time.Time) {
 	for key, claim := range s.Dispatches {
 		if !claim.Live(now) {
 			delete(s.Dispatches, key)
+		}
+	}
+	// An interrupted interactive loop must not dead-letter a PR. Unlike a
+	// running dispatch there is no background process to heartbeat while an
+	// agent edits, so the claim carries a generous fixed expiry and is renewed
+	// by next/wait/loop as expiry approaches.
+	for key, claim := range s.WorkClaims {
+		if !claim.Live(now) {
+			delete(s.WorkClaims, key)
 		}
 	}
 	// Fold both hold representations before repairing the slot. The top-level

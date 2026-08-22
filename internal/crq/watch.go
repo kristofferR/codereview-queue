@@ -98,9 +98,6 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		on := true
 		opts.Dispatch = &on
 	}
-	// The watcher's PATH is the one a fix session inherits, so its report is the
-	// one that answers "can this host actually run the agent".
-	s.ReportHost(ctx, "autofix")
 	if *opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
@@ -114,6 +111,12 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		if s.log != nil {
 			s.log.Printf("watch: observing only — no fix command configured (set CRQ_DISPATCH_CMD, or pass one after --)")
 		}
+	}
+	// The watcher's PATH is the one a fix session inherits, so its report is the
+	// one that answers "can this host actually run the agent". Observation-only
+	// watchers must not claim a capability they cannot exercise.
+	if opts.dispatching() {
+		s.ReportHost(ctx, "autofix")
 	}
 	// Fix sessions run OUTSIDE the pass, and by default without a cap.
 	//
@@ -206,7 +209,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		result <-chan dispatchResult
 	}
 	var pending []pendingEvent
-	s.ReportHost(ctx, "autofix")
+	if opts.dispatching() {
+		s.ReportHost(ctx, "autofix")
+	}
 	// One snapshot for the pass. It decides both which repositories are watched
 	// at all and which of them may be fixed, so it is read BEFORE the target
 	// list is built.
@@ -406,10 +411,10 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// review on the code this session is about to replace.
 				report, _, _, err = s.nextFromState(ctx, repo, pull.Number)
 				if err == nil && report.Action != string(engine.ActionFix) {
-					report, err = s.Next(ctx, repo, pull.Number)
+					report, err = s.nextAutomated(ctx, repo, pull.Number)
 				}
 			} else {
-				report, err = s.Next(ctx, repo, pull.Number)
+				report, err = s.nextAutomated(ctx, repo, pull.Number)
 			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
@@ -449,7 +454,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// however, a carried finding from an older head must not suppress
 				// Next forever: Next knows it may enqueue and review the current
 				// head because FindingsOnHead is empty.
-				if _, advanceErr := s.Next(ctx, repo, pull.Number); advanceErr != nil {
+				if _, advanceErr := s.nextAutomated(ctx, repo, pull.Number); advanceErr != nil {
 					if _, throttled := ghapi.ThrottleWait(advanceErr); throttled {
 						return advanceErr
 					}
@@ -808,6 +813,7 @@ func (s *Service) dispatchWithStart(
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
+		"CRQ_DISPATCH_TOKEN="+token,
 		// The agent and prompt come from the unit's environment and are already
 		// in os.Environ(); only the per-repository half is added here.
 		"CRQ_FIX_MODEL="+model,
@@ -1071,7 +1077,7 @@ func (s *Service) claimDispatchModels(
 	var seen string
 	var selectedModel string
 	var selectedFindings []dialect.Finding
-	_, err := s.store.Update(ctx, func(st *State) error {
+	st, err := s.store.Update(ctx, func(st *State) error {
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
 		// claim; a concurrent off or a failed earlier Load must fail closed.
@@ -1090,6 +1096,10 @@ func (s *Service) claimDispatchModels(
 		}
 		if report.Fork && !s.cfgFor(*st, report.Repo).DispatchForks {
 			reason, byDesign = "the head branch is a fork and current solver policy forbids fixing it", true
+			return ErrNoChange
+		}
+		if claim, ok := st.WorkClaim(report.Repo, report.PR, s.clock()); ok {
+			reason, byDesign = "interactive work is claimed by "+claim.By, true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)
@@ -1181,12 +1191,49 @@ func (s *Service) claimDispatchModels(
 			return ErrNoChange
 		}
 		selectedModel = round.Dispatch.Model
+		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
 	})
 	if err != nil {
 		return false, err.Error(), false, ""
+	}
+	if reason == "" {
+		// Update may spend long enough retrying transport or CAS operations after
+		// the mutation commits to leave less than one heartbeat interval on its
+		// lease. Renew before handing it to the session, without spending another
+		// attempt: otherwise beatDispatch's first tick arrives after local expiry.
+		for {
+			now := s.clock()
+			until, live := st.LiveDispatchUntil(report.Repo, report.PR, now)
+			if live && st.OwnsLiveDispatch(report.Repo, report.PR, token, now) &&
+				until.After(now.Add(DispatchTTL/3)) {
+				report.dispatchUntil = until
+				break
+			}
+			var updated, taken, gone bool
+			var refreshedAt time.Time
+			st, err = s.store.Update(ctx, func(st *State) error {
+				updated, taken, gone = false, false, false
+				refreshedAt = s.clock()
+				updated, taken, gone = refreshDispatch(st, *report, token, refreshedAt)
+				if !updated {
+					return ErrNoChange
+				}
+				return nil
+			})
+			if err != nil {
+				return false, err.Error(), false, ""
+			}
+			if taken {
+				return false, "another watcher is already fixing this pull request", true, ""
+			}
+			if gone || !updated {
+				return false, "the committed dispatch claim is no longer owned by this session", true, ""
+			}
+			report.dispatchUntil = refreshedAt.Add(DispatchTTL)
+		}
 	}
 	if reason == "" {
 		// The session receives exactly the finding set selected by the same
@@ -1343,7 +1390,18 @@ func readLogTail(path string, limit int64) []byte {
 // over, so stop() ends this session rather than let two write one worktree.
 func (s *Service) beatDispatch(ctx context.Context, report NextReport, token string, stop func()) func() bool {
 	var lost atomic.Bool
+	markLost := func() {
+		if lost.CompareAndSwap(false, true) {
+			stop()
+		}
+	}
+	leaseUntil := report.dispatchUntil
+	if leaseUntil.IsZero() {
+		leaseUntil = s.clock().Add(DispatchTTL)
+	}
+	expiry := time.AfterFunc(max(leaseUntil.Sub(s.clock()), 0), markLost)
 	go func() {
+		defer expiry.Stop()
 		ticker := time.NewTicker(DispatchTTL / 3)
 		defer ticker.Stop()
 		for {
@@ -1351,51 +1409,28 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				var taken, gone bool
+				var updated, taken, gone bool
+				var refreshedAt time.Time
 				if _, err := s.store.Update(ctx, func(st *State) error {
 					// Reset per ATTEMPT, not per tick: Update re-runs this
 					// closure on a CAS conflict, and a verdict left over from
 					// an attempt that lost would be read as this one's.
-					taken, gone = false, false
-					round := st.Round(report.Repo, report.PR)
-					// A round for ANOTHER head is not this round: superseding is
-					// what this session's own push does, and the fresh round's
-					// claim belongs to whoever takes the new head — reading it as
-					// a theft would kill this session between pushing and
-					// resolving, every time it succeeded.
-					if round == nil || round.Head != report.Head {
-						ok, byOther := st.HeartbeatArchivedDispatch(
-							report.Repo, report.PR, token, s.clock())
-						taken = byOther
-						if !ok {
-							// A current live claim for the replacement head is also
-							// proof that this session no longer owns the PR.
-							if round != nil && round.DispatchHeld(s.clock()) {
-								taken = true
-							}
-							gone = !taken
-							return ErrNoChange
-						}
-						return nil
-					}
-					ok, byOther := round.HeartbeatDispatch(token, s.clock())
-					taken = byOther
-					if !ok {
+					updated, taken, gone = false, false, false
+					refreshedAt = s.clock()
+					updated, taken, gone = refreshDispatch(st, report, token, refreshedAt)
+					if !updated {
 						return ErrNoChange
 					}
-					st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
-					st.PutRound(*round)
 					return nil
 				}); err != nil && !errors.Is(err, ErrNoChange) {
-					// A failed write is not proof of anything; the next tick
-					// decides.
+					// The local expiry timer stops the session if writes remain
+					// unavailable for the rest of this lease.
 					continue
 				}
 				if taken {
 					// Somebody else is running a session for this round. Two in
 					// one worktree is worse than none.
-					lost.Store(true)
-					stop()
+					markLost()
 					return
 				}
 				// The token is nowhere in current or archived state. There is
@@ -1403,10 +1438,51 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 				if gone {
 					return
 				}
+				if updated {
+					leaseUntil = refreshedAt.Add(DispatchTTL)
+					expiry.Reset(max(leaseUntil.Sub(s.clock()), 0))
+				}
 			}
 		}
 	}()
 	return lost.Load
+}
+
+func refreshDispatch(st *State, report NextReport, token string, now time.Time) (updated, taken, gone bool) {
+	// An expired unattended claim may have been replaced by an interactive
+	// work claim while this watcher could not write. The work claim won that
+	// CAS race, so the old token must not restore itself when connectivity
+	// returns.
+	if _, ok := st.WorkClaim(report.Repo, report.PR, now); ok {
+		return false, true, false
+	}
+
+	round := st.Round(report.Repo, report.PR)
+	// A round for ANOTHER head is not this round: superseding is what this
+	// session's own push does, and the fresh round's claim belongs to whoever
+	// takes the new head. Reading its absence as theft would kill this session
+	// between pushing and resolving every time it succeeded.
+	if round == nil || round.Head != report.Head {
+		ok, byOther := st.HeartbeatArchivedDispatch(report.Repo, report.PR, token, now)
+		taken = byOther
+		if !ok {
+			// A current live claim for the replacement head is also proof that
+			// this session no longer owns the PR.
+			if round != nil && round.DispatchHeld(now) {
+				taken = true
+			}
+			gone = !taken
+		}
+		return ok, taken, gone
+	}
+	ok, byOther := round.HeartbeatDispatch(token, now)
+	taken = byOther
+	if !ok {
+		return false, taken, false
+	}
+	st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
+	st.PutRound(*round)
+	return true, false, false
 }
 
 func openPullQuery() url.Values {

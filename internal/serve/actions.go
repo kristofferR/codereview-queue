@@ -18,8 +18,8 @@ import (
 // of a CLI verb and goes through the same Service method, so the dashboard can
 // never become a second way to change state with different rules.
 type Actor interface {
-	Hold(ctx context.Context, repo string, pr int, reason string) error
-	Unhold(ctx context.Context, repo string, pr int) error
+	Hold(ctx context.Context, repo string, pr int, reason string) (warning string, err error)
+	Unhold(ctx context.Context, repo string, pr int) (warning string, err error)
 	Prioritize(ctx context.Context, repo string, pr int) error
 	Cancel(ctx context.Context, repo string, pr int) error
 	SetAutofix(ctx context.Context, repo string, enabled bool, reason string) error
@@ -148,7 +148,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	var err error
+	var (
+		err     error
+		warning string
+	)
 	switch action {
 	case "hold":
 		// The reason is the record: every screen that shows a hold shows why,
@@ -157,9 +160,15 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a reason is required"})
 			return
 		}
-		err = s.needPR(req, func() error { return s.actor.Hold(ctx, req.Repo, req.PR, req.Reason) })
+		err = s.needPR(req, func() error {
+			warning, err = s.actor.Hold(ctx, req.Repo, req.PR, req.Reason)
+			return err
+		})
 	case "unhold":
-		err = s.needPR(req, func() error { return s.actor.Unhold(ctx, req.Repo, req.PR) })
+		err = s.needPR(req, func() error {
+			warning, err = s.actor.Unhold(ctx, req.Repo, req.PR)
+			return err
+		})
 	case "prioritize":
 		err = s.needPR(req, func() error { return s.actor.Prioritize(ctx, req.Repo, req.PR) })
 	case "cancel":
@@ -318,7 +327,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	// Re-read immediately rather than waiting for the next poll: the person who
 	// clicked is watching, and a stale answer reads as a failed click.
-	s.writeActionSnapshot(w, ctx, "")
+	s.writeActionSnapshot(w, ctx, warning)
 }
 
 // writeImpact owns the common preview contract: a preview returns only the

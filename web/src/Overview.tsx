@@ -64,14 +64,17 @@ export function OverviewPage({
   // Which repository's quick settings are open, if any.
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
+  const [warning, setWarning] = useState<string | null>(null);
   const [prioritizingKey, setPrioritizingKey] = useState<string | null>(null);
   const { run: runPrioritize, running: prioritizing, error: prioritizeError } = useOperation();
 
   const run = (reason: string) => {
     if (!pending) return;
+    setWarning(null);
     runOperation(act(pending.kind, { repo: pending.repo, pr: pending.pr, reason }), {
-      onSuccess: ({ snapshot }) => {
+      onSuccess: ({ snapshot, warning: nextWarning }) => {
         onSnapshot?.(snapshot);
+        setWarning(nextWarning ?? null);
         setPending(null);
       },
     });
@@ -148,6 +151,14 @@ export function OverviewPage({
           className="mb-3.5 rounded-[10px] border border-bad-edge bg-bad-bg px-4 py-2.5 text-[13px] text-bad"
         >
           Could not prioritize the pull request: {prioritizeError}
+        </div>
+      )}
+      {warning && (
+        <div
+          role="status"
+          className="mb-3.5 rounded-[10px] border border-warn-edge bg-warn-bg px-4 py-2.5 text-[13px] text-warn"
+        >
+          {warning}
         </div>
       )}
 

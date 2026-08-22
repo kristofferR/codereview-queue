@@ -219,16 +219,20 @@ function HeldHere({
   const [pr, setPr] = useState("");
   const [reason, setReason] = useState("");
   const { run: runOperation, running: busy, error } = useOperation();
+  const [warning, setWarning] = useState<string | null>(null);
 
-  const run = (kind: "hold" | "unhold", num: number, why = "") =>
+  const run = (kind: "hold" | "unhold", num: number, why = "") => {
+    setWarning(null);
     runOperation(act(kind, { repo, pr: num, reason: why }), {
-      onSuccess: ({ snapshot }) => {
+      onSuccess: ({ snapshot, warning: nextWarning }) => {
         onSnapshot?.(snapshot);
+        setWarning(nextWarning ?? null);
         setAdding(false);
         setPr("");
         setReason("");
       },
     });
+  };
 
   return (
     <Card
@@ -272,6 +276,14 @@ function HeldHere({
         {error && (
           <div className="mt-2.5 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
             {error}
+          </div>
+        )}
+        {warning && (
+          <div
+            role="status"
+            className="mt-2.5 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn"
+          >
+            {warning}
           </div>
         )}
 

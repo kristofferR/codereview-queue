@@ -460,14 +460,16 @@ state cannot be read, it falls back to running the local CLI normally. Set
 the exit code. **`crq loop` exit codes:** `0` converged, no
 actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in
 `.findings[]`, `2` timed out waiting for feedback. A hold is never `2`: that code means the wait
-elapsed and is worth retrying, and a hold ends only when somebody lifts it. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
+elapsed and is worth retrying. A hold ends when somebody lifts it or GitHub reports the pull request
+as merged. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
 
-Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both
-primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons the current round,
-so fleet autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a
-live autoreview daemon that advertises hold support; this keeps an older standby from acquiring the
-fleet lease while the active daemon maintains it.
+Use `crq hold` for an administrative pause: the hold survives autoreview passes, posts the reason on
+the pull request, and prevents both primary and co-reviewer triggers until `crq unhold`. Merging the
+pull request removes the hold automatically. `crq cancel` only abandons the current round, so fleet
+autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a live
+autoreview daemon that advertises hold support; this keeps an older standby from acquiring the fleet
+lease while the active daemon maintains it.
 
 Interactive `next`, `wait`, and `loop` calls also take a short-lived PR work claim. Autofix dispatch
 checks it in the same compare-and-swap update that grants its own session claim, so whichever path

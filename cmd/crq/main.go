@@ -1472,7 +1472,9 @@ already looks, so there is no window between the halves.
 
 A hold does not cancel a review already in flight — that one is bought, and its
 findings are still worth having. It stops the next one. The reason is required:
-it is the note to whoever finds the PR stopped. A live autoreview daemon that
+it is posted on the pull request and shown wherever crq reports the hold. Merged
+pull requests are removed from the held list automatically; merely closed pull
+requests stay held in case they are reopened. A live autoreview daemon that
 advertises hold support is required, so its lease keeps an older standby out.
 `)
 	case "tidy":
@@ -2573,14 +2575,14 @@ func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Obs
 // Service method the command line does, so the two cannot drift apart.
 type prActor struct{ svc *crq.Service }
 
-func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) error {
-	_, err := a.svc.Hold(ctx, repo, pr, reason)
-	return err
+func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) (string, error) {
+	result, err := a.svc.Hold(ctx, repo, pr, reason)
+	return result.Warning, err
 }
 
-func (a prActor) Unhold(ctx context.Context, repo string, pr int) error {
-	_, err := a.svc.Unhold(ctx, repo, pr)
-	return err
+func (a prActor) Unhold(ctx context.Context, repo string, pr int) (string, error) {
+	result, err := a.svc.Unhold(ctx, repo, pr)
+	return result.Warning, err
 }
 
 func (a prActor) Prioritize(ctx context.Context, repo string, pr int) error {

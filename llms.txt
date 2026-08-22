@@ -161,8 +161,8 @@ Exit codes (`crq loop` only — `crq next` always exits 0 and answers in `.actio
   CodeRabbit rate-limit window, so fix, push, and loop again (each Codex round takes minutes;
   several fit inside one CodeRabbit window).
 - `2`: timed out waiting for feedback; do not push a stale-feedback round. A HELD pull request is
-  not this — it exits `0` with `.status: "held"`, because a hold ends only when somebody lifts it
-  and retrying on `2` would spin for ever.
+  not this — it exits `0` with `.status: "held"`, because a hold waits for somebody to lift it or
+  for GitHub to report the pull request as merged. Retrying on `2` would spin for ever.
 
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
@@ -281,6 +281,8 @@ crq hold                      # list
 ```
 
 A live autoreview daemon that advertises hold support is required when creating a hold.
+Creating a hold posts its reason on the pull request. A merged pull request's hold is removed
+automatically; a merely closed pull request keeps it in case it is reopened.
 
 With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
 rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:

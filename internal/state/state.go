@@ -561,6 +561,10 @@ type State struct {
 	// between the two a daemon fired anyway. A hold is one fact, in the state
 	// every firing path already reads.
 	Holds map[string]Hold `json:"holds,omitempty"`
+	// HoldTokens identify the specific hold operation that owns its PR notice.
+	// Keeping these at the state top level lets older tolerant writers preserve
+	// them while a newer process is still posting that notice.
+	HoldTokens map[string]string `json:"hold_tokens,omitempty"`
 	// Writers records which hosts have written this state and what they can do,
 	// so a feature that only SOME binaries understand can say so instead of
 	// pretending agreement. Sharing a ref stops an old binary erasing a new
@@ -1966,10 +1970,26 @@ type Hold struct {
 
 // Hold marks repo#pr as not to be reviewed, replacing any earlier hold.
 func (s *State) Hold(repo string, pr int, reason, by string, now time.Time) {
+	s.HoldWithToken(repo, pr, reason, by, now, "")
+}
+
+// HoldWithToken records a hold and the operation that created it. A caller
+// posting a notice can use the token to tell whether that notice was superseded
+// while GitHub was processing it.
+func (s *State) HoldWithToken(repo string, pr int, reason, by string, now time.Time, token string) {
 	if s.Holds == nil {
 		s.Holds = map[string]Hold{}
 	}
-	s.Holds[holdKey(repo, pr)] = Hold{Reason: reason, By: by, At: now.UTC()}
+	key := holdKey(repo, pr)
+	s.Holds[key] = Hold{Reason: reason, By: by, At: now.UTC()}
+	if token == "" {
+		delete(s.HoldTokens, key)
+		return
+	}
+	if s.HoldTokens == nil {
+		s.HoldTokens = map[string]string{}
+	}
+	s.HoldTokens[key] = token
 }
 
 // Unhold releases a hold, reporting whether one was there.
@@ -1979,6 +1999,7 @@ func (s *State) Unhold(repo string, pr int) bool {
 		return false
 	}
 	delete(s.Holds, key)
+	delete(s.HoldTokens, key)
 	return true
 }
 
@@ -1986,6 +2007,12 @@ func (s *State) Unhold(repo string, pr int) bool {
 func (s *State) HeldPR(repo string, pr int) (Hold, bool) {
 	h, ok := s.Holds[holdKey(repo, pr)]
 	return h, ok
+}
+
+// HoldToken reports the operation that created the current hold, if it was
+// created by a token-aware writer.
+func (s *State) HoldToken(repo string, pr int) string {
+	return s.HoldTokens[holdKey(repo, pr)]
 }
 
 func (s *State) isHeld(r Round) bool {

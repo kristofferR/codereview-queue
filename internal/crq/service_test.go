@@ -22,6 +22,7 @@ type fakeGitHub struct {
 	pulls           map[string]ghapi.Pull
 	pullReads       map[string]int
 	pullErrOnRead   map[string]int
+	pullErrs        map[string]error
 	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
 	reviews         map[string][]ghapi.Review
@@ -39,10 +40,12 @@ type fakeGitHub struct {
 	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
+	deleteCalls     []int64
 	commentID       int64
 	createdIssues   []int
 	nextIssueNumber int
 	postErrs        map[string]error
+	postHook        func()
 	graphQL         func(query string, vars map[string]any, out any) error
 	// stateRef is the SHA GetRef reports; tests that exercise `crq wait` move it
 	// to signal "the queue advanced".
@@ -104,6 +107,7 @@ func newFakeGitHub() *fakeGitHub {
 		pulls:           map[string]ghapi.Pull{},
 		pullReads:       map[string]int{},
 		pullErrOnRead:   map[string]int{},
+		pullErrs:        map[string]error{},
 		commits:         map[string]ghapi.Commit{},
 		commitErrs:      map[string]error{},
 		reviews:         map[string][]ghapi.Review{},
@@ -169,6 +173,9 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull
 	f.pullReads[key]++
 	if f.pullErrOnRead[key] == f.pullReads[key] {
 		return ghapi.Pull{}, errors.New("injected pull read failure")
+	}
+	if err := f.pullErrs[key]; err != nil {
+		return ghapi.Pull{}, err
 	}
 	pull, ok := f.pulls[key]
 	if !ok {
@@ -248,11 +255,12 @@ func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64)
 
 func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (ghapi.IssueComment, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
+		f.mu.Unlock()
 		return ghapi.IssueComment{}, err
 	}
 	if err := f.postBodyErrs[body]; err != nil {
+		f.mu.Unlock()
 		return ghapi.IssueComment{}, err
 	}
 	f.commentID++
@@ -260,6 +268,12 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	now := f.clock()
 	comment := ghapi.IssueComment{ID: f.commentID, Body: body, CreatedAt: now, UpdatedAt: now}
 	comment.User.Login = "kristofferR"
+	hook := f.postHook
+	f.postHook = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return comment, nil
 }
 
@@ -292,6 +306,7 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleteCalls = append(f.deleteCalls, id)
 	if err := f.deleteErrs[id]; err != nil {
 		return err
 	}
@@ -562,6 +577,62 @@ func (s retryNoChangeStore) Update(_ context.Context, mutate func(*State) error)
 }
 
 func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
+
+// retryMergedHoldStore simulates a CAS retry where the original hold is
+// replaced between mutation attempts.
+type retryMergedHoldStore struct {
+	cfg Config
+	at  time.Time
+}
+
+func (retryMergedHoldStore) Load(context.Context) (State, Revision, error) {
+	return DefaultState(Config{}), Revision{}, nil
+}
+
+func (s retryMergedHoldStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(s.cfg)
+	first.HoldWithToken("owner/repo", 12, "original hold", "operator", s.at, "first")
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(s.cfg)
+	second.HoldWithToken("owner/repo", 12, "original hold", "operator", s.at, "replacement")
+	if err := mutate(&second); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return second, nil
+		}
+		return State{}, err
+	}
+	return second, nil
+}
+
+func (retryMergedHoldStore) SyncDashboard(context.Context, State) error { return nil }
+
+// retryUnholdStore simulates another caller releasing a hold after this caller
+// successfully mutated a stale state snapshot.
+type retryUnholdStore struct{ cfg Config }
+
+func (retryUnholdStore) Load(context.Context) (State, Revision, error) {
+	return DefaultState(Config{}), Revision{}, nil
+}
+
+func (s retryUnholdStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(s.cfg)
+	first.Hold("owner/repo", 12, "original hold", "operator", time.Now().UTC())
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(s.cfg)
+	if err := mutate(&second); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return second, nil
+		}
+		return State{}, err
+	}
+	return second, nil
+}
+
+func (retryUnholdStore) SyncDashboard(context.Context, State) error { return nil }
 
 // adoptionRaceStore loads a queued round with an adoptable command, but every
 // Update simulates another worker already holding the fire slot.
@@ -1843,6 +1914,19 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	}
 }
 
+func TestUnholdDoesNotPostNoticeAfterCASRetry(t *testing.T) {
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, retryUnholdStore{cfg: cfg}, nil)
+
+	if _, err := svc.Unhold(context.Background(), "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("posted comments = %v, want none after losing the unhold race", gh.posted)
+	}
+}
+
 func TestWaitReenqueuesAfterClearingStaleRound(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Add(-time.Minute)
@@ -1961,7 +2045,8 @@ func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Code 0, not 2: 2 is frozen as the elapsed-wait result, and a hold ends
-	// only when a person lifts it. The status is what names the outcome.
+	// only when a person lifts it or the daemon observes a merge. The status is
+	// what names the outcome.
 	if code != 0 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
 		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
 	}
@@ -2324,7 +2409,7 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 }
 
-func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
+func TestPumpDropsMergedPRWhileHeld(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
@@ -2345,8 +2430,8 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
-		t.Fatalf("expected held closed PR cleanup, got %#v", pumped)
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("expected merged hold cleanup, got %#v", pumped)
 	}
 	if containsActiveRound(store, t, "owner/repo", 12) {
 		t.Fatal("closed PR should not remain active merely because it is held")
@@ -2354,6 +2439,12 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); held {
+		t.Fatal("merged PR remained in the held list")
+	}
+	if len(gh.posted) != 1 || !strings.Contains(gh.posted[0], "<!-- crq:hold-merged -->") {
+		t.Fatalf("posted comments = %v, want merged-hold notice", gh.posted)
 	}
 	found := false
 	for _, archived := range st.Archive {
@@ -2367,7 +2458,75 @@ func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
 	}
 }
 
-func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
+func TestSweepMergedHoldDoesNotRetireAReplacementHoldAfterCASRetry(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	now := time.Now().UTC()
+	svc := NewService(cfg, gh, retryMergedHoldStore{cfg: cfg, at: now}, nil)
+	st := DefaultState(cfg)
+	st.HoldWithToken("owner/repo", 12, "original hold", "operator", now, "first")
+
+	_, result, changed, err := svc.sweepMergedHold(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || result.Action != "lost_race" {
+		t.Fatalf("result = %#v, changed = %t; want lost race", result, changed)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("posted comments = %v, want none for replacement hold", gh.posted)
+	}
+}
+
+func TestSweepMergedHoldRemovesRetirementNoticeIfReheldBeforePostCompletes(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	gh.postHook = func() {
+		if _, err := svc.Hold(ctx, "owner/repo", 12, "waiting for security approval"); err != nil {
+			t.Errorf("re-hold during retirement post: %v", err)
+		}
+	}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, changed, err := svc.sweepMergedHold(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || result.Action != "skipped" {
+		t.Fatalf("result = %#v, changed = %t; want merged hold retired", result, changed)
+	}
+	if len(gh.deleteCalls) != 1 || gh.deleteCalls[0] != 1 {
+		t.Fatalf("delete calls = %v, want the stale retirement notice", gh.deleteCalls)
+	}
+	latest, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, held := latest.HeldPR("owner/repo", 12)
+	if !held || hold.Reason != "waiting for security approval" {
+		t.Fatalf("replacement hold = %+v, held = %t", hold, held)
+	}
+}
+
+func TestDryRunReportsMergedHeldPRWithoutMutatingState(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.DryRun = true
@@ -2388,8 +2547,8 @@ func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
-		t.Fatalf("dry-run should report held closed PR cleanup, got %#v", pumped)
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("dry-run should report merged hold cleanup, got %#v", pumped)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -2397,6 +2556,166 @@ func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
 	}
 	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseQueued {
 		t.Fatalf("dry-run mutated held round: %#v", round)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("dry-run removed the hold")
+	}
+}
+
+func TestPumpRemovesMergedHoldWithoutARound(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 62, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr merged" {
+		t.Fatalf("merged standalone hold cleanup = %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 62); held {
+		t.Fatal("merged PR's standalone hold was not removed")
+	}
+}
+
+func TestPumpContinuesAfterMergedHoldCleanup(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/merged", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	ready := ghapi.Pull{State: "open"}
+	ready.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/ready", 63)] = ready
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/merged", 62, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, "owner/ready", 63, "abcdef123", PhaseQueued, now, 0)
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Repo != "owner/ready" || pumped.PR != 63 {
+		t.Fatalf("pump = %#v, want the ready PR to fire", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/merged", 62); held {
+		t.Fatal("merged hold remained after pump")
+	}
+}
+
+func TestDryRunPumpContinuesAfterMergedHoldCleanup(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/merged", 62)] = ghapi.Pull{State: "closed", Merged: true}
+	ready := ghapi.Pull{State: "open"}
+	ready.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/ready", 63)] = ready
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/merged", 62, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, "owner/ready", 63, "abcdef123", PhaseQueued, now, 0)
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "dry_run" || pumped.Repo != "owner/ready" || pumped.PR != 63 {
+		t.Fatalf("pump = %#v, want the ready PR's dry-run decision", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/merged", 62); !held {
+		t.Fatal("dry run removed the merged hold")
+	}
+}
+
+func TestPumpKeepsClosedUnmergedPRHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed"}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "may be reopened", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "idle" {
+		t.Fatalf("closed unmerged hold changed pump result: %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("closed unmerged PR lost the hold needed if it is reopened")
+	}
+}
+
+func TestMergedHoldSweepPropagatesGitHubThrottle(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey("owner/repo", 12)] = &ghapi.RateLimitError{Kind: "primary"}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Pump(ctx); !ghapi.IsThrottled(err) {
+		t.Fatalf("Pump error = %v, want GitHub throttle for daemon backoff", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("owner/repo", 12); !held {
+		t.Fatal("failed merged-state read removed the hold")
 	}
 }
 

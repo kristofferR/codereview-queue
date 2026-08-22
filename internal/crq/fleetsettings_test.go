@@ -107,6 +107,7 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 	settings := (&Service{cfg: cfg}).EnvSettings(State{})
 	foundCalibration := false
 	foundDegrade := false
+	foundPreflightSkip := false
 	for _, setting := range settings {
 		if setting.Key == "CRQ_CALIBRATE_TTL" {
 			foundCalibration = true
@@ -114,12 +115,17 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 				t.Fatalf("calibration setting = %+v, want the effective default", setting)
 			}
 		}
-		if setting.Key != "CRQ_RL_CO_DEGRADE" {
-			continue
-		}
-		foundDegrade = true
-		if setting.Value != "1" || setting.Source != "default" {
-			t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
+		switch setting.Key {
+		case "CRQ_RL_CO_DEGRADE":
+			foundDegrade = true
+			if setting.Value != "1" || setting.Source != "default" {
+				t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
+			}
+		case "CRQ_PREFLIGHT_SKIP_BLOCKED":
+			foundPreflightSkip = true
+			if setting.Value != "1" || setting.Source != "default" {
+				t.Fatalf("preflight skip setting = %+v, want the effective on-by-default value", setting)
+			}
 		}
 	}
 	if !foundCalibration {
@@ -127,6 +133,9 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 	}
 	if !foundDegrade {
 		t.Fatal("CRQ_RL_CO_DEGRADE was not listed")
+	}
+	if !foundPreflightSkip {
+		t.Fatal("CRQ_PREFLIGHT_SKIP_BLOCKED was not listed")
 	}
 }
 
@@ -536,6 +545,46 @@ func TestFleetSettingsNamesLaggingAutofixWatchers(t *testing.T) {
 	view := svc.fleetViewOf(st)
 	if len(view.Lagging) != 1 || view.Lagging[0] != "old-watcher" {
 		t.Fatalf("lagging = %v, want the autofix watcher that ignores fleet defaults", view.Lagging)
+	}
+}
+
+func TestFleetSettingsNamesHostsThatIgnoreBlockedPreflightPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	st := DefaultState(cfg)
+	st.SetFleetDefaults(FleetDefaults{Env: map[string]string{"CRQ_PREFLIGHT_SKIP_BLOCKED": "1"}}, "operator", now)
+	st.SetHostReport(HostReport{
+		Host: "old-watcher", Caps: CapsPreflightSkipBlocked - 1, Roles: []string{"autofix"},
+	}, now)
+
+	view := svc.fleetViewOf(st)
+	if len(view.Lagging) != 1 || view.Lagging[0] != "old-watcher" {
+		t.Fatalf("lagging = %v, want the autofix watcher that ignores the blocked-preflight policy", view.Lagging)
+	}
+}
+
+func TestFleetSettingsDoesNotNameHostsWhenBlockedPreflightSkippingIsOff(t *testing.T) {
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	st := DefaultState(cfg)
+	st.SetFleetDefaults(FleetDefaults{Env: map[string]string{"CRQ_PREFLIGHT_SKIP_BLOCKED": "0"}}, "operator", now)
+	st.SetHostReport(HostReport{
+		Host: "old-watcher", Caps: CapsPreflightSkipBlocked - 1, Roles: []string{"autofix"},
+	}, now)
+
+	view := svc.fleetViewOf(st)
+	if len(view.Lagging) != 0 {
+		t.Fatalf("lagging = %v, want no warning when blocked-preflight skipping is off", view.Lagging)
 	}
 }
 

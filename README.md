@@ -451,6 +451,11 @@ crq version               # print the version
 crq help [command]        # help, optionally for one command
 ```
 
+`crq preflight` avoids a doomed local review when shared state already records a live CodeRabbit
+account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocked_until`. If shared
+state cannot be read, it falls back to running the local CLI normally. Set
+`CRQ_PREFLIGHT_SKIP_BLOCKED=0` to force the CLI request instead.
+
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
 the exit code. **`crq loop` exit codes:** `0` converged, no
 actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in
@@ -537,6 +542,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_COBOT_<NAME>_CMD` | `@codex review` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
 | `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
 | `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
+| `CRQ_PREFLIGHT_SKIP_BLOCKED` | on | skip local CodeRabbit preflight successfully while shared quota state is blocked; set `0` to force the CLI request |
 | `CRQ_FEEDBACK_BOTS` | required bots + enabled co-reviewers | bots whose findings are surfaced — a superset of required bots, so co-reviewer findings show up without gating convergence on repos where those bots aren't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |

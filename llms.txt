@@ -501,5 +501,8 @@ Optional local preflight: if CodeRabbit CLI is installed, `crq preflight --type 
 can review local git changes before pushing and normalize the JSON stream. Exit 2 means "come back
 later" — either a timeout or `status: "rate_limited"`, with `.retry_after` and `.error_type`. That
 block is the SAME account quota PR reviews spend, so crq records it for the fleet and `.quota` says
-whether it did. That does not replace
+whether it did. When shared state already records a live account block, preflight exits 0 without
+calling the CLI and reports `status: "skipped"`, `.skip_reason`, and `.blocked_until`; an unreadable
+state falls back to the normal local review. `CRQ_PREFLIGHT_SKIP_BLOCKED` controls this behavior and
+defaults to `1`; set it to `0` to force the CLI request. That does not replace
 `crq loop`; only `crq loop` queues and waits for GitHub PR review feedback.

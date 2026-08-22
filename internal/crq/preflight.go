@@ -59,10 +59,14 @@ type PreflightReport struct {
 	CredentialsOverridden bool `json:"credentials_overridden,omitempty"`
 	// Quota reports whether the account block this run observed was shared with
 	// crq's queue, and why not when it was not.
-	Quota      *CLIQuotaResult `json:"quota,omitempty"`
-	ExitCode   int             `json:"exit_code"`
-	CheckedAt  time.Time       `json:"checked_at"`
-	DurationMS int64           `json:"duration_ms"`
+	Quota *CLIQuotaResult `json:"quota,omitempty"`
+	// SkipReason/BlockedUntil explain a successful no-op when the shared queue
+	// already knows the CodeRabbit account cannot accept another review.
+	SkipReason   string     `json:"skip_reason,omitempty"`
+	BlockedUntil *time.Time `json:"blocked_until,omitempty"`
+	ExitCode     int        `json:"exit_code"`
+	CheckedAt    time.Time  `json:"checked_at"`
+	DurationMS   int64      `json:"duration_ms"`
 }
 
 type PreflightStatus struct {
@@ -86,6 +90,51 @@ type PreflightFinding struct {
 	Source              string   `json:"source"`
 }
 
+// SkipBlockedPreflight reports whether a local review should be skipped because
+// crq's shared state already holds a live CodeRabbit account-quota block.
+//
+// Reading the state is deliberately separate from Preflight: the local command
+// must still work without crq configuration or GitHub access, so callers can
+// treat a state-read failure as a cache miss and run the CLI normally. Explicit
+// credentials bypass the shared block because they may select another account.
+func (s *Service) SkipBlockedPreflight(ctx context.Context, opts PreflightOptions, cliOrg func() string) (*PreflightReport, error) {
+	if HasExplicitCredentials(opts.ExtraArgs) {
+		return nil, nil
+	}
+	start := time.Now()
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !s.cfg.WithFleet(state.Fleet).PreflightSkipBlocked {
+		return nil, nil
+	}
+	now := s.clock()
+	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
+		return nil, nil
+	}
+	if cliOrg == nil || !cliOrgMatches(s.cfg.WithFleet(state.Fleet), cliOrg()) {
+		return nil, nil
+	}
+	now = s.clock()
+	if state.Account.BlockedUntil == nil || !state.Account.BlockedUntil.After(now) {
+		return nil, nil
+	}
+	until := state.Account.BlockedUntil.UTC()
+	return &PreflightReport{
+		Status:       "skipped",
+		Tool:         "coderabbit-cli",
+		Command:      redactSecrets(append([]string{"coderabbit-cli"}, coderabbitArgs(opts)...)),
+		Statuses:     []PreflightStatus{},
+		Findings:     []PreflightFinding{},
+		SkipReason:   "shared CodeRabbit account quota is blocked",
+		BlockedUntil: &until,
+		ExitCode:     0,
+		CheckedAt:    now,
+		DurationMS:   time.Since(start).Milliseconds(),
+	}, nil
+}
+
 func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int, error) {
 	start := time.Now()
 	report := PreflightReport{
@@ -94,7 +143,16 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 		Findings:  []PreflightFinding{},
 		CheckedAt: start.UTC(),
 	}
-	binary, err := coderabbitBinary(opts.Binary)
+	// The caller may have spent its deadline reading shared state before
+	// starting the CLI. Preserve the documented timeout result in that case.
+	if err := ctx.Err(); err != nil {
+		report.Status = "error"
+		report.Error = err.Error()
+		report.ExitCode = 2
+		report.DurationMS = time.Since(start).Milliseconds()
+		return report, 2, err
+	}
+	binary, err := CodeRabbitBinary(opts.Binary)
 	if err != nil {
 		report.Status = "error"
 		report.Error = err.Error()
@@ -105,7 +163,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	args := coderabbitArgs(opts)
 	report.Tool = binary
 	report.Command = redactSecrets(append([]string{binary}, args...))
-	report.CredentialsOverridden = carriesCredentials(opts.ExtraArgs)
+	report.CredentialsOverridden = HasExplicitCredentials(opts.ExtraArgs)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	if opts.Timeout > 0 {
@@ -195,7 +253,9 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	return report, 10, nil
 }
 
-func coderabbitBinary(explicit string) (string, error) {
+// CodeRabbitBinary resolves the executable preflight will run, including its
+// fallback candidates. Callers that probe the CLI must use this result too.
+func CodeRabbitBinary(explicit string) (string, error) {
 	candidates := []string{explicit, os.Getenv("CRQ_CODERABBIT_BIN"), "cr", "coderabbit"}
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate) == "" {
@@ -304,10 +364,10 @@ func preflightFinding(event map[string]any) PreflightFinding {
 	return finding
 }
 
-// carriesCredentials reports whether these arguments authenticate the run
+// HasExplicitCredentials reports whether these arguments authenticate the run
 // themselves. If they do, the login the CLI would report afterwards is not
 // necessarily the account that produced the block.
-func carriesCredentials(args []string) bool {
+func HasExplicitCredentials(args []string) bool {
 	for _, arg := range args {
 		name, _, _ := strings.Cut(arg, "=")
 		switch name {

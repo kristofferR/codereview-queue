@@ -1,12 +1,16 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +25,12 @@ var ErrCASConflict = errors.New("state changed while writing")
 var ErrNoChange = errors.New("state unchanged")
 
 const (
-	statePath     = "state.json"
-	dashboardPath = "dashboard.md"
+	statePath           = "state.json"
+	dashboardPath       = "dashboard.md"
+	gitFallbackEnv      = "CRQ_STATE_GIT_FALLBACK"
+	gitStateCacheRef    = "refs/crq/state"
+	gitStateAuthorName  = "kristofferR"
+	gitStateAuthorEmail = "481270+kristofferR@users.noreply.github.com"
 )
 
 // Logger is the minimal logging surface the store uses (for the loud
@@ -102,6 +110,16 @@ type GitStateStore struct {
 	gh  *gh.GitHub
 	log Logger
 
+	// The opt-in git path avoids GitHub's REST git-data endpoints when the
+	// account's primary quota is exhausted. Each store gets a private bare
+	// cache, so separate crq processes never contend on local refs or indexes.
+	gitFallback  bool
+	gitRemoteURL string // test seam; production derives a credential-free HTTPS URL
+	gitOnce      sync.Once
+	gitDir       string
+	gitInitErr   error
+	gitMu        sync.Mutex
+
 	// renderCfg resolves state-backed fleet settings before rendering. It is
 	// installed once by crq, which owns the bot registry needed to format them.
 	renderCfg func(State) StoreConfig
@@ -112,7 +130,12 @@ type GitStateStore struct {
 }
 
 func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateStore {
-	return &GitStateStore{cfg: cfg, gh: client, log: log}
+	return &GitStateStore{
+		cfg:         cfg,
+		gh:          client,
+		log:         log,
+		gitFallback: strings.TrimSpace(os.Getenv(gitFallbackEnv)) == "1",
+	}
 }
 
 // SetRenderConfig installs the effective configuration used for dashboard.md
@@ -137,6 +160,9 @@ func (s *GitStateStore) logf(format string, args ...any) {
 func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err := s.cfg.requireState(); err != nil {
 		return State{}, Revision{}, err
+	}
+	if s.gitFallback {
+		return s.loadGit(ctx)
 	}
 	ref, err := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
 	if errors.Is(err, gh.ErrNotFound) {
@@ -170,6 +196,10 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
+	return s.decodeState(raw, rev)
+}
+
+func (s *GitStateStore) decodeState(raw []byte, rev Revision) (State, Revision, error) {
 	// Peek at the schema version before a full decode. V5 is the one supported
 	// migration: v6 fences v5 writers that encoded fleet policy with a
 	// different shape, while preserving every live v5 round during rollout.
@@ -188,10 +218,11 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 		return s.fresh(), rev, nil
 	}
 	if probe.Version == SchemaVersion-1 {
-		raw, err = migrateV5State(raw)
+		migrated, err := migrateV5State(raw)
 		if err != nil {
 			return State{}, Revision{}, s.refuse("holds a v5 fleet policy this binary cannot migrate", err)
 		}
+		raw = migrated
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
@@ -261,6 +292,9 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 	if err != nil {
 		return err
 	}
+	if s.gitFallback {
+		return s.compareAndSwapGit(ctx, st.Rev, append(stateJSON, '\n'), []byte(dashboard), rev)
+	}
 	stateBlob, err := s.gh.CreateBlob(ctx, s.cfg.GateRepo, append(stateJSON, '\n'))
 	if err != nil {
 		return err
@@ -299,6 +333,237 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 	return err
 }
 
+// loadGit reads the state through the ordinary git transport. The exact state
+// ref is fetched into a process-private bare repository; no repository token is
+// put in an argument, remote config, or error message.
+func (s *GitStateStore) loadGit(ctx context.Context) (State, Revision, error) {
+	s.gitMu.Lock()
+	defer s.gitMu.Unlock()
+
+	if err := s.ensureGitCache(ctx); err != nil {
+		return State{}, Revision{}, err
+	}
+	remoteRef := s.gitRemoteRef()
+	_, stderr, err := s.git(ctx, nil, nil,
+		"fetch", "--quiet", "--no-tags", "origin", "+"+remoteRef+":"+gitStateCacheRef)
+	if err != nil {
+		if isMissingGitRemoteRef(stderr) {
+			// Do not retain a stale local value if a long-lived process observes
+			// that the remote state ref was deliberately removed.
+			_, _, _ = s.git(ctx, nil, nil, "update-ref", "-d", gitStateCacheRef)
+			return s.fresh(), Revision{}, nil
+		}
+		return State{}, Revision{}, gitStateError("fetching state ref", err, stderr)
+	}
+
+	commitOut, stderr, err := s.git(ctx, nil, nil, "rev-parse", "--verify", gitStateCacheRef+"^{commit}")
+	if err != nil {
+		return State{}, Revision{}, gitStateError("reading fetched commit", err, stderr)
+	}
+	commitSHA := strings.TrimSpace(string(commitOut))
+	treeOut, stderr, err := s.git(ctx, nil, nil, "rev-parse", "--verify", commitSHA+"^{tree}")
+	if err != nil {
+		return State{}, Revision{}, gitStateError("reading fetched tree", err, stderr)
+	}
+	rev := Revision{CommitSHA: commitSHA, TreeSHA: strings.TrimSpace(string(treeOut))}
+
+	raw, stderr, err := s.git(ctx, nil, nil, "show", commitSHA+":"+statePath)
+	if err != nil {
+		if isMissingGitPath(stderr) {
+			s.logf("state ref %s has no %s — reinitializing to a fresh v%d state", s.cfg.StateRef, statePath, SchemaVersion)
+			return s.fresh(), rev, nil
+		}
+		return State{}, Revision{}, gitStateError("reading state.json", err, stderr)
+	}
+	return s.decodeState(raw, rev)
+}
+
+// compareAndSwapGit creates the same two-file state commit as the REST path,
+// preserving every other entry from the loaded tree. A normal (non-force) push
+// is the CAS: if another writer advanced the ref, git rejects our sibling
+// commit as non-fast-forward.
+func (s *GitStateStore) compareAndSwapGit(
+	ctx context.Context,
+	revision int64,
+	stateJSON []byte,
+	dashboard []byte,
+	rev Revision,
+) error {
+	s.gitMu.Lock()
+	defer s.gitMu.Unlock()
+
+	if err := s.ensureGitCache(ctx); err != nil {
+		return err
+	}
+	stateBlob, err := s.gitHashObject(ctx, stateJSON)
+	if err != nil {
+		return err
+	}
+	dashboardBlob, err := s.gitHashObject(ctx, dashboard)
+	if err != nil {
+		return err
+	}
+
+	indexFile, err := os.CreateTemp(s.gitDir, "state-index-*")
+	if err != nil {
+		return fmt.Errorf("creating git state index: %w", err)
+	}
+	indexPath := indexFile.Name()
+	if err := indexFile.Close(); err != nil {
+		_ = os.Remove(indexPath)
+		return fmt.Errorf("closing git state index: %w", err)
+	}
+	// Git expects an absent index for read-tree --empty, not a zero-byte file.
+	if err := os.Remove(indexPath); err != nil {
+		return fmt.Errorf("preparing git state index: %w", err)
+	}
+	defer os.Remove(indexPath)
+	indexEnv := []string{"GIT_INDEX_FILE=" + indexPath}
+
+	readTreeArgs := []string{"read-tree", "--empty"}
+	if rev.TreeSHA != "" {
+		readTreeArgs = []string{"read-tree", rev.TreeSHA}
+	}
+	if _, stderr, err := s.git(ctx, indexEnv, nil, readTreeArgs...); err != nil {
+		return gitStateError("reading base tree", err, stderr)
+	}
+	for _, entry := range []struct {
+		path string
+		sha  string
+	}{
+		{path: statePath, sha: stateBlob},
+		{path: dashboardPath, sha: dashboardBlob},
+	} {
+		if _, stderr, err := s.git(ctx, indexEnv, nil,
+			"update-index", "--add", "--cacheinfo", "100644", entry.sha, entry.path); err != nil {
+			return gitStateError("updating state tree", err, stderr)
+		}
+	}
+	treeOut, stderr, err := s.git(ctx, indexEnv, nil, "write-tree")
+	if err != nil {
+		return gitStateError("writing state tree", err, stderr)
+	}
+	treeSHA := strings.TrimSpace(string(treeOut))
+
+	commitArgs := []string{"commit-tree", treeSHA}
+	if rev.CommitSHA != "" {
+		commitArgs = append(commitArgs, "-p", rev.CommitSHA)
+	}
+	identityEnv := []string{
+		"GIT_AUTHOR_NAME=" + gitStateAuthorName,
+		"GIT_AUTHOR_EMAIL=" + gitStateAuthorEmail,
+		"GIT_COMMITTER_NAME=" + gitStateAuthorName,
+		"GIT_COMMITTER_EMAIL=" + gitStateAuthorEmail,
+	}
+	message := []byte(fmt.Sprintf("crq: state rev %d\n", revision))
+	commitOut, stderr, err := s.git(ctx, identityEnv, message, commitArgs...)
+	if err != nil {
+		return gitStateError("creating state commit", err, stderr)
+	}
+	commitSHA := strings.TrimSpace(string(commitOut))
+
+	stdout, stderr, err := s.git(ctx, nil, nil,
+		"push", "--porcelain", "origin", commitSHA+":"+s.gitRemoteRef())
+	if err != nil {
+		if isGitNonFastForward(stdout, stderr) {
+			return ErrCASConflict
+		}
+		return gitStateError("pushing state ref", err, stderr)
+	}
+	_, _, _ = s.git(ctx, nil, nil, "update-ref", gitStateCacheRef, commitSHA)
+	return nil
+}
+
+func (s *GitStateStore) gitHashObject(ctx context.Context, content []byte) (string, error) {
+	out, stderr, err := s.git(ctx, nil, content, "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", gitStateError("creating state blob", err, stderr)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (s *GitStateStore) ensureGitCache(ctx context.Context) error {
+	s.gitOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "crq-state-git-"+strconv.Itoa(os.Getpid())+"-*")
+		if err != nil {
+			s.gitInitErr = fmt.Errorf("creating git state cache: %w", err)
+			return
+		}
+		s.gitDir = dir
+		if _, stderr, err := runGit(ctx, nil, nil, "init", "--bare", "--quiet", dir); err != nil {
+			s.gitInitErr = gitStateError("initializing state cache", err, stderr)
+			return
+		}
+		remote := s.gitRemoteURL
+		if remote == "" {
+			remote = "https://github.com/" + strings.TrimSuffix(s.cfg.GateRepo, ".git") + ".git"
+		}
+		if _, stderr, err := runGit(ctx, nil, nil,
+			"--git-dir", dir, "remote", "add", "origin", remote); err != nil {
+			s.gitInitErr = gitStateError("configuring state remote", err, stderr)
+		}
+	})
+	return s.gitInitErr
+}
+
+func (s *GitStateStore) gitRemoteRef() string {
+	name := strings.TrimPrefix(strings.TrimSpace(s.cfg.StateRef), "refs/heads/")
+	return "refs/heads/" + name
+}
+
+func (s *GitStateStore) git(
+	ctx context.Context,
+	env []string,
+	stdin []byte,
+	args ...string,
+) ([]byte, []byte, error) {
+	fullArgs := append([]string{"--git-dir", s.gitDir}, args...)
+	return runGit(ctx, env, stdin, fullArgs...)
+}
+
+func runGit(ctx context.Context, env []string, stdin []byte, args ...string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, env...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func gitStateError(operation string, err error, stderr []byte) error {
+	detail := strings.TrimSpace(string(stderr))
+	if detail == "" {
+		return fmt.Errorf("git state %s: %w", operation, err)
+	}
+	return fmt.Errorf("git state %s: %w (%s)", operation, err, detail)
+}
+
+func isMissingGitRemoteRef(stderr []byte) bool {
+	message := strings.ToLower(string(stderr))
+	return strings.Contains(message, "couldn't find remote ref") ||
+		strings.Contains(message, "remote ref does not exist")
+}
+
+func isMissingGitPath(stderr []byte) bool {
+	message := strings.ToLower(string(stderr))
+	return strings.Contains(message, "does not exist in") ||
+		strings.Contains(message, "exists on disk, but not in")
+}
+
+func isGitNonFastForward(stdout, stderr []byte) bool {
+	message := strings.ToLower(string(append(append([]byte(nil), stdout...), stderr...)))
+	return strings.Contains(message, "non-fast-forward") ||
+		strings.Contains(message, "[rejected]") ||
+		strings.Contains(message, "fetch first") ||
+		strings.Contains(message, "stale info")
+}
+
 // SyncDashboard renders the gate issue and writes it only when the issue does
 // not already say exactly that.
 //
@@ -318,6 +583,11 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 // A read failure is never fatal: fall through and PATCH, which is the old
 // behavior.
 func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
+	// dashboard.md is committed beside state.json by compareAndSwapGit. Avoid
+	// touching the issue API while this process is explicitly avoiding REST.
+	if s.gitFallback {
+		return nil
+	}
 	if err := s.cfg.requireDashboard(); err != nil {
 		return err
 	}

@@ -199,6 +199,20 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	return s.decodeState(raw, rev)
 }
 
+// StateRef returns the current state commit through the same transport Load
+// uses. crq wait type-asserts this optional method so an opted-in git fallback
+// never drops back to the REST git-data endpoint while idling.
+func (s *GitStateStore) StateRef(ctx context.Context) (string, error) {
+	if err := s.cfg.requireState(); err != nil {
+		return "", err
+	}
+	if !s.gitFallback {
+		return s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+	}
+	_, rev, err := s.loadGit(ctx)
+	return rev.CommitSHA, err
+}
+
 func (s *GitStateStore) decodeState(raw []byte, rev Revision) (State, Revision, error) {
 	// Peek at the schema version before a full decode. V5 is the one supported
 	// migration: v6 fences v5 writers that encoded fleet policy with a

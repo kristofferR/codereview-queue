@@ -117,6 +117,21 @@ func TestGitFallbackLoadsAndUpdatesStateRef(t *testing.T) {
 	}
 }
 
+func TestGitFallbackStateRefUsesGitTransport(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	remote, _ := seedGitStateRemote(t)
+	store := newGitFallbackTestStore(t, remote)
+
+	got, err := store.StateRef(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := mustGit(t, "--git-dir", remote, "rev-parse", "refs/heads/crq-state-v3")
+	if got != want {
+		t.Fatalf("state ref = %q, want %q", got, want)
+	}
+}
+
 func TestGitFallbackMapsNonFastForwardToCASConflict(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "1")
 	remote, _ := seedGitStateRemote(t)

@@ -72,7 +72,7 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		// Sample after claiming but before deciding. The claim itself moves the
 		// state ref, so sampling first would make the waiter observe its own write
 		// as external progress and immediately renew in a hot loop.
-		lastRef, refErr := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+		lastRef, refErr := s.stateRef(ctx)
 		if !claim.acquired {
 			// The owner that won may finish long before its lease expires. Watch the
 			// shared ref so its release (or an autofix heartbeat/completion) wakes us,
@@ -248,7 +248,7 @@ func leaderLive(st State, now time.Time) bool {
 // error is exactly the fragility this command replaces.
 func (s *Service) watchStateRef(ctx context.Context, lastRef string, deadline time.Time) (bool, string, error) {
 	for {
-		ref, err := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+		ref, err := s.stateRef(ctx)
 		if err == nil {
 			if lastRef != "" && ref != lastRef {
 				return true, ref, nil
@@ -265,4 +265,15 @@ func (s *Service) watchStateRef(ctx context.Context, lastRef string, deadline ti
 			return false, lastRef, serr
 		}
 	}
+}
+
+type stateRefReader interface {
+	StateRef(context.Context) (string, error)
+}
+
+func (s *Service) stateRef(ctx context.Context) (string, error) {
+	if reader, ok := s.store.(stateRefReader); ok {
+		return reader.StateRef(ctx)
+	}
+	return s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
 }

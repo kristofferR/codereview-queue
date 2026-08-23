@@ -74,6 +74,12 @@ type Options struct {
 	// LookupToken refreshes a rotated credential after an authenticated icon
 	// request is rejected. Nil keeps Token fixed.
 	LookupToken func(context.Context) string
+	// Gateway is the one direct GitHub transport owned by this persistent
+	// process. CLI processes proxy through it so ETags and backoff are shared.
+	Gateway GitHubGateway
+	// GatewayToken authenticates non-loopback gateway clients. Empty is safe
+	// only for the default loopback-bound server; the handler enforces that.
+	GatewayToken string
 	// EnrollFor resolves whether crq reviews one repository. Nil falls back to
 	// reading the env lists alone, which is what the dashboard did before
 	// enrollment records existed.
@@ -185,23 +191,9 @@ func New(loader Loader, opts Options) *Server {
 func (s *Server) Run(ctx context.Context) error {
 	go s.watch(ctx)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/snapshot", s.handleSnapshot)
-	mux.HandleFunc("GET /api/overview", s.handleOverview)
-	mux.HandleFunc("GET /api/events", s.handleEvents)
-	mux.HandleFunc("GET /api/health", s.handleHealth)
-	mux.HandleFunc("GET /api/icon/{kind}/{name...}", s.handleIcon)
-	mux.HandleFunc("GET /api/pr/{owner}/{name}/{pr}", s.handlePR)
-	mux.HandleFunc("GET /api/discover", s.handleDiscover)
-	mux.HandleFunc("GET /api/enroll-preview", s.handleEnrollPreview)
-	mux.HandleFunc("GET /api/autofix-log/{owner}/{name}/{pr}", s.handleAutofixLog)
-	mux.HandleFunc("POST /api/setup/refresh", s.handleSetupRefresh)
-	mux.HandleFunc("POST /api/action/{action}", s.handleAction)
-	mux.Handle("/", s.assets())
-
 	srv := &http.Server{
 		Addr:              s.opts.Addr,
-		Handler:           mux,
+		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -212,12 +204,33 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = srv.Shutdown(shutdown)
 	}()
 	if s.opts.Log != nil {
-		s.opts.Log.Printf("dashboard on http://%s", s.opts.Addr)
+		s.opts.Log.Printf("control plane on http://%s", s.opts.Addr)
 	}
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /api/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/events", s.handleEvents)
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/gateway/health", s.handleGatewayHealth)
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete} {
+		mux.HandleFunc(method+" /api/github/{path...}", s.handleGitHub)
+	}
+	mux.HandleFunc("GET /api/icon/{kind}/{name...}", s.handleIcon)
+	mux.HandleFunc("GET /api/pr/{owner}/{name}/{pr}", s.handlePR)
+	mux.HandleFunc("GET /api/discover", s.handleDiscover)
+	mux.HandleFunc("GET /api/enroll-preview", s.handleEnrollPreview)
+	mux.HandleFunc("GET /api/autofix-log/{owner}/{name}/{pr}", s.handleAutofixLog)
+	mux.HandleFunc("POST /api/setup/refresh", s.handleSetupRefresh)
+	mux.HandleFunc("POST /api/action/{action}", s.handleAction)
+	mux.Handle("/", s.assets())
+	return mux
 }
 
 // watch re-reads the state ref and pushes a snapshot whenever Rev moves. A

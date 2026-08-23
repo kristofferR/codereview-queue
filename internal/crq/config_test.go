@@ -27,6 +27,30 @@ func TestBuildConfigRetainsACopyOfTheInputEnvironment(t *testing.T) {
 	}
 }
 
+func TestBuildConfigDefaultsToTheLocalServer(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerURL != "http://127.0.0.1:7777" {
+		t.Fatalf("server URL = %q, want the local crq server", cfg.ServerURL)
+	}
+	if cfg.ServerToken != "" {
+		t.Fatalf("server token = %q, want no token for loopback", cfg.ServerToken)
+	}
+
+	cfg, err = BuildConfig(map[string]string{
+		"CRQ_SERVER_URL":   "https://crq.example.test",
+		"CRQ_SERVER_TOKEN": "  shared-secret  ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerURL != "https://crq.example.test" || cfg.ServerToken != "shared-secret" {
+		t.Fatalf("server config = (%q, %q), want configured URL and trimmed token", cfg.ServerURL, cfg.ServerToken)
+	}
+}
+
 func TestLoadConfigReadsWorkOwnerFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "env")
 	if err := os.WriteFile(path, []byte("CRQ_WORK_OWNER=  file-session  \n"), 0o600); err != nil {

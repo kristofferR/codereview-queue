@@ -1,12 +1,45 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
+
+func TestCheckServerReportsHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/gateway/health" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Error("server health request did not carry the configured token")
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"rev":7}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "secret")
+	if !got.Reachable || !got.Healthy || got.Error != "" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
+
+func TestCheckServerDistinguishesAnUnhealthyServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"state unavailable"}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "")
+	if !got.Reachable || got.Healthy || got.Error != "state unavailable" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
 
 func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
 	if got := watchDispatchOption(true, false); got != nil {

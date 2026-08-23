@@ -240,7 +240,7 @@ func unitDescription(service string) string {
 	if service == "autoreview" {
 		return "crq autoreview (find pull requests needing a review and fire the queue)"
 	}
-	return "crq dashboard (crq serve)"
+	return "crq GitHub control plane and dashboard (crq serve)"
 }
 
 func serveUnitBody(plan ServeInstall) string {

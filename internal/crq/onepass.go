@@ -274,6 +274,13 @@ func (s *Service) RetireMerged(ctx context.Context, repo string, pr int) error {
 	return s.retireOnePassMerged(ctx, repo, pr)
 }
 
+// RetireMergedVerified records a merge already verified by the caller. The
+// rolling-upgrade exact-head merger uses the merge API response itself as that
+// proof, avoiding a second GitHub read that may be rate-limited.
+func (s *Service) RetireMergedVerified(ctx context.Context, repo string, pr int) error {
+	return s.retireOnePassMerged(ctx, repo, pr)
+}
+
 func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
 	st, err := s.store.Update(ctx, func(st *State) error {

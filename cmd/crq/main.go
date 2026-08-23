@@ -957,12 +957,22 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 		printJSON(state.Account)
 		return 0
 	case "retire-merged":
-		repo, pr, err := target(ctx, service, args[1:], "crq debug retire-merged [<repo> <pr>]")
+		verified := len(args) > 1 && args[1] == "--verified"
+		targetArgs := args[1:]
+		if verified {
+			targetArgs = args[2:]
+		}
+		repo, pr, err := target(ctx, service, targetArgs, "crq debug retire-merged [--verified] [<repo> <pr>]")
 		if err != nil {
 			fatal(err)
 			return 1
 		}
-		if err := service.RetireMerged(ctx, repo, pr); err != nil {
+		if verified {
+			err = service.RetireMergedVerified(ctx, repo, pr)
+		} else {
+			err = service.RetireMerged(ctx, repo, pr)
+		}
+		if err != nil {
 			fatal(err)
 			return 1
 		}

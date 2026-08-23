@@ -324,7 +324,6 @@ func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) 
 					round.Abandon("merged")
 					changed = true
 				}
-				break
 			}
 		}
 		if st.ClearOnePassProgress(repo, pr) {

@@ -262,6 +262,37 @@ func TestOnePassReadyHeadMergesOnceWithExactSHAWhenChecksAreUnstable(t *testing.
 	}
 }
 
+func TestRetireMergedNormalizesEveryArchivedAttempt(t *testing.T) {
+	base := time.Date(2026, 8, 23, 11, 15, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/security", 915
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.Archive = append(st.Archive,
+			Round{Repo: repo, PR: pr, Head: "aaaaaaaa1", Phase: PhaseAbandoned, Note: "merged"},
+			Round{Repo: repo, PR: pr, Head: "bbbbbbbb2", Phase: PhaseAbandoned, Note: "pr closed"},
+			Round{Repo: repo, PR: pr + 1, Head: "cccccccc3", Phase: PhaseAbandoned, Note: "pr closed"},
+		)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.RetireMergedVerified(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range st.Archive {
+		if round.Repo == repo && round.PR == pr && (round.Note != "merged" || round.Phase != PhaseAbandoned) {
+			t.Fatalf("archived attempt = %+v, want merged abandonment", round)
+		}
+	}
+	if got := st.Archive[len(st.Archive)-1].Note; got != "pr closed" {
+		t.Fatalf("unrelated archive note = %q, want pr closed", got)
+	}
+}
+
 func TestOnePassDryRunNeverMergesOrClearsTheReadyHead(t *testing.T) {
 	base := time.Date(2026, 8, 23, 11, 30, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

@@ -718,7 +718,7 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; it also auto-clears after `CRQ_INFLIGHT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
-| `github … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
+| `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |
 

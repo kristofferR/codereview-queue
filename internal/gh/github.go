@@ -57,29 +57,53 @@ type GitHub struct {
 	viewer         string // the token's own login, "" until looked up, "-" when unreadable
 	etagMu         sync.Mutex
 	etags          map[string]*etagEntry // GET URL -> last 200 response, replayed on 304
-	// Server GETs for the same URL share a stripe. A burst of fresh CLI processes then
-	// produces one upstream 200 followed by conditional 304s instead of racing
-	// several uncached requests against the shared REST allowance.
+	// Server GETs for the same URL share an exact-key gate. A burst of fresh CLI
+	// processes then produces one upstream 200 followed by conditional 304s
+	// instead of racing several uncached requests against the shared REST
+	// allowance. Unrelated URLs never wait behind one another.
 	coalesceGETs bool
-	getStripes   [64]requestStripe
+	getGateMu    sync.Mutex
+	getGates     map[string]*requestGate
 }
 
-type requestStripe struct {
-	once  sync.Once
+type requestGate struct {
+	users int
 	token chan struct{}
 }
 
-func (s *requestStripe) lock(ctx context.Context) error {
-	s.once.Do(func() { s.token = make(chan struct{}, 1) })
+func (g *GitHub) acquireGETGate(ctx context.Context, requestURL string) (func(), error) {
+	g.getGateMu.Lock()
+	if g.getGates == nil {
+		g.getGates = map[string]*requestGate{}
+	}
+	gate := g.getGates[requestURL]
+	if gate == nil {
+		gate = &requestGate{token: make(chan struct{}, 1)}
+		g.getGates[requestURL] = gate
+	}
+	gate.users++
+	g.getGateMu.Unlock()
+
 	select {
-	case s.token <- struct{}{}:
-		return nil
+	case gate.token <- struct{}{}:
+		return func() {
+			<-gate.token
+			g.releaseGETGate(requestURL, gate)
+		}, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		g.releaseGETGate(requestURL, gate)
+		return nil, ctx.Err()
 	}
 }
 
-func (s *requestStripe) unlock() { <-s.token }
+func (g *GitHub) releaseGETGate(requestURL string, gate *requestGate) {
+	g.getGateMu.Lock()
+	defer g.getGateMu.Unlock()
+	gate.users--
+	if gate.users == 0 && g.getGates[requestURL] == gate {
+		delete(g.getGates, requestURL)
+	}
+}
 
 // etagEntry is a cached 200 GET response. GitHub serves 304 Not Modified for a
 // matching If-None-Match without charging the request against the REST quota,
@@ -277,7 +301,11 @@ func NewGitHubViaServer(serverURL, token string) (*GitHub, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("CRQ_SERVER_URL must be an http(s) server URL, got %q", serverURL)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("http.DefaultTransport is not an *http.Transport")
+	}
+	transport := baseTransport.Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = 5 * time.Second
 	return &GitHub{
@@ -638,11 +666,11 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 	var cached *etagEntry
 	if conditional {
 		if g.coalesceGETs {
-			stripe := &g.getStripes[urlStripe(fullURL)]
-			if err := stripe.lock(ctx); err != nil {
+			release, err := g.acquireGETGate(ctx, fullURL)
+			if err != nil {
 				return nil, err
 			}
-			defer stripe.unlock()
+			defer release()
 		}
 		cached = g.etagLookup(fullURL)
 	}
@@ -806,20 +834,6 @@ func (g *GitHub) networkTarget() string {
 	return "github"
 }
 
-func urlStripe(value string) uint64 {
-	// FNV-1a, inline to keep a request hot path allocation-free.
-	const (
-		offset = uint64(14695981039346656037)
-		prime  = uint64(1099511628211)
-	)
-	hash := offset
-	for i := 0; i < len(value); i++ {
-		hash ^= uint64(value[i])
-		hash *= prime
-	}
-	return hash % 64
-}
-
 // transportURL maps a GitHub endpoint onto the server gateway. Pagination
 // links are absolute api.github.com URLs, so mapping happens here rather than
 // only when apiBase is assembled. Refusing every other host is the fail-closed
@@ -888,7 +902,10 @@ func (g *GitHub) Forward(ctx context.Context, method, requestURI string, body []
 			if !throttled.Until.IsZero() {
 				header.Set("X-RateLimit-Reset", strconv.FormatInt(throttled.Until.Unix(), 10))
 			}
-			payload, _ := json.Marshal(map[string]string{"message": throttled.Error()})
+			payload, marshalErr := json.Marshal(map[string]string{"message": throttled.Error()})
+			if marshalErr != nil {
+				return ForwardResponse{}, marshalErr
+			}
 			return ForwardResponse{Status: http.StatusTooManyRequests, Header: header, Body: payload}, nil
 		}
 		return ForwardResponse{}, err

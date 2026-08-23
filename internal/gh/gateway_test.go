@@ -2,6 +2,7 @@ package gh
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -183,6 +184,77 @@ func TestPersistentGatewayCoalescesConcurrentFreshGETs(t *testing.T) {
 	if fresh != 1 || total != 2 {
 		t.Fatalf("upstream requests = %d fresh / %d total, want one paid response and one conditional revalidation", fresh, total)
 	}
+}
+
+func TestPersistentGatewayDoesNotBlockDifferentURLsThatSharedALegacyStripe(t *testing.T) {
+	firstPR, secondPR := 1, 0
+	var upstreamURL string
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, fmt.Sprintf("/%d", firstPR)) {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		_, _ = fmt.Fprintf(w, `{"number":%d,"state":"open","head":{"sha":"abc"}}`, firstPR)
+	}))
+	defer upstream.Close()
+	upstreamURL = upstream.URL
+
+	firstURL := upstreamURL + fmt.Sprintf("/repos/o/r/pulls/%d", firstPR)
+	for candidate := 2; candidate < 10_000; candidate++ {
+		candidateURL := upstreamURL + fmt.Sprintf("/repos/o/r/pulls/%d", candidate)
+		if legacyURLStripe(firstURL) == legacyURLStripe(candidateURL) {
+			secondPR = candidate
+			break
+		}
+	}
+	if secondPR == 0 {
+		t.Fatal("could not find a URL colliding under the old 64-stripe coalescer")
+	}
+
+	direct := NewTestClient(upstream.URL, upstream.Client())
+	direct.EnableGETCoalescing()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := direct.GetPull(t.Context(), "o/r", firstPR)
+		firstDone <- err
+	}()
+	<-firstStarted
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := direct.GetPull(t.Context(), "o/r", secondPR)
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			close(releaseFirst)
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(releaseFirst)
+		<-firstDone
+		t.Fatal("an unrelated URL waited behind the blocked GET")
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func legacyURLStripe(value string) uint64 {
+	const (
+		offset = uint64(14695981039346656037)
+		prime  = uint64(1099511628211)
+	)
+	hash := offset
+	for i := 0; i < len(value); i++ {
+		hash ^= uint64(value[i])
+		hash *= prime
+	}
+	return hash % 64
 }
 
 func TestPersistentGatewayOwnsGraphQLRateLimitBackoff(t *testing.T) {

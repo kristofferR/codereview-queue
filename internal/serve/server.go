@@ -195,6 +195,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              s.opts.Addr,
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	go func() {

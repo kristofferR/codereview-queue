@@ -331,10 +331,12 @@ crq solver clear REPO | crq solver clear --fleet
 `--one-pass on` is a repository-scoped campaign mode: the first review anywhere on a PR consumes
 its only review round, then one isolated fixer/finalizer runs even if the review was clean.
 `--merge merge|squash|rebase` requires one-pass and lets the autofix watcher merge only the exact
-head that successful session released after GitHub reports it clean. A later push, failed session,
-draft, conflict, or failed check blocks instead of launching another fixer or merging unverified
-code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while preserving
-unrelated repository solver overrides; `crq solver clear REPO` discards every repo solver override.
+head that successful session released after GitHub reports it conflict-free. Review and check
+status are deliberately ignored because the fixer push makes the one allowed review stale. A later
+push, failed session, draft, or conflict blocks instead of launching another fixer or merging
+unverified code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while
+preserving unrelated repository solver overrides; `crq solver clear REPO` discards every repo
+solver override.
 
 `--models` is an ordered ranking. A provider/model outage parks that entry until its reported reset
 time and immediately tries the next one. These outages do not consume the attempt budget; ordinary

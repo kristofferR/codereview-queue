@@ -1341,7 +1341,8 @@ this repository. .sources says which layer answered for each setting.
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
   --one-pass     one review round, then exactly one fixer/finalizer session
-  --merge        merge the exact fixed head after checks (requires one-pass)
+  --merge        merge the exact fixed head once it is conflict-free (requires one-pass;
+                 review and check status are ignored)
   --inherit      hand named settings to the layer beneath
 
 One-pass and merge are repository-scoped temporary campaign settings; they

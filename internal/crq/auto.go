@@ -375,8 +375,9 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			// A one-pass campaign asks whether this PR has ever received its one
 			// review, regardless of later heads. The watcher owns the single fixer
 			// and exact-head merge after that boundary.
-			incremental := opts.Incremental && !s.cfgFor(state, repo).OnePass
-			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, incremental)
+			reviewCfg := repoSkips(repo)
+			incremental := opts.Incremental && !reviewCfg.OnePass
+			need, head, nerr := s.reviewNeeded(ctx, state, repo, pr.Number, incremental, reviewCfg.OnePass, s.logEnqueue)
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
@@ -493,8 +494,14 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		if len(cfg.Reviewers) == 0 && lastBotReview != "" {
 			return false, head, nil
 		}
+		// Review objects span the whole PR, but check runs do not: GitHub lists
+		// them by ref. The state index is the durable PR-scoped record that a
+		// check-bearing reviewer acted on an older head, so one-pass mode does
+		// not buy that reviewer a second run after the head moves.
+		activity := state.PreviewRound(repo, pr, head, s.clock())
 		for _, reviewer := range cfg.Reviewers {
-			if reviewedEver[dialect.NormalizeBotName(reviewer.Login)] {
+			login := dialect.NormalizeBotName(reviewer.Login)
+			if reviewedEver[login] || activity.Co(login).SeenActiveAt != nil {
 				return false, head, nil
 			}
 		}
@@ -516,8 +523,16 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		return false, "", err
 	}
 	marker := strings.TrimSpace(s.cfg.ReviewDoneMarker)
+	classifier := dialect.Classifier{
+		CodeRabbit: s.cr, Bot: cfg.Bot, ReviewCommand: cfg.ReviewCommand,
+		Primary: cfg.classifierPrimary(), CoReviewers: cfg.classifierCoReviewers(),
+	}
 	for _, comment := range comments {
 		if marker != "" && dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, marker) {
+			return false, head, nil
+		}
+		if configuredScope && cfg.coBotEnabled(comment.User.Login) &&
+			classifier.Classify(comment.User.Login, comment.Body, comment.ID, comment.CreatedAt, comment.UpdatedAt).Kind == dialect.EvCoClean {
 			return false, head, nil
 		}
 	}

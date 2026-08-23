@@ -438,7 +438,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				}
 				continue
 			}
-			if opts.dispatching() && report.Action != string(engine.ActionFix) {
+			if opts.dispatching() && report.Action != string(engine.ActionFix) && report.Action != string(engine.ActionBlocked) {
 				eligible, merged, mergeReason, mergeErr := s.mergeOnePassReady(ctx, repo, pull.Number)
 				if mergeErr != nil {
 					if _, throttled := ghapi.ThrottleWait(mergeErr); throttled {
@@ -862,6 +862,7 @@ func (s *Service) dispatchWithStart(
 	if sessionToken != "" {
 		cmd.Env = setCommandEnv(cmd.Env, workspace.TokenEnv, sessionToken)
 		cmd.Env = setCommandEnv(cmd.Env, "GITHUB_TOKEN", sessionToken)
+		cmd.Env = setCommandEnv(cmd.Env, "GH_TOKEN", sessionToken)
 	}
 	if s.log != nil {
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
@@ -993,8 +994,13 @@ func (s *Service) dispatchWithStart(
 			context.WithoutCancel(ctx), report.Repo, report.PR,
 		)
 		switch {
-		case mergeErr != nil && s.log != nil:
-			s.log.Printf("watch: immediate merge check for %s#%d failed: %v", report.Repo, report.PR, mergeErr)
+		case mergeErr != nil:
+			if s.log != nil {
+				s.log.Printf("watch: immediate merge check for %s#%d failed: %v", report.Repo, report.PR, mergeErr)
+			}
+			if opts.Once {
+				return false, "immediate one-pass merge failed: " + mergeErr.Error()
+			}
 		case eligible && s.log != nil:
 			s.log.Printf("watch: immediate merge check for %s#%d: merged=%t reason=%s", report.Repo, report.PR, merged, reason)
 		}

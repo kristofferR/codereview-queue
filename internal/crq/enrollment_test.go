@@ -929,6 +929,35 @@ func TestPreviewEnrollBoundsItsPerPullRequestReads(t *testing.T) {
 	}
 }
 
+func TestPreviewEnrollUsesTheOnePassReviewPredicate(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, cfg.RequiredBots, nil, false)
+	repo, pr, head := "o/campaign", 7, "abcdef1234567890"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "kristofferR"}}
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	review := ghapi.Review{CommitID: "1111111111111111", State: "COMMENTED", Body: "reviewed"}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := svc.PreviewEnroll(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Eligible != 0 || impact.Metered != 0 {
+		t.Fatalf("one-pass preview = %+v, want the older review to consume the campaign cap", impact)
+	}
+}
+
 // The preview quotes a price for a BACKLOG, and enrolling spends the account's
 // included reviews down as it works through it. Pricing every pull request
 // against the same unchanged count told an operator with one review left that a

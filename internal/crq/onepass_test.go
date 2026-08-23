@@ -129,6 +129,98 @@ func TestOnePassPreservesTheReviewSettleWait(t *testing.T) {
 	}
 }
 
+func TestOnePassCollectsEveryRequiredReviewBeforeItsOnlyFixer(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 52, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 871, "adadadad2"
+	enableOnePass(t, f, repo, "squash")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		round, err := st.NewRound(repo, pr, head, base)
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseReviewing
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	finding := dialect.Finding{ID: "first", Commit: head, Severity: "major"}
+	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
+	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}, Pending: []string{"later-reviewer[bot]"}}
+
+	got, handled, err := f.svc.onePassNext(f.ctx, report, action)
+	if err != nil || !handled {
+		t.Fatalf("handled = %t, err = %v", handled, err)
+	}
+	if got.Action != string(engine.ActionWait) || got.RecheckAfter == nil || len(got.Findings) != 0 {
+		t.Fatalf("report = %+v, want a wait until the complete round is collected", got)
+	}
+}
+
+func TestOnePassAddsFinalizerToTheReviewFindings(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 54, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 872, "adadadad3"
+	enableOnePass(t, f, repo, "squash")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		round, err := st.NewRound(repo, pr, head, base)
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseCompleted
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	finding := dialect.Finding{ID: "review", Commit: head, Severity: "major"}
+	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
+	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}}
+
+	got, handled, err := f.svc.onePassNext(f.ctx, report, action)
+	if err != nil || !handled {
+		t.Fatalf("handled = %t, err = %v", handled, err)
+	}
+	if len(got.Findings) != 2 || got.Findings[0].ID != finding.ID || got.Findings[1].Source != onePassFinalizeSource {
+		t.Fatalf("findings = %+v, want the review finding plus finalizer", got.Findings)
+	}
+}
+
+func TestOnePassHoldBlocksFinalizerAndMerge(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 56, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 873, "adadadad4"
+	f.openPull(repo, pr, head)
+	enableOnePass(t, f, repo, "squash")
+	mergeable := true
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Mergeable = &mergeable
+	pull.MergeableState = "clean"
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.Hold(repo, pr, "operator pause", "test", base)
+		st.MarkOnePassReady(repo, pr, head, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, handled, err := f.svc.onePassNext(f.ctx, NextReport{Repo: repo, PR: pr, Head: head}, engine.Action{Kind: engine.ActionDone})
+	if err != nil || !handled || report.Action != string(engine.ActionBlocked) || !strings.Contains(report.Reason, "operator pause") {
+		t.Fatalf("held next = handled %t report %+v err %v", handled, report, err)
+	}
+	eligible, merged, reason, err := f.svc.mergeOnePassReady(f.ctx, repo, pr)
+	if err != nil || !eligible || merged || !strings.Contains(reason, "operator pause") {
+		t.Fatalf("held merge = eligible %t merged %t reason %q err %v", eligible, merged, reason, err)
+	}
+	if len(f.gh.merged) != 0 {
+		t.Fatalf("held PR reached merge endpoint: %v", f.gh.merged)
+	}
+}
+
 func TestOnePassFinalizerBypassesSeverityFiltering(t *testing.T) {
 	findings := []dialect.Finding{
 		{ID: "final", Source: onePassFinalizeSource, Severity: "major"},
@@ -293,6 +385,33 @@ func TestRetireMergedNormalizesEveryArchivedAttempt(t *testing.T) {
 	}
 }
 
+func TestAlreadyMergedOnePassPropagatesRetirementFailure(t *testing.T) {
+	base := time.Date(2026, 8, 23, 11, 20, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 916, "cbcbcbcb12345678"
+	f.openPull(repo, pr, head)
+	enableOnePass(t, f, repo, "squash")
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Merged = true
+	pull.State = "closed"
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, pr, head, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeErr := errors.New("retirement write failed")
+	f.svc.store = &failNthUpdateStore{StateStore: f.store, n: 1, err: writeErr}
+
+	eligible, merged, reason, err := f.svc.mergeOnePassReady(f.ctx, repo, pr)
+	if !eligible || !merged || reason != "already merged" || !errors.Is(err, writeErr) {
+		t.Fatalf("already-merged result = eligible %t merged %t reason %q err %v", eligible, merged, reason, err)
+	}
+}
+
 func TestOnePassDryRunNeverMergesOrClearsTheReadyHead(t *testing.T) {
 	base := time.Date(2026, 8, 23, 11, 30, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
@@ -352,6 +471,40 @@ func TestOnePassNeverRefixesOrMergesAHeadThatMovedAfterFixing(t *testing.T) {
 	}
 	if len(f.gh.merged) != 0 {
 		t.Fatalf("moved head reached merge endpoint: %v", f.gh.merged)
+	}
+}
+
+func TestWatchKeepsMovedOnePassReadyHeadBlocked(t *testing.T) {
+	base := time.Date(2026, 8, 23, 12, 15, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/security", 921
+	fixed, moved := "dadadada12345678", "ebebebeb12345678"
+	f.openPull(repo, pr, moved)
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Number = pr
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	enableOnePass(t, f, repo, "squash")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, pr, fixed, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	if err := f.svc.watchPass(f.ctx, WatchOptions{Repos: []string{repo}, Dispatch: dispatchOn()}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != string(engine.ActionBlocked) {
+		t.Fatalf("events = %+v, want the moved ready head to remain blocked", events)
+	}
+	if len(f.gh.merged) != 0 {
+		t.Fatalf("moved ready head reached merge endpoint: %v", f.gh.merged)
 	}
 }
 
@@ -466,5 +619,73 @@ func TestOnePassReviewCapRecognizesCompletedBugbotCheck(t *testing.T) {
 	}
 	if need {
 		t.Fatal("a completed Bugbot check did not consume the one-pass review cap")
+	}
+}
+
+func TestOnePassReviewCapRecognizesPriorHeadBugbotActivity(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = []Reviewer{
+		{Login: cfg.Bot, Required: true, Budget: dialect.BudgetAccount},
+		{Login: dialect.BugbotLogin, Name: "Bugbot", Budget: dialect.BudgetNone},
+	}
+	cfg.CoBots = []CoBotConfig{{Name: "bugbot", Login: dialect.BugbotLogin}}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	repo, pr, head := "owner/bugbot", 4, "cccccccc12345678"
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	seen := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoActivity = map[string]map[string]time.Time{
+			QueueKey(repo, pr): {dialect.NormalizeBotName(dialect.BugbotLogin): seen},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need, _, err := svc.reviewNeeded(ctx, st, repo, pr, false, true, noAnnounce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("prior-head Bugbot activity did not consume the one-pass review cap")
+	}
+}
+
+func TestOnePassReviewCapRecognizesCodexCleanComment(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = []Reviewer{
+		{Login: cfg.Bot, Required: true, Budget: dialect.BudgetAccount},
+		{Login: dialect.CodexBotLogin, Name: "Codex", Budget: dialect.BudgetNone},
+	}
+	cfg.CoBots = []CoBotConfig{{Name: "codex", Login: dialect.CodexBotLogin}}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	repo, pr, head := "owner/codex", 5, "bbbbbbbb12345678"
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	comment := ghapi.IssueComment{ID: 7, Body: corpusMessage(t, "codex/clean-summary-legacy.md"), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	comment.User.Login = dialect.CodexBotLogin
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{comment}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need, _, err := svc.reviewNeeded(ctx, st, repo, pr, false, true, noAnnounce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("Codex's clean issue comment did not consume the one-pass review cap")
 	}
 }

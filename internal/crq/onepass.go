@@ -28,6 +28,14 @@ func (s *Service) onePassNext(
 	if !cfg.OnePass {
 		return report, false, nil
 	}
+	if hold, held := st.HeldPR(report.Repo, report.PR); held {
+		report.Action = string(engine.ActionBlocked)
+		report.Reason = "held: " + hold.Reason
+		report.Findings = []dialect.Finding{}
+		report.Pending = nil
+		report.RecheckAfter = nil
+		return report, true, nil
+	}
 
 	// The owning session must keep receiving the ordinary fix/push decision.
 	// In particular, its documented `crq next` pre-push check cannot be made to
@@ -65,6 +73,7 @@ func (s *Service) onePassNext(
 	}
 
 	reviewed := false
+	collectingRound := false
 	if round := st.Round(report.Repo, report.PR); round != nil && round.Head == report.Head {
 		switch round.Phase {
 		case PhaseCompleted:
@@ -94,6 +103,7 @@ func (s *Service) onePassNext(
 				return report, true, nil
 			}
 		case PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
+			collectingRound = true
 			// Findings bound to this head are the review answer. Without them,
 			// this is still the one existing round and must finish or block; it
 			// must never be replaced by the finalizer early.
@@ -121,12 +131,31 @@ func (s *Service) onePassNext(
 	// A completed review can still be inside its settle window while trailing
 	// inline findings arrive. Preserve that wait; launching the finalizer now
 	// would let it release and merge before those findings are observable.
-	if action.Kind == engine.ActionWait && len(action.Pending) == 0 {
+	if action.Kind == engine.ActionBlocked {
+		return report, true, nil
+	}
+	if action.Kind == engine.ActionWait && (collectingRound || len(action.Pending) == 0) {
+		return report, true, nil
+	}
+	// NextAction deliberately surfaces findings first, even while another
+	// required reviewer is pending. A one-pass campaign has only one fixer, so
+	// hold all feedback until the complete round is collected instead of giving
+	// that sole session an incomplete findings file.
+	if collectingRound && len(action.Pending) > 0 {
+		report.Action = string(engine.ActionWait)
+		report.Reason = "collecting the complete one-pass review round"
+		report.Findings = []dialect.Finding{}
+		report.Pending = action.Pending
+		at := s.clock().Add(s.waitTick()).UTC()
+		report.RecheckAfter = &at
 		return report, true, nil
 	}
 
-	// Keep real feedback intact. The same one session will judge and fix it.
+	// Keep real feedback and add the final integration/security pass to the same
+	// sole session. A non-clean first review needs that finalizer just as much as
+	// a clean one does.
 	if action.Kind == engine.ActionFix && len(report.Findings) > 0 {
+		report.Findings = append(report.Findings, onePassFinalizer(report.Head))
 		return report, true, nil
 	}
 
@@ -135,7 +164,14 @@ func (s *Service) onePassNext(
 	// the synthetic item travels through the existing isolated dispatch path.
 	report.Action = string(engine.ActionFix)
 	report.Reason = "first review round complete; run the one-pass fixer/finalizer"
-	report.Findings = []dialect.Finding{{
+	report.Findings = []dialect.Finding{onePassFinalizer(report.Head)}
+	report.Pending = nil
+	report.RecheckAfter = nil
+	return report, true, nil
+}
+
+func onePassFinalizer(head string) dialect.Finding {
+	return dialect.Finding{
 		ID:       onePassFinalizeSource,
 		Bot:      "crq",
 		Severity: "major",
@@ -143,12 +179,9 @@ func (s *Service) onePassNext(
 		Body: "Fetch and merge the latest base branch without rewriting history, resolve conflicts, " +
 			"inspect the complete PR diff for security and correctness, and run the repository's documented checks. " +
 			"Commit and push only if the branch changes.",
-		Commit: report.Head,
+		Commit: head,
 		Source: onePassFinalizeSource,
-	}}
-	report.Pending = nil
-	report.RecheckAfter = nil
-	return report, true, nil
+	}
 }
 
 // completeUnsuccessfulDispatch records a real, available code-fix session as
@@ -241,7 +274,9 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, false, "", err
 	}
 	if pull.Merged {
-		_ = s.retireOnePassMerged(ctx, repo, pr)
+		if err := s.retireOnePassMerged(ctx, repo, pr); err != nil {
+			return true, true, "already merged", err
+		}
 		return true, true, "already merged", nil
 	}
 	if !strings.EqualFold(pull.State, "open") {
@@ -249,6 +284,9 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	}
 	if pull.Draft {
 		return true, false, "waiting: pull request is still a draft", nil
+	}
+	if hold, held := st.HeldPR(repo, pr); held {
+		return true, false, "held: " + hold.Reason, nil
 	}
 	if !st.OnePassReady(repo, pr, pull.Head.SHA) {
 		return true, false, fmt.Sprintf("head moved after the one-pass fixer (%s); refusing an unverified merge", progress.ReadyHead), nil

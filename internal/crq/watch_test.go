@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/workspace"
 )
@@ -25,6 +26,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	sha := originRepo(t, filepath.Join(base, repo))
 	t.Setenv("CRQ_REMOTE_BASE", base)
 	t.Setenv("GITHUB_TOKEN", "ghp_session_token")
+	t.Setenv("GH_TOKEN", "stale_higher_precedence_token")
 	t.Setenv(workspace.TokenEnv, "stale_git_token")
 
 	cfg := firingConfig()
@@ -50,8 +52,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.json")
 	script := filepath.Join(t.TempDir(), "session.sh")
 	body := "#!/bin/sh\n" +
-		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\",\"github_token\":\"%s\",\"git_token\":\"%s\"}' " +
-		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" \"$GITHUB_TOKEN\" \"$CRQ_GIT_TOKEN\" > " + record + "\n"
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\",\"github_token\":\"%s\",\"gh_token\":\"%s\",\"git_token\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" \"$GITHUB_TOKEN\" \"$GH_TOKEN\" \"$CRQ_GIT_TOKEN\" > " + record + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +78,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 		Findings    string `json:"findings"`
 		Token       string `json:"token"`
 		GitHubToken string `json:"github_token"`
+		GHToken     string `json:"gh_token"`
 		GitToken    string `json:"git_token"`
 	}
 	data, err := os.ReadFile(record)
@@ -99,8 +102,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	if got.Token == "" {
 		t.Fatal("the session was given no dispatch token for its crq next calls")
 	}
-	if got.GitHubToken != "ghp_session_token" || got.GitToken != "ghp_session_token" {
-		t.Fatalf("session credentials = github:%q git:%q, want the daemon's current token", got.GitHubToken, got.GitToken)
+	if got.GitHubToken != "ghp_session_token" || got.GHToken != "ghp_session_token" || got.GitToken != "ghp_session_token" {
+		t.Fatalf("session credentials = github:%q gh:%q git:%q, want the daemon's current token", got.GitHubToken, got.GHToken, got.GitToken)
 	}
 	// OUTSIDE the worktree: at the repository root it is an untracked file, and
 	// a session following the documented `git add -A` push would commit crq's
@@ -682,6 +685,45 @@ func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
 	}
 	if events[0].Dispatched || !strings.Contains(events[0].Skipped, "fix session failed") {
 		t.Errorf("event = %#v, want dispatched=false with the session failure", events[0])
+	}
+}
+
+func TestOneShotDispatchReportsImmediateOnePassMergeFailure(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 131
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	mergeable := true
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Mergeable, pull.MergeableState = &mergeable, "clean"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	mergeErr := errors.New("merge endpoint unavailable")
+	gh.mergeErrs[fakeKey(repo, pr)] = mergeErr
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on, method, one := true, "squash", 1
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on, MergeMethod: &method, MaxAttempts: &one}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, sha, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: sha, Severity: "major"}},
+	}
+	token := "one-pass-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 1); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Once: true, Command: []string{"/usr/bin/true"}}, report, token)
+	if ok || !strings.Contains(why, mergeErr.Error()) {
+		t.Fatalf("one-shot dispatch = (%t, %q), want immediate merge failure", ok, why)
 	}
 }
 

@@ -815,6 +815,45 @@ func TestAutoReviewOnceReleasesLeader(t *testing.T) {
 	}
 }
 
+func TestAutoReviewAppliesOnePassConfiguredReviewerScope(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	cfg.Reviewers = []Reviewer{
+		{Login: cfg.Bot, Required: true, Budget: dialect.BudgetAccount},
+		{Login: dialect.CodexBotLogin, Name: "Codex", Budget: dialect.BudgetNone},
+	}
+	cfg.CoBots = []CoBotConfig{{Name: "codex", Login: dialect.CodexBotLogin}}
+	repo, pr, head := "o/app", 4, "abcdef1234567890"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	review := ghapi.Review{CommitID: "1111111111111111", State: "COMMENTED", Body: "reviewed"}
+	review.User.Login = dialect.CodexBotLogin
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round != nil {
+		t.Fatalf("one-pass scan queued a second configured review: %+v", round)
+	}
+}
+
 func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

@@ -330,7 +330,7 @@ crq solver REPO                                       # effective settings + whe
 crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
 crq solver set REPO --severities minor,potential --ask uncertain
 crq solver set REPO --prompt "This project uses bun, never npm."
-crq solver set REPO --models gpt-5.6-sol --effort medium --attempts 1 --one-pass on --merge squash
+crq solver set REPO --models gpt-5.6-sol --effort medium --one-pass on --merge squash
 crq solver set --fleet --effort medium                # the default every repository inherits
 crq solver set REPO --inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge
 crq solver clear REPO | crq solver clear --fleet
@@ -340,11 +340,13 @@ crq solver clear REPO | crq solver clear --fleet
 its only review round, then one isolated fixer/finalizer runs even if the review was clean.
 `--merge merge|squash|rebase` requires one-pass and lets the autofix watcher merge only the exact
 head that successful session released after GitHub reports it conflict-free. Review and check
-status are deliberately ignored because the fixer push makes the one allowed review stale. A later
-push, failed session, draft, or conflict blocks instead of launching another fixer or merging
-unverified code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while
-preserving unrelated repository solver overrides; `crq solver clear REPO` discards every repo
-solver override.
+status are deliberately ignored because the fixer push makes the one allowed review stale. The
+finalizer must integrate the base crq observed, and crq verifies that base immediately before the
+merge request. GitHub's merge API atomically guards the head SHA but has no expected-base field, so
+a base update racing that final request is included by GitHub's merge transaction. A later push,
+failed session, draft, or conflict blocks instead of launching another fixer or merging unverified
+code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while preserving
+unrelated repository solver overrides; `crq solver clear REPO` discards every repo solver override.
 
 `--models` is an ordered ranking. A provider/model outage parks that entry until its reported reset
 time and immediately tries the next one. These outages do not consume the attempt budget; ordinary

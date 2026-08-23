@@ -6,14 +6,14 @@ import { CampaignEditor } from "./CampaignEditor";
 afterEach(cleanup);
 
 describe("CampaignEditor", () => {
-  it("preserves agent-default effort for an active campaign", () => {
+  it("preserves agent defaults and ordinary attempt limits for an active campaign", () => {
     const solver: RepoSolver = {
       overridden: true,
       models: ["gpt-5.6-sol"],
       model_choices: ["gpt-5.6-sol"],
       model: "gpt-5.6-sol",
       effort: "",
-      max_attempts: 1,
+      max_attempts: 3,
       severities: ["critical", "major"],
       ask_mode: "blocked",
       forks: false,

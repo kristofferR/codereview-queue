@@ -992,7 +992,7 @@ func (s *Service) dispatchWithStart(
 		// Prefer the base current after the finalizer when the resulting head
 		// actually contains it. If GitHub advances again after the agent has
 		// finished, retain the pre-launch base this checkout can still prove and
-		// let the exact-base merge gate wait rather than terminalizing the sole
+		// let the post-fix base verification gate wait rather than terminalizing the sole
 		// successful fixer.
 		refreshed, refreshErr := s.gh.GetPull(context.WithoutCancel(ctx), report.Repo, report.PR)
 		refreshedBase := strings.TrimSpace(refreshed.Base.SHA)
@@ -1325,7 +1325,12 @@ func (s *Service) claimDispatchModels(
 		// revision this CAS will write.
 		claimCfg := s.cfgFor(*st, report.Repo)
 		solver := st.EffectiveSolver(report.Repo)
-		if hasOnePassFinalizer(report.Findings) &&
+		finalizer := hasOnePassFinalizer(report.Findings)
+		if claimCfg.OnePass && !finalizer {
+			reason, byDesign = "a one-pass campaign became active after this ordinary fix report was observed; recompute the pull request", true
+			return ErrNoChange
+		}
+		if finalizer &&
 			(!claimCfg.OnePass || report.onePassCampaign == "" ||
 				solver.OnePassCampaign != report.onePassCampaign) {
 			reason, byDesign = "the campaign that produced this one-pass finalizer is no longer active", true
@@ -1355,7 +1360,7 @@ func (s *Service) claimDispatchModels(
 			models = []string{claimCfg.FixModel}
 		}
 		maxAttempts := recordedMaxAttemptsIn(*st, report.Repo, fallbackMaxAttempts)
-		if hasOnePassFinalizer(report.Findings) && claimCfg.OnePass {
+		if finalizer {
 			maxAttempts = 1
 		}
 		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
@@ -1363,8 +1368,10 @@ func (s *Service) claimDispatchModels(
 			reason, byDesign = why, true
 			return ErrNoChange
 		}
-		round.Dispatch.OnePass = claimCfg.OnePass
-		round.Dispatch.OnePassCampaign = solver.OnePassCampaign
+		round.Dispatch.OnePass = finalizer
+		if finalizer {
+			round.Dispatch.OnePassCampaign = report.onePassCampaign
+		}
 		selectedModel = round.Dispatch.Model
 		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)

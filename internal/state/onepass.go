@@ -37,9 +37,11 @@ func (s *State) OnePassReady(repo string, pr int, head string) bool {
 		(strings.HasPrefix(head, p.ReadyHead) || strings.HasPrefix(p.ReadyHead, head))
 }
 
-// OnePassReadyOn reports whether both sides of the finalized combination are
-// still exact. GitHub's merge API separately binds the merge to ReadyHead; this
-// base check prevents an unchanged head being merged after the base advances.
+// OnePassReadyOn reports whether both sides of the finalized combination still
+// match the latest observation. GitHub's merge API atomically binds the merge
+// to ReadyHead but exposes no expected-base field, so this rejects an already
+// advanced base while a base push racing the final request is included in
+// GitHub's server-side merge transaction.
 func (s *State) OnePassReadyOn(repo string, pr int, head, base string) bool {
 	p, ok := s.OnePass[Key(repo, pr)]
 	return ok && s.OnePassReady(repo, pr, head) && p.ReadyBase != "" && base != "" &&

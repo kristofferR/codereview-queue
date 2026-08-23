@@ -1112,10 +1112,10 @@ type Pull struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
 	} `json:"head"`
-	// Base identifies the exact base revision GitHub currently proposes to
-	// combine with Head. One-pass campaigns bind their post-fix hand-off to this
-	// SHA so a later base-branch push cannot turn an already-finished security
-	// pass into authorization to merge a different combined revision.
+	// Base identifies the base revision GitHub proposed to combine with Head in
+	// this observation. One-pass campaigns require the finalizer to integrate it
+	// and reject an already-moved base before merge. GitHub's pull-merge endpoint
+	// has no expected-base parameter, so it remains an observation, not a CAS.
 	Base struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`

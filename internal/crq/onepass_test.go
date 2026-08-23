@@ -15,9 +15,8 @@ import (
 func enableOnePass(t *testing.T, f *replayFixture, repo string, merge string) {
 	t.Helper()
 	on := true
-	one := 1
 	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{
-		OnePass: &on, MergeMethod: &merge, MaxAttempts: &one,
+		OnePass: &on, MergeMethod: &merge,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +47,12 @@ func TestOnePassUsesTheOnlyReviewThenCreatesOneFinalizer(t *testing.T) {
 	}
 	if round := f.round(repo, pr); round != nil {
 		t.Fatalf("one-pass finalizer enqueued a second review round: %+v", round)
+	}
+	f.gh.mu.Lock()
+	reads := f.gh.pullReads[fakeKey(repo, pr)]
+	f.gh.mu.Unlock()
+	if reads != 1 {
+		t.Fatalf("pull reads = %d, want the campaign decision to reuse Feedback's one observation", reads)
 	}
 }
 
@@ -313,7 +318,7 @@ func TestOnePassQueuedDedupeIsVoidedWhenTheCampaignEndsInsideItsWrite(t *testing
 		}
 	}
 
-	report := NextReport{Repo: repo, PR: pr, Head: head, Action: string(engine.ActionWait)}
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: string(engine.ActionWait), onePassReviewed: true}
 	got, handled, err := f.svc.onePassNext(f.ctx, report, engine.Action{Kind: engine.ActionWait}, true)
 	if err != nil || !handled {
 		t.Fatalf("onePassNext = handled %t report %+v err %v", handled, got, err)
@@ -342,7 +347,7 @@ func TestOnePassPreservesTheReviewSettleWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	recheck := base.Add(time.Minute)
-	report := NextReport{Action: string(engine.ActionWait), Repo: repo, PR: pr, Head: head, RecheckAfter: &recheck}
+	report := NextReport{Action: string(engine.ActionWait), Repo: repo, PR: pr, Head: head, RecheckAfter: &recheck, onePassReviewed: true}
 	action := engine.Action{Kind: engine.ActionWait, Reason: "review is settling"}
 
 	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
@@ -371,7 +376,7 @@ func TestOnePassCollectsEveryRequiredReviewBeforeItsOnlyFixer(t *testing.T) {
 		t.Fatal(err)
 	}
 	finding := dialect.Finding{ID: "first", Commit: head, Severity: "major"}
-	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
+	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}, onePassReviewed: true}
 	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}, Pending: []string{"later-reviewer[bot]"}}
 
 	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
@@ -402,7 +407,7 @@ func TestOnePassAddsFinalizerToTheReviewFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	finding := dialect.Finding{ID: "review", Commit: head, Severity: "major"}
-	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
+	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}, onePassReviewed: true}
 	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}}
 
 	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
@@ -490,6 +495,29 @@ func TestEnablingOnePassDoesNotAdoptAnOrdinaryLiveSession(t *testing.T) {
 	}
 	if progress, ok := st.OnePassProgressFor(repo, pr); ok {
 		t.Fatalf("ordinary session became one-pass handoff: %+v", progress)
+	}
+}
+
+func TestDispatchRejectsAnOrdinaryReportWhenOnePassActivatesInsideTheClaim(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 56, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 850, "aeaeaeae12345678"
+	seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseCompleted, base, 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: head[:9], Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{ID: "ordinary", Commit: head[:9], Severity: "major"}},
+	}
+
+	hooked := &hookedStore{StateStore: f.store}
+	f.svc.store = hooked
+	hooked.hook = func() { enableOnePass(t, f, repo, "squash") }
+
+	if ok, why, byDesign := f.svc.claimDispatch(f.ctx, report, "stale-ordinary", 3); ok ||
+		!byDesign || !strings.Contains(why, "became active") {
+		t.Fatalf("stale ordinary claim = ok %t byDesign %t reason %q", ok, byDesign, why)
+	}
+	if round := f.round(repo, pr); round == nil || round.Dispatch != nil {
+		t.Fatalf("stale ordinary report gained a campaign dispatch: %+v", round)
 	}
 }
 

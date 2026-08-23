@@ -11,7 +11,7 @@ type Confirmation = "save" | "end" | "reset" | null;
 /**
  * The temporary bulk-review workflow, kept separate from ordinary fix tuning.
  * A campaign is a repository policy boundary: one review round, one isolated
- * fixer/finalizer per PR, then an optional exact-revision merge.
+ * fixer/finalizer per PR, then an optional exact-head merge.
  */
 export function CampaignEditor({
   repo,
@@ -42,11 +42,7 @@ export function CampaignEditor({
   }, [active, currentEffort, currentMerge, currentModel]);
 
   const dirty =
-    !active ||
-    model !== currentModel ||
-    effort !== currentEffort ||
-    mergeMethod !== currentMerge ||
-    solver.max_attempts !== 1;
+    !active || model !== currentModel || effort !== currentEffort || mergeMethod !== currentMerge;
 
   const run = (solverChange: NonNullable<ActionBody["solver"]>) => {
     setWarning(null);
@@ -93,7 +89,7 @@ export function CampaignEditor({
                 title={mergeMethod ? "Merge fixed head" : "Stop after fixing"}
                 detail={
                   mergeMethod
-                    ? "Exact head and base, open, non-draft, unheld, conflict-free."
+                    ? "Exact fixed head, open, non-draft, unheld, conflict-free."
                     : "Leave the finalized PR for a person."
                 }
               />
@@ -155,8 +151,9 @@ export function CampaignEditor({
         {mergeMethod && (
           <div className="mt-3 border-l-[3px] border-warn-fg bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
             Auto-merge does not wait for a review bot to approve the fixer commit. It binds the
-            merge to the exact pushed head and the base revision the finalizer integrated, and
-            refuses drafts, holds, closed PRs, moved revisions, and merge conflicts.
+            merge atomically to the exact pushed head, verifies the finalizer&apos;s base
+            immediately beforehand, and refuses drafts, holds, closed PRs, moved revisions, and
+            merge conflicts. GitHub includes a base update that races the final merge request.
           </div>
         )}
         {laggingHosts.length > 0 && (
@@ -269,7 +266,6 @@ export function campaignChange(
   const change: NonNullable<ActionBody["solver"]> = {
     one_pass: true,
     merge_method: edited.mergeMethod,
-    max_attempts: 1,
   };
   if (edited.model !== (solver.model ?? "")) {
     change.models =

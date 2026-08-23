@@ -30,6 +30,10 @@ type NextReport struct {
 	// campaign that produced it. It is watch-only state: the dispatch CAS checks
 	// it again so disabling/restarting a campaign cannot launch stale work.
 	onePassCampaign string
+	// onePassReviewed is PR-wide genuine review evidence derived from Feedback's
+	// existing observation. Keeping it on the in-process report lets the campaign
+	// decision reuse that snapshot instead of reading the PR a second time.
+	onePassReviewed bool
 	// dispatchUntil is the locally known expiry of a watch-only dispatch claim.
 	// It lets the session stop at the lease boundary if shared-state writes fail.
 	dispatchUntil time.Time
@@ -299,6 +303,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	}
 	report.Head = feedback.Head
 	report.ReviewedBy = feedback.ReviewedBy
+	report.onePassReviewed = feedback.onePassReviewed
 
 	st, _, err := s.store.Load(ctx)
 	if err != nil {

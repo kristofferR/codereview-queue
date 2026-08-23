@@ -73,6 +73,10 @@ type FeedbackReport struct {
 	// A completion write revalidates it under CAS so an override committed after
 	// observation cannot turn stale convergence into a permanent dedup marker.
 	config Config
+	// onePassReviewed is the campaign's PR-wide evidence predicate evaluated
+	// from this report's single GitHub observation. It is deliberately not part
+	// of the stable feedback JSON contract.
+	onePassReviewed bool
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -97,6 +101,55 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 // account-quota evidence. It is the dashboard's read-only path.
 func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
 	return s.feedback(ctx, repo, pr, false)
+}
+
+// onePassReviewEvidence answers the campaign's PR-wide "has any configured
+// reviewer genuinely completed a review?" question from Feedback's existing
+// observation. It deliberately mirrors reviewNeeded's anyConfigured branch,
+// but performs no GitHub reads: reviews and comments span the PR, completed
+// check runs cover the observed head, and CoReviewerAnswered is the durable
+// record for a check/comment answer on an older head.
+func onePassReviewEvidence(st State, cfg Config, repo string, pr int, obs observation) bool {
+	configured := make(map[string]bool, len(cfg.Reviewers))
+	for _, reviewer := range cfg.Reviewers {
+		login := dialect.NormalizeBotName(reviewer.Login)
+		configured[login] = true
+		if st.CoReviewerAnswered(repo, pr, login) {
+			return true
+		}
+	}
+
+	primary := dialect.NormalizeBotName(cfg.Bot)
+	for _, review := range obs.reviews {
+		login := dialect.NormalizeBotName(review.User.Login)
+		if review.CommitID == "" || strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
+		if cfg.isConfiguredBot(review.User.Login) &&
+			strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "" {
+			continue
+		}
+		if configured[login] || (len(cfg.Reviewers) == 0 && login == primary) {
+			return true
+		}
+	}
+
+	for _, check := range obs.eng.Checks {
+		if cfg.coBotEnabled(check.Bot) &&
+			(check.Verdict == dialect.CheckDone || check.Verdict == dialect.CheckDoneClean) {
+			return true
+		}
+	}
+	for _, event := range obs.eng.Events {
+		if dialect.NormalizeBotName(event.Bot) == primary &&
+			event.Kind == dialect.EvNoAction && !event.SummaryOnly {
+			return true
+		}
+		if cfg.coBotEnabled(event.Bot) && event.Kind == dialect.EvCoClean {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) feedback(ctx context.Context, repo string, pr int, persist bool) (FeedbackReport, error) {
@@ -159,17 +212,18 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		}
 	}
 	report := FeedbackReport{
-		Status:     "feedback",
-		Repo:       repo,
-		PR:         pr,
-		Head:       head,
-		Open:       obs.eng.Open,
-		HeadRef:    pull.Head.Ref,
-		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
-		ReviewedBy: map[string]bool{},
-		config:     cfg,
-		Findings:   []dialect.Finding{},
-		CheckedAt:  now,
+		Status:          "feedback",
+		Repo:            repo,
+		PR:              pr,
+		Head:            head,
+		Open:            obs.eng.Open,
+		HeadRef:         pull.Head.Ref,
+		HeadRepo:        NormalizeRepo(pull.Head.Repo.FullName),
+		ReviewedBy:      map[string]bool{},
+		config:          cfg,
+		Findings:        []dialect.Finding{},
+		CheckedAt:       now,
+		onePassReviewed: onePassReviewEvidence(st, cfg, repo, pr, obs),
 	}
 
 	// The completion anchor is the current round only when it still tracks this

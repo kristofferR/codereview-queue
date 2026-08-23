@@ -74,40 +74,26 @@ func (s *Service) onePassNext(
 		return report, true, nil
 	}
 
-	reviewed := false
+	reviewed := report.onePassReviewed
 	collectingRound := false
 	if round := st.Round(report.Repo, report.PR); round != nil && round.Head == report.Head {
 		switch round.Phase {
 		case PhaseCompleted:
 			// Completed is a scheduling phase, not proof that code was reviewed:
 			// summary-only and explicit-skipped primary responses deliberately
-			// complete a round so it does not retry forever. Remove the marker and
-			// ask the PR-wide evidence predicate before authorizing the campaign's
-			// only fixer and any merge that follows.
-			probe := cloneState(st)
-			delete(probe.Rounds, QueueKey(report.Repo, report.PR))
-			need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
-			if err != nil {
-				return report, true, err
-			}
-			if need {
+			// complete a round so it does not retry forever. Require the PR-wide
+			// evidence derived from Feedback's observation before authorizing the
+			// campaign's only fixer and any merge that follows.
+			if !reviewed {
 				return blockedOnePass(report, "the one-pass round completed without review evidence; refusing to run a fixer or merge"), true, nil
 			}
-			reviewed = true
 		case PhaseQueued:
-			// Ignore this not-yet-fired marker while asking whether an older
-			// review already consumed the PR's one round. If not, the ordinary
-			// path must advance this queued round.
-			probe := cloneState(st)
-			delete(probe.Rounds, QueueKey(report.Repo, report.PR))
-			need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
-			if err != nil {
-				return report, true, err
-			}
-			if need {
+			// An older review may already have consumed the PR's one round. If the
+			// shared observation found none, the ordinary path must advance this
+			// queued round.
+			if !reviewed {
 				return report, false, nil
 			}
-			reviewed = true
 			// Persist the one-pass decision before handing work to the fixer. A
 			// queued marker left fire-eligible can otherwise be restored after
 			// the session and spend a second review round.
@@ -128,15 +114,6 @@ func (s *Service) onePassNext(
 			}
 			reviewed = true
 		}
-	}
-	if !reviewed {
-		probe := cloneState(st)
-		delete(probe.Rounds, QueueKey(report.Repo, report.PR))
-		need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
-		if err != nil {
-			return report, true, err
-		}
-		reviewed = !need
 	}
 	if !reviewed {
 		return report, false, nil
@@ -310,7 +287,8 @@ func (s *Service) completeSuccessfulDispatchWithVerification(
 
 // mergeOnePassReady performs the post-fix merge gate. eligible is false for an
 // ordinary converged PR; callers use it to avoid changing ordinary watch
-// events. Every network decision is rechecked against the exact current head.
+// events. GitHub atomically guards the released head; the finalized base is
+// rechecked immediately before that request because GitHub exposes no base CAS.
 func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (eligible, merged bool, reason string, err error) {
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -367,7 +345,7 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, false, "post-fix merge is paused because autofix is off for this repository", nil
 	}
 	if s.cfg.DryRun {
-		return true, false, "dry run: exact-head and exact-base merge not performed", nil
+		return true, false, "dry run: exact-head merge after finalized-base precheck not performed", nil
 	}
 	if pull.Mergeable == nil || strings.EqualFold(pull.MergeableState, "unknown") || pull.MergeableState == "" {
 		return true, false, "waiting for GitHub to compute mergeability", nil

@@ -127,7 +127,6 @@ describe("settings deltas", () => {
     ).toEqual({
       models: ["gpt-5.6-sol", "gpt-5.6-terra"],
       effort: "medium",
-      max_attempts: 1,
       one_pass: true,
       merge_method: "squash",
     });
@@ -140,7 +139,6 @@ describe("settings deltas", () => {
       }),
     ).toEqual({
       models: [],
-      max_attempts: 1,
       one_pass: true,
       merge_method: "",
     });

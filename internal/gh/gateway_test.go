@@ -398,9 +398,33 @@ func TestGatewayForwardsStateBlobResponsesBeyondTheOldLimit(t *testing.T) {
 }
 
 func TestServerClientRejectsInvalidURL(t *testing.T) {
-	for _, raw := range []string{"", "localhost:7777", "ftp://localhost/crq", "http://user@localhost"} {
+	for _, raw := range []string{"", "localhost:7777", "ftp://localhost/crq", "http://user@localhost", "http://crq.example.test"} {
 		if _, err := NewGitHubViaServer(raw, ""); err == nil {
 			t.Errorf("server URL %q was accepted", raw)
+		}
+	}
+}
+
+func TestServerClientAllowsPlainHTTPOnlyOnLoopback(t *testing.T) {
+	for _, raw := range []string{
+		"http://localhost:7777",
+		"http://localhost.:7777",
+		"http://127.0.0.1:7777",
+		"http://[::1]:7777",
+		"https://crq.example.test",
+	} {
+		if _, err := NewGitHubViaServer(raw, "gateway-secret"); err != nil {
+			t.Errorf("server URL %q was rejected: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://crq.example.test",
+		"http://192.0.2.1:7777",
+		"http://[2001:db8::1]:7777",
+		"http://127.0.0.1.example.test:7777",
+	} {
+		if _, err := NewGitHubViaServer(raw, "gateway-secret"); err == nil || !strings.Contains(err.Error(), "must use https") {
+			t.Errorf("server URL %q error = %v, want a non-loopback HTTPS refusal", raw, err)
 		}
 	}
 }

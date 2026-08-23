@@ -30,20 +30,22 @@ func (s *Service) onePassNext(
 		return report, false, nil
 	}
 	campaign := st.EffectiveSolver(report.Repo).OnePassCampaign
+
+	// The owning session must keep receiving the ordinary fix/push decision.
+	// In particular, its documented `crq next` pre-push check cannot be made to
+	// wait on the dispatch claim that same process owns. A hold created after the
+	// session started still prevents the later merge, but cannot strand the fix
+	// in this checkout by withholding its push instruction.
+	if round := st.Round(report.Repo, report.PR); (round != nil && round.DispatchHeld(s.clock())) ||
+		st.ArchivedDispatchHeld(report.Repo, report.PR, s.clock()) {
+		return report, true, nil
+	}
 	if hold, held := st.HeldPR(report.Repo, report.PR); held {
 		report.Action = string(engine.ActionBlocked)
 		report.Reason = "held: " + hold.Reason
 		report.Findings = []dialect.Finding{}
 		report.Pending = nil
 		report.RecheckAfter = nil
-		return report, true, nil
-	}
-
-	// The owning session must keep receiving the ordinary fix/push decision.
-	// In particular, its documented `crq next` pre-push check cannot be made to
-	// wait on the dispatch claim that same process owns.
-	if round := st.Round(report.Repo, report.PR); (round != nil && round.DispatchHeld(s.clock())) ||
-		st.ArchivedDispatchHeld(report.Repo, report.PR, s.clock()) {
 		return report, true, nil
 	}
 

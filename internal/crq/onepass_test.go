@@ -453,6 +453,34 @@ func TestOnePassHoldBlocksFinalizerAndMerge(t *testing.T) {
 	}
 }
 
+func TestOnePassHoldDoesNotStrandItsRunningFixerBeforePush(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 57, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 874, "adadadad5"
+	enableOnePass(t, f, repo, "squash")
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseCompleted, base, 0)
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		round := st.Round(repo, pr)
+		if ok, why := round.ClaimDispatchModels("test", "live-finalizer", base, 1, []string{"gpt-5.6-sol"}); !ok {
+			return errors.New(why)
+		}
+		round.Dispatch.OnePass = true
+		round.Dispatch.OnePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+		st.RememberDispatch(repo, pr, *round.Dispatch)
+		st.PutRound(*round)
+		st.Hold(repo, pr, "operator pause", "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: string(engine.ActionPush), Reason: "push the completed fix"}
+	got, handled, err := f.svc.onePassNext(f.ctx, report, engine.Action{Kind: engine.ActionPush}, true)
+	if err != nil || !handled || got.Action != report.Action || got.Reason != report.Reason {
+		t.Fatalf("held live finalizer = handled %t report %+v err %v; want its push instruction preserved", handled, got, err)
+	}
+}
+
 func TestOnePassFinalizerBypassesSeverityFiltering(t *testing.T) {
 	findings := []dialect.Finding{
 		{ID: "final", Source: onePassFinalizeSource, Severity: "major"},

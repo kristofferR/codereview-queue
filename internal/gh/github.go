@@ -304,6 +304,9 @@ func NewGitHubViaServer(serverURL, token string) (*GitHub, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("CRQ_SERVER_URL must be an http(s) server URL, got %q", serverURL)
 	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf("CRQ_SERVER_URL must use https for a non-loopback server, got %q", serverURL)
+	}
 	baseTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("http.DefaultTransport is not an *http.Transport")
@@ -326,6 +329,15 @@ func NewGitHubViaServer(serverURL, token string) (*GitHub, error) {
 		backoffBase:    2 * time.Second,
 		networkMaxWait: 5 * time.Second,
 	}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // SetLogger attaches a logger so rate-limit backoff/retry is visible to humans and the daemon log.

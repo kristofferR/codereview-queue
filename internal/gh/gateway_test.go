@@ -3,6 +3,7 @@ package gh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -298,6 +299,48 @@ func TestPersistentGatewayOwnsGraphQLRateLimitBackoff(t *testing.T) {
 	}
 	if out.Viewer.Login != "kris" || calls != 2 {
 		t.Fatalf("GraphQL = %+v after %d upstream calls, want one server-owned retry", out, calls)
+	}
+}
+
+func TestGatewayPreservesAnExhaustedGraphQLThrottle(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"errors":[{"type":"RATE_LIMITED","message":"rate limit exceeded"}]}`)
+	}))
+	defer upstream.Close()
+
+	direct := NewTestClient(upstream.URL, upstream.Client())
+	direct.maxRetries = 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uri := strings.TrimPrefix(r.URL.RequestURI(), "/api/github")
+		body, _ := io.ReadAll(r.Body)
+		result, err := direct.Forward(r.Context(), r.Method, uri, body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		for key, values := range result.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(result.Status)
+		_, _ = w.Write(result.Body)
+	}))
+	defer proxy.Close()
+
+	client, err := NewGitHubViaServer(proxy.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.GraphQL(t.Context(), `query { viewer { login } }`, nil, nil)
+	var throttled *RateLimitError
+	if !errors.As(err, &throttled) || throttled.Kind != "graphql" {
+		t.Fatalf("gateway GraphQL throttle = %T %v", err, err)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want no client-owned retry", calls)
 	}
 }
 

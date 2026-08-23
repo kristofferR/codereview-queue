@@ -8,7 +8,10 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const maxGatewayRequestBody = 256 << 20
 
 // GitHubGateway is the direct, persistent GitHub transport supplied by the crq
 // process. Keeping this as an interface avoids teaching the dashboard package
@@ -38,10 +41,14 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The server's ordinary 60-second ReadTimeout protects small endpoints. A
+	// declared large gateway body gets a proportional authenticated extension,
+	// still bounded, so the supported state size does not become a slow-client
+	// denial-of-service path.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(gatewayBodyReadTimeout(r.ContentLength)))
 	// GitHub accepts 100 MiB git blobs. A UTF-8 blob request JSON-escapes the
 	// state content, so leave enough bounded room for the largest supported blob.
-	const maxRequestBody = 256 << 20
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxGatewayRequestBody))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "GitHub request body is too large"})
 		return
@@ -74,6 +81,28 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(result.Body)
+}
+
+func gatewayBodyReadTimeout(contentLength int64) time.Duration {
+	const (
+		minimum = 60 * time.Second
+		maximum = 45 * time.Minute
+		// 128 KiB/s lets the full gateway body arrive in about 35 minutes while
+		// still expiring a stalled authenticated upload.
+		minimumBytesPerSecond = 128 << 10
+	)
+	if contentLength <= 0 {
+		return minimum
+	}
+	seconds := (contentLength + minimumBytesPerSecond - 1) / minimumBytesPerSecond
+	timeout := time.Duration(seconds) * time.Second
+	if timeout < minimum {
+		return minimum
+	}
+	if timeout > maximum {
+		return maximum
+	}
+	return timeout
 }
 
 func githubRequestURI(r *http.Request) (string, bool) {

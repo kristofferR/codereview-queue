@@ -620,6 +620,13 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 		return nil
 	}
+	// A server-owned GraphQL throttle has no GitHub HTTP rate-limit headers:
+	// GitHub returned it inside a 200 GraphQL envelope. Preserve the typed error
+	// across the gateway without adding Retry-After, which would make the remote
+	// client become a second retry/backoff owner.
+	if kind := strings.TrimSpace(resp.Header.Get("X-CRQ-RateLimit-Kind")); kind != "" {
+		return &RateLimitError{Kind: kind, Remaining: -1}
+	}
 	lower := strings.ToLower(body)
 	// Secondary limit: honor an explicit Retry-After (seconds).
 	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
@@ -904,6 +911,9 @@ func (g *GitHub) Forward(ctx context.Context, method, requestURI string, body []
 		var throttled *RateLimitError
 		if errors.As(err, &throttled) {
 			header := http.Header{"Content-Type": []string{"application/json"}}
+			if throttled.Kind == "graphql" {
+				header.Set("X-CRQ-RateLimit-Kind", throttled.Kind)
+			}
 			if throttled.Remaining >= 0 {
 				header.Set("X-RateLimit-Remaining", strconv.Itoa(throttled.Remaining))
 			}

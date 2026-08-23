@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
@@ -108,6 +109,18 @@ func TestGitHubGatewayAcceptsStateBlobRequestsBeyondTheOldLimit(t *testing.T) {
 
 	if rec.Code != http.StatusOK || gateway.bodyBytes != len(body) {
 		t.Fatalf("large gateway request = %d, forwarded %d of %d bytes", rec.Code, gateway.bodyBytes, len(body))
+	}
+}
+
+func TestGatewayBodyReadTimeoutScalesWithDeclaredSize(t *testing.T) {
+	if got := gatewayBodyReadTimeout(-1); got != time.Minute {
+		t.Fatalf("unknown-length timeout = %s, want one minute", got)
+	}
+	if got := gatewayBodyReadTimeout(1 << 20); got != time.Minute {
+		t.Fatalf("small-body timeout = %s, want one minute", got)
+	}
+	if got := gatewayBodyReadTimeout(maxGatewayRequestBody); got < 30*time.Minute || got > 45*time.Minute {
+		t.Fatalf("maximum-body timeout = %s, want a bounded large-upload window", got)
 	}
 }
 

@@ -222,7 +222,7 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, false, "", err
 	}
 	if pull.Merged {
-		s.clearOnePassProgress(ctx, repo, pr)
+		_ = s.retireOnePassMerged(ctx, repo, pr)
 		return true, true, "already merged", nil
 	}
 	if !strings.EqualFold(pull.State, "open") {
@@ -252,18 +252,59 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		}
 		return true, false, reason, nil
 	}
-	s.clearOnePassProgress(ctx, repo, pr)
+	if err := s.retireOnePassMerged(ctx, repo, pr); err != nil {
+		return true, true, "merged the fixed head with " + cfg.MergeMethod, err
+	}
 	return true, true, "merged the fixed head with " + cfg.MergeMethod, nil
 }
 
-func (s *Service) clearOnePassProgress(ctx context.Context, repo string, pr int) {
+// RetireMerged verifies the pull request is merged before recording that
+// outcome in recently-finished history. It is also useful during a rolling
+// binary upgrade, when a newer exact-head merger may finish work owned by an
+// older long-lived watcher.
+func (s *Service) RetireMerged(ctx context.Context, repo string, pr int) error {
+	repo = NormalizeRepo(repo)
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		return err
+	}
+	if !pull.Merged {
+		return errors.New("pull request is not merged")
+	}
+	return s.retireOnePassMerged(ctx, repo, pr)
+}
+
+func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) error {
+	repo = NormalizeRepo(repo)
 	st, err := s.store.Update(ctx, func(st *State) error {
-		if !st.ClearOnePassProgress(repo, pr) {
+		changed := false
+		if st.Round(repo, pr) != nil {
+			st.EndRound(repo, pr, "merged")
+			changed = true
+		} else {
+			for i := len(st.Archive) - 1; i >= 0; i-- {
+				round := &st.Archive[i]
+				if NormalizeRepo(round.Repo) != repo || round.PR != pr {
+					continue
+				}
+				if round.Note != "merged" || round.Phase != PhaseAbandoned {
+					round.Abandon("merged")
+					changed = true
+				}
+				break
+			}
+		}
+		if st.ClearOnePassProgress(repo, pr) {
+			changed = true
+		}
+		if !changed {
 			return ErrNoChange
 		}
 		return nil
 	})
-	if err == nil {
-		s.sync(ctx, st)
+	if err != nil {
+		return err
 	}
+	s.sync(ctx, st)
+	return nil
 }

@@ -465,8 +465,12 @@ func autofixView(st state.State, now time.Time, maxAttempts func(repo string) in
 func finishedRows(st state.State) []DoneRow {
 	out := []DoneRow{}
 	add := func(r state.Round) {
+		outcome := string(r.Phase)
+		if r.Note == "merged" {
+			outcome = "merged"
+		}
 		row := DoneRow{Key: state.Key(r.Repo, r.PR), Title: r.Title, Repo: r.Repo, PR: r.PR,
-			Head: r.Head, Outcome: string(r.Phase), Note: r.Note}
+			Head: r.Head, Outcome: outcome, Note: r.Note}
 		if r.FiredAt != nil {
 			row.At = r.FiredAt
 		}

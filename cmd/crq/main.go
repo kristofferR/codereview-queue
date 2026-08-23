@@ -919,7 +919,7 @@ func watchDispatchOption(dispatch, noDispatch bool) *bool {
 
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {
 	if len(args) == 0 {
-		fatal(errors.New("usage: crq debug <enqueue|pump|refresh|state>"))
+		fatal(errors.New("usage: crq debug <enqueue|pump|refresh|retire-merged|state>"))
 		return 1
 	}
 	if err := cfg.RequireState(); err != nil {
@@ -955,6 +955,18 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			return 1
 		}
 		printJSON(state.Account)
+		return 0
+	case "retire-merged":
+		repo, pr, err := target(ctx, service, args[1:], "crq debug retire-merged [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		if err := service.RetireMerged(ctx, repo, pr); err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(map[string]any{"status": "merged", "repo": crq.NormalizeRepo(repo), "pr": pr})
 		return 0
 	case "state":
 		state, _, err := store.Load(ctx)

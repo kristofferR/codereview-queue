@@ -25,6 +25,18 @@ func TestAutofixSessionKeepsTheHeadOwnedByItsClaim(t *testing.T) {
 	}
 }
 
+func TestFinishedRowsShowMergedOutcome(t *testing.T) {
+	st := state.New()
+	st.Archive = []state.Round{{
+		Repo: "o/repo", PR: 1, Head: "merged-head", Phase: state.PhaseAbandoned, Note: "merged",
+	}}
+
+	rows := finishedRows(st)
+	if len(rows) != 1 || rows[0].Outcome != "merged" {
+		t.Fatalf("finished rows = %+v, want merged outcome", rows)
+	}
+}
+
 func TestPrimaryOffQueueRowWaitsForALiveFireSlot(t *testing.T) {
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
 	blocked := now.Add(time.Hour)

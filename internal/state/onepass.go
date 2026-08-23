@@ -29,6 +29,151 @@ type OnePassProgress struct {
 	unknown unknownFields
 }
 
+// OnePassEvidence is the campaign-scoped record of which reviewers may consume
+// the single review and which pull requests have already spent it. Reviewer
+// identities are append-only for the life of a campaign: replacing a reviewer
+// must not make its completed review disappear and reopen the PR for another.
+type OnePassEvidence struct {
+	Campaign  string               `json:"campaign"`
+	Reviewers []string             `json:"reviewers,omitempty"`
+	Reviewed  map[string]time.Time `json:"reviewed,omitempty"`
+
+	unknown unknownFields
+}
+
+// BeginOnePassCampaign resets review evidence for a new off-to-on transition.
+func (s *State) BeginOnePassCampaign(repo, campaign string, reviewers []string) {
+	if s.OnePassEvidence == nil {
+		s.OnePassEvidence = map[string]OnePassEvidence{}
+	}
+	evidence := OnePassEvidence{Campaign: campaign}
+	s.OnePassEvidence[normalizeRepoKey(repo)] = evidence
+	s.RememberOnePassReviewers(repo, campaign, reviewers)
+}
+
+// RememberOnePassReviewers extends the campaign's reviewer identity set. It
+// never removes identities until the campaign ends, because an answer from a
+// reviewer removed moments later still consumed the campaign's only round.
+func (s *State) RememberOnePassReviewers(repo, campaign string, reviewers []string) bool {
+	if campaign == "" {
+		return false
+	}
+	if s.OnePassEvidence == nil {
+		s.OnePassEvidence = map[string]OnePassEvidence{}
+	}
+	key := normalizeRepoKey(repo)
+	evidence, ok := s.OnePassEvidence[key]
+	sameCampaign := ok && evidence.Campaign == campaign
+	if !sameCampaign {
+		evidence = OnePassEvidence{Campaign: campaign}
+	}
+	seen := make(map[string]bool, len(evidence.Reviewers)+len(reviewers))
+	for _, login := range evidence.Reviewers {
+		login = coBotKey(login)
+		if login != "" {
+			seen[login] = true
+		}
+	}
+	changed := !sameCampaign
+	for _, login := range reviewers {
+		login = coBotKey(login)
+		if login == "" || seen[login] {
+			continue
+		}
+		seen[login] = true
+		evidence.Reviewers = append(evidence.Reviewers, login)
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	sort.Strings(evidence.Reviewers)
+	s.OnePassEvidence[key] = evidence
+	return true
+}
+
+// OnePassReviewersFor returns every reviewer identity that has belonged to the
+// campaign. A different campaign never inherits the previous one's scope.
+func (s *State) OnePassReviewersFor(repo, campaign string) []string {
+	evidence, ok := s.OnePassEvidence[normalizeRepoKey(repo)]
+	if !ok || evidence.Campaign != campaign {
+		return nil
+	}
+	return append([]string(nil), evidence.Reviewers...)
+}
+
+// MarkOnePassReviewed durably consumes the campaign's review for this PR.
+func (s *State) MarkOnePassReviewed(repo string, pr int, campaign string, now time.Time) bool {
+	if campaign == "" {
+		return false
+	}
+	key := normalizeRepoKey(repo)
+	evidence, ok := s.OnePassEvidence[key]
+	if !ok || evidence.Campaign != campaign {
+		evidence = OnePassEvidence{Campaign: campaign}
+	}
+	if evidence.Reviewed == nil {
+		evidence.Reviewed = map[string]time.Time{}
+	}
+	prKey := strconv.Itoa(pr)
+	if !evidence.Reviewed[prKey].IsZero() {
+		return false
+	}
+	evidence.Reviewed[prKey] = now.UTC()
+	if s.OnePassEvidence == nil {
+		s.OnePassEvidence = map[string]OnePassEvidence{}
+	}
+	s.OnePassEvidence[key] = evidence
+	return true
+}
+
+// OnePassReviewed reports whether this PR already consumed the named
+// campaign's single review.
+func (s *State) OnePassReviewed(repo string, pr int, campaign string) bool {
+	evidence, ok := s.OnePassEvidence[normalizeRepoKey(repo)]
+	return ok && evidence.Campaign == campaign && !evidence.Reviewed[strconv.Itoa(pr)].IsZero()
+}
+
+// OnePassReviewerAnswered reports durable completed-review evidence from any
+// identity that has belonged to this campaign. It includes primary and
+// co-reviewer answers in current and archived rounds, plus the unbounded
+// co-reviewer answer index.
+func (s *State) OnePassReviewerAnswered(repo string, pr int, campaign string) bool {
+	allowed := map[string]bool{}
+	for _, login := range s.OnePassReviewersFor(repo, campaign) {
+		allowed[coBotKey(login)] = true
+	}
+	if len(allowed) == 0 {
+		return false
+	}
+	key := Key(repo, pr)
+	for login, answered := range s.CoAnswers[key] {
+		if allowed[coBotKey(login)] && !answered.IsZero() {
+			return true
+		}
+	}
+	answeredRound := func(round Round) bool {
+		if round.PrimaryAnsweredAt != nil && allowed[coBotKey(round.PrimaryAnsweredBy)] {
+			return true
+		}
+		for login, co := range round.CoBots {
+			if allowed[coBotKey(login)] && co.AnsweredAt != nil {
+				return true
+			}
+		}
+		return false
+	}
+	if round := s.Round(repo, pr); round != nil && answeredRound(*round) {
+		return true
+	}
+	for i := range s.Archive {
+		if Key(s.Archive[i].Repo, s.Archive[i].PR) == key && answeredRound(s.Archive[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // OnePassReady reports whether a successful fixer released this exact head for
 // merge. A short stored SHA is accepted only as a prefix of the full GitHub SHA.
 func (s *State) OnePassReady(repo string, pr int, head string) bool {
@@ -142,8 +287,8 @@ func (s *State) ClearOnePassProgress(repo string, pr int) bool {
 	return true
 }
 
-// ClearOnePassRepo removes temporary campaign hand-offs when the repository
-// returns to its ordinary solver policy.
+// ClearOnePassRepo removes temporary campaign hand-offs and review evidence
+// when the repository returns to its ordinary solver policy.
 func (s *State) ClearOnePassRepo(repo string) bool {
 	prefix := normalizeRepoKey(repo) + "#"
 	changed := false
@@ -152,6 +297,11 @@ func (s *State) ClearOnePassRepo(repo string) bool {
 			delete(s.OnePass, key)
 			changed = true
 		}
+	}
+	key := normalizeRepoKey(repo)
+	if _, ok := s.OnePassEvidence[key]; ok {
+		delete(s.OnePassEvidence, key)
+		changed = true
 	}
 	return changed
 }

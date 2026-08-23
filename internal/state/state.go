@@ -625,6 +625,9 @@ type State struct {
 	// OnePass is the fixer-to-merger hand-off for repository-scoped one-pass
 	// campaigns. See onepass.go.
 	OnePass map[string]OnePassProgress `json:"one_pass,omitempty"`
+	// OnePassEvidence preserves the campaign's reviewer identities and consumed
+	// review marker across reviewer changes. See onepass.go.
+	OnePassEvidence map[string]OnePassEvidence `json:"one_pass_evidence,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,
 	// so the decision lives with the fleet rather than in one host's env file.
 	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
@@ -670,7 +673,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 14
+const WriterCaps = 15
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -708,7 +711,7 @@ const CapsSolver = 8
 
 // CapsOnePass is the capability required by both autoreview and autofix hosts
 // to honour the one-review cap and the fixer-to-merge hand-off.
-const CapsOnePass = 14
+const CapsOnePass = 15
 
 // CapsPreflightSkipBlocked is the capability that makes the shared
 // CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local

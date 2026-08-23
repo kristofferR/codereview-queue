@@ -5,12 +5,126 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 const onePassFinalizeSource = "one_pass_finalize"
+
+// campaignReviewerLogins is the identity set whose first genuine answer spends
+// a one-pass campaign's review. The fallback preserves programmatic/legacy
+// configurations that predate Config.Reviewers.
+func campaignReviewerLogins(cfg Config) []string {
+	logins := make([]string, 0, len(cfg.Reviewers)+1)
+	for _, reviewer := range cfg.Reviewers {
+		if login := dialect.NormalizeBotName(reviewer.Login); login != "" {
+			logins = append(logins, login)
+		}
+	}
+	if len(logins) == 0 && !cfg.PrimaryOff {
+		if login := dialect.NormalizeBotName(cfg.Bot); login != "" {
+			logins = append(logins, login)
+		}
+	}
+	return logins
+}
+
+func onePassReviewerScope(st State, cfg Config, repo, campaign string) map[string]bool {
+	logins := st.OnePassReviewersFor(repo, campaign)
+	logins = append(logins, campaignReviewerLogins(cfg)...)
+	scope := make(map[string]bool, len(logins))
+	for _, login := range logins {
+		if login = dialect.NormalizeBotName(login); login != "" {
+			scope[login] = true
+		}
+	}
+	return scope
+}
+
+// markOnePassReviewed commits the PR-wide review consumption under the exact
+// campaign and reviewer configuration that produced the decision. current is
+// false when either changed before the CAS landed; callers must then discard
+// their observation instead of firing or finalizing from stale policy.
+func (s *Service) markOnePassReviewed(
+	ctx context.Context,
+	st State,
+	cfg Config,
+	repo string,
+	pr int,
+	campaign string,
+	now time.Time,
+) (State, bool, error) {
+	if s.cfg.DryRun {
+		return st, true, nil
+	}
+	current := false
+	changed := false
+	updated, err := s.store.Update(ctx, func(w *State) error {
+		current = false
+		changed = false
+		solver := w.EffectiveSolver(repo)
+		if !s.cfgFor(*w, repo).OnePass || solver.OnePassCampaign != campaign ||
+			reviewersChanged(w, repo, cfg) {
+			return ErrNoChange
+		}
+		current = true
+		if w.RememberOnePassReviewers(repo, campaign, campaignReviewerLogins(cfg)) {
+			changed = true
+		}
+		if w.MarkOnePassReviewed(repo, pr, campaign, now) {
+			changed = true
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return st, false, err
+	}
+	if err == nil && changed {
+		s.sync(ctx, updated)
+		return updated, current, nil
+	}
+	latest, _, loadErr := s.store.Load(ctx)
+	if loadErr != nil {
+		return st, false, loadErr
+	}
+	return latest, current, nil
+}
+
+// dedupeConsumedOnePassReview is the fire-path backstop for campaigns enabled
+// around an already queued round. It runs before every DecideFire call, so an
+// old review can never leave that round eligible to post a second command.
+func (s *Service) dedupeConsumedOnePassReview(
+	ctx context.Context,
+	st State,
+	cfg Config,
+	round Round,
+	obs observation,
+	now time.Time,
+) (PumpResult, bool, error) {
+	solver := st.EffectiveSolver(round.Repo)
+	campaign := solver.OnePassCampaign
+	if !cfg.OnePass || campaign == "" || !onePassReviewEvidence(st, cfg, round.Repo, round.PR, obs) {
+		return PumpResult{}, false, nil
+	}
+	fresh, current, err := s.markOnePassReviewed(ctx, st, cfg, round.Repo, round.PR, campaign, now)
+	if err != nil {
+		return PumpResult{}, true, err
+	}
+	if !current {
+		return PumpResult{Action: "lost_race"}, true, nil
+	}
+	currentRound := fresh.Round(round.Repo, round.PR)
+	if !sameRound(currentRound, round) {
+		return PumpResult{Action: "lost_race"}, true, nil
+	}
+	result, err := s.dedupeRound(ctx, cfg, *currentRound, now, "one-pass review already consumed", &campaign)
+	return result, true, err
+}
 
 // onePassNext applies the automated campaign boundary after Feedback has read
 // the current PR. false means no review has happened anywhere on this PR yet,

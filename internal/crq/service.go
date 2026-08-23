@@ -754,6 +754,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	st = fresh
 	next = current
+	if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, *next, obs, now); err != nil {
+		return PumpResult{}, err
+	} else if handled {
+		return onePass, nil
+	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
 	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
@@ -819,6 +824,11 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if err != nil {
 			continue
 		}
+		if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, round, obs, now); err != nil {
+			return PumpResult{}, false, err
+		} else if handled {
+			return onePass, true, nil
+		}
 		d := engine.DecideFire(global, round, obs.eng, now, cfg.policy())
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
@@ -877,6 +887,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
+	}
+	if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, *round, obs, now); err != nil {
+		return PumpResult{}, false, err
+	} else if handled {
+		return onePass, true, nil
 	}
 	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {

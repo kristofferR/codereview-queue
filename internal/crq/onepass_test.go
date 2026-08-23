@@ -84,6 +84,34 @@ func TestInteractiveNextLeavesCampaignFinalizerToAutofix(t *testing.T) {
 	}
 }
 
+func TestInteractiveWaitLeavesCampaignFinalizerToAutofix(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 20, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 904, "bcbcbcbc22345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
+	enableOnePass(t, f, repo, "squash")
+
+	report, err := f.svc.WaitForAction(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionBlocked) ||
+		!strings.Contains(report.Reason, "owned by unattended autofix") ||
+		hasOnePassFinalizer(report.Findings) {
+		t.Fatalf("interactive wait report = %+v, want a released hand-off to autofix", report)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim, ok := st.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatalf("terminal interactive wait retained work claim: %+v", claim)
+	}
+}
+
 func TestOnePassStillFiresTheFirstQueuedReview(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 30, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
@@ -102,6 +130,98 @@ func TestOnePassStillFiresTheFirstQueuedReview(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 1 {
 		t.Fatalf("first review posts = %d, want 1", got)
+	}
+}
+
+func TestEnablingOnePassDedupesAnExistingQueuedRoundAfterPriorReview(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 32, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 905, "acacacac12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
+	seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseQueued, base, 0)
+
+	enableOnePass(t, f, repo, "squash")
+	result, err := f.svc.Pump(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "deduped" {
+		t.Fatalf("pump = %+v, want the pre-campaign queued round deduped", result)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("review posts = %d, want no second review", got)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	campaign := st.EffectiveSolver(repo).OnePassCampaign
+	if !st.OnePassReviewed(repo, pr, campaign) {
+		t.Fatal("pump did not persist the consumed one-pass review")
+	}
+}
+
+func TestOnePassReviewSurvivesReviewerReplacement(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 34, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "test", "CRQ_REPOS": "owner/security",
+		"CRQ_COBOTS": "bugbot",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return base }
+	repo, pr, head := "owner/security", 906, "adadadad12345678"
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	seedRound(t, store, cfg, repo, pr, head[:9], PhaseCompleted, base, 0)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		round := st.Round(repo, pr)
+		round.NoteCoAnswer(dialect.BugbotLogin, base)
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	on := true
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		before := svc.cfgFor(*st, repo)
+		st.SetRepoOverride(repo, RepoReviewers{CoBots: []string{"codex"}, SetCoBots: true})
+		after := svc.cfgFor(*st, repo)
+		svc.reopenForChangedReviewers(st, repo, before, after, map[int]bool{pr: true})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	campaign := st.EffectiveSolver(repo).OnePassCampaign
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseCompleted {
+		t.Fatalf("reviewer replacement reopened a consumed campaign round: %+v", round)
+	}
+	if !st.OnePassReviewed(repo, pr, campaign) {
+		t.Fatal("reviewer replacement forgot the consumed campaign review")
+	}
+	if !onePassReviewEvidence(st, svc.cfgFor(st, repo), repo, pr, observation{}) {
+		t.Fatal("removed Bugbot's durable answer no longer counts as campaign evidence")
+	}
+	need, _, err := svc.reviewNeeded(context.Background(), st, repo, pr, false, true, noAnnounce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("autoreview reopened the campaign after its reviewer was removed")
 	}
 }
 

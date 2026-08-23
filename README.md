@@ -174,7 +174,8 @@ crq doctor
 By default every command uses `http://127.0.0.1:7777`. For one server shared across machines, set
 `CRQ_SERVER_URL` on the clients and the same `CRQ_SERVER_TOKEN` on the server and clients, then bind
 the server on the private network with `crq serve install --addr 0.0.0.0:7777 --allow-host <name>`.
-Use HTTPS at a reverse proxy if that network is not trusted. The token is optional only on loopback.
+Every non-loopback endpoint must use HTTPS through a reverse proxy; plain HTTP is accepted only for
+`localhost` and loopback IP addresses. The token is optional only on loopback.
 
 Every GitHub-backed command fails closed when the server is unavailable. `crq --direct <command>`
 is the explicit recovery path for an operator; agents and daemons should never use it.
@@ -555,7 +556,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
-| `CRQ_SERVER_URL` | `http://127.0.0.1:7777` | `crq serve` endpoint that owns every GitHub API request; GitHub-backed commands fail closed when it is unavailable |
+| `CRQ_SERVER_URL` | `http://127.0.0.1:7777` | `crq serve` endpoint that owns every GitHub API request; non-loopback endpoints require HTTPS, and GitHub-backed commands fail closed when it is unavailable |
 | `CRQ_SERVER_TOKEN` | _(none)_ | shared bearer token required for non-loopback clients; configure the same value on the server and clients |
 | `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the state ref, dashboard, calibration PR |
 | `CRQ_ISSUE` | from `init` | dashboard issue number |

@@ -42,6 +42,9 @@ export CRQ_STATE_REF=crq-state-v3
 # export CRQ_SERVER_TOKEN=shared-secret
 ```
 
+Shared/non-loopback `CRQ_SERVER_URL` values must use HTTPS through a reverse proxy. Plain HTTP is
+accepted only for localhost and loopback IP addresses.
+
 `crq serve` must be running, and CodeRabbit native auto-review must be off.
 
 ## Agent Loop

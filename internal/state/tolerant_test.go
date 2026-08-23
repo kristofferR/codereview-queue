@@ -91,6 +91,31 @@ func TestOnePassHandOffPreservesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestOnePassEvidencePreservesUnknownFields(t *testing.T) {
+	var st State
+	if err := json.Unmarshal([]byte(`{
+	  "v":6,
+	  "one_pass_evidence":{"owner/repo":{
+	    "campaign":"campaign-1",
+	    "reviewers":["cursor"],
+	    "future_audit":{"required":true}
+	  }}
+	}`), &st); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	if !st.MarkOnePassReviewed("owner/repo", 7, "campaign-1", now) {
+		t.Fatal("known one-pass review evidence did not decode")
+	}
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"future_audit":{"required":true}`) {
+		t.Fatalf("one-pass review evidence dropped its future field: %s", out)
+	}
+}
+
 func TestRenewedDispatchClaimPreservesUnknownFields(t *testing.T) {
 	var round Round
 	if err := json.Unmarshal([]byte(`{

@@ -433,6 +433,23 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
+	cfg := s.cfgFor(state, repo)
+	campaign := state.EffectiveSolver(repo).OnePassCampaign
+	reviewScope := map[string]bool{}
+	if anyConfigured {
+		reviewScope = onePassReviewerScope(state, cfg, repo, campaign)
+		if state.OnePassReviewed(repo, pr, campaign) || state.OnePassReviewerAnswered(repo, pr, campaign) {
+			return false, head, nil
+		}
+		// Programmatic/legacy callers can opt into the broad one-pass predicate
+		// before a campaign identity has been persisted. Keep their durable
+		// co-reviewer evidence meaningful too.
+		for login := range reviewScope {
+			if state.CoReviewerAnswered(repo, pr, login) {
+				return false, head, nil
+			}
+		}
+	}
 	if r := state.Round(repo, pr); r != nil && r.Head == head {
 		// Unless the round is a marker for reviewers that changed while this PR
 		// was closed: it answered for a set that no longer gates the head, and
@@ -449,7 +466,6 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
-	cfg := s.cfgFor(state, repo)
 	bot := dialect.NormalizeBotName(cfg.Bot)
 	lastBotReview := ""
 	reviewedEver := map[string]bool{}
@@ -513,10 +529,17 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		// check-bearing reviewer completed a review on an older head. Generic bot
 		// activity cannot consume the cap because it may be an in-progress,
 		// auxiliary, or failed check that delivered no review.
-		for _, reviewer := range cfg.Reviewers {
-			login := dialect.NormalizeBotName(reviewer.Login)
-			if reviewedEver[login] || state.CoReviewerAnswered(repo, pr, login) {
+		for login := range reviewScope {
+			if reviewedEver[login] {
 				return false, head, nil
+			}
+		}
+		if !anyConfigured {
+			for _, reviewer := range cfg.Reviewers {
+				login := dialect.NormalizeBotName(reviewer.Login)
+				if reviewedEver[login] || state.CoReviewerAnswered(repo, pr, login) {
+					return false, head, nil
+				}
 			}
 		}
 		if cfg.coChecksRelevant() {

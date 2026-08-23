@@ -278,6 +278,9 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			next.OnePassCampaign = ""
 		}
 		st.SetSolver(repo, next, s.cfg.Host, now)
+		if !before.OnePass && effective.OnePass {
+			st.BeginOnePassCampaign(repo, campaign, campaignReviewerLogins(s.cfgFor(*st, repo)))
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {

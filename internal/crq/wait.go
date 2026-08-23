@@ -110,6 +110,12 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 			}
 			return report, err
 		}
+		if bounded, handled, err := s.onePassNext(ctx, report, action, false); err != nil {
+			return report, err
+		} else if handled {
+			report = bounded
+			action.Kind = engine.ActionKind(report.Action)
+		}
 		if actionable(action.Kind) {
 			// A decision can spend longer than WorkClaimTTL in GitHub transport
 			// retries. Renew and verify ownership before handing actionable work to

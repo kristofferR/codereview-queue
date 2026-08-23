@@ -107,17 +107,14 @@ func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (Fe
 // reviewer genuinely completed a review?" question from Feedback's existing
 // observation. It deliberately mirrors reviewNeeded's anyConfigured branch,
 // but performs no GitHub reads: reviews and comments span the PR, completed
-// check runs cover the observed head, and CoReviewerAnswered is the durable
-// record for a check/comment answer on an older head.
+// check runs cover the observed head, and campaign evidence is the durable
+// record for a check/comment answer or removed reviewer on an older head.
 func onePassReviewEvidence(st State, cfg Config, repo string, pr int, obs observation) bool {
-	configured := make(map[string]bool, len(cfg.Reviewers))
-	for _, reviewer := range cfg.Reviewers {
-		login := dialect.NormalizeBotName(reviewer.Login)
-		configured[login] = true
-		if st.CoReviewerAnswered(repo, pr, login) {
-			return true
-		}
+	campaign := st.EffectiveSolver(repo).OnePassCampaign
+	if st.OnePassReviewed(repo, pr, campaign) || st.OnePassReviewerAnswered(repo, pr, campaign) {
+		return true
 	}
+	configured := onePassReviewerScope(st, cfg, repo, campaign)
 
 	primary := dialect.NormalizeBotName(cfg.Bot)
 	for _, review := range obs.reviews {
@@ -129,23 +126,24 @@ func onePassReviewEvidence(st State, cfg Config, repo string, pr int, obs observ
 			strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "" {
 			continue
 		}
-		if configured[login] || (len(cfg.Reviewers) == 0 && login == primary) {
+		if configured[login] {
 			return true
 		}
 	}
 
 	for _, check := range obs.eng.Checks {
-		if cfg.coBotEnabled(check.Bot) &&
+		if configured[dialect.NormalizeBotName(check.Bot)] &&
 			(check.Verdict == dialect.CheckDone || check.Verdict == dialect.CheckDoneClean) {
 			return true
 		}
 	}
 	for _, event := range obs.eng.Events {
-		if dialect.NormalizeBotName(event.Bot) == primary &&
+		login := dialect.NormalizeBotName(event.Bot)
+		if configured[login] && login == primary &&
 			event.Kind == dialect.EvNoAction && !event.SummaryOnly {
 			return true
 		}
-		if cfg.coBotEnabled(event.Bot) && event.Kind == dialect.EvCoClean {
+		if configured[login] && event.Kind == dialect.EvCoClean {
 			return true
 		}
 	}
@@ -211,6 +209,21 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 			round = st.Round(repo, pr)
 		}
 	}
+	onePassReviewed := onePassReviewEvidence(st, cfg, repo, pr, obs)
+	if persist && cfg.OnePass && onePassReviewed {
+		campaign := st.EffectiveSolver(repo).OnePassCampaign
+		updated, current, err := s.markOnePassReviewed(ctx, st, cfg, repo, pr, campaign, now)
+		if err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording one-pass review evidence for %s: %w", QueueKey(repo, pr), err)
+		}
+		if current {
+			st = updated
+		} else {
+			// A policy change raced this observation. The next pass will classify
+			// the same GitHub data against the new campaign scope.
+			onePassReviewed = false
+		}
+	}
 	report := FeedbackReport{
 		Status:          "feedback",
 		Repo:            repo,
@@ -223,7 +236,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		config:          cfg,
 		Findings:        []dialect.Finding{},
 		CheckedAt:       now,
-		onePassReviewed: onePassReviewEvidence(st, cfg, repo, pr, obs),
+		onePassReviewed: onePassReviewed,
 	}
 
 	// The completion anchor is the current round only when it still tracks this

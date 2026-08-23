@@ -951,14 +951,26 @@ func (s *Service) dispatchWithStart(
 		return false, "the successful session's exact HEAD could not be read"
 	}
 	readyHead = strings.TrimSpace(readyHead)
-	if err := s.completeSuccessfulDispatch(
+	onePass, err := s.completeSuccessfulDispatch(
 		context.WithoutCancel(ctx), report, token, readyHead,
-	); err != nil {
+	)
+	if err != nil {
 		// Keep the checkout as an audit trail. The branch already holds the fix,
 		// but without a durable exact-head hand-off crq must not merge it.
 		return false, "could not release the fixed head for merge: " + err.Error()
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
+	if onePass {
+		eligible, merged, reason, mergeErr := s.mergeOnePassReady(
+			context.WithoutCancel(ctx), report.Repo, report.PR,
+		)
+		switch {
+		case mergeErr != nil && s.log != nil:
+			s.log.Printf("watch: immediate merge check for %s#%d failed: %v", report.Repo, report.PR, mergeErr)
+		case eligible && s.log != nil:
+			s.log.Printf("watch: immediate merge check for %s#%d: merged=%t reason=%s", report.Repo, report.PR, merged, reason)
+		}
+	}
 	return true, ""
 }
 

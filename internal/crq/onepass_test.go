@@ -160,8 +160,10 @@ func TestEnablingOnePassDoesNotAdoptAnOrdinaryLiveSession(t *testing.T) {
 	}
 	enableOnePass(t, f, repo, "squash")
 	report := NextReport{Repo: repo, PR: pr, Head: head}
-	if err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head); err != nil {
+	if onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head); err != nil {
 		t.Fatal(err)
+	} else if onePass {
+		t.Fatal("ordinary successful dispatch was identified as one-pass")
 	}
 	st, _, err := f.store.Load(f.ctx)
 	if err != nil {
@@ -169,6 +171,42 @@ func TestEnablingOnePassDoesNotAdoptAnOrdinaryLiveSession(t *testing.T) {
 	}
 	if progress, ok := st.OnePassProgressFor(repo, pr); ok {
 		t.Fatalf("ordinary session became one-pass handoff: %+v", progress)
+	}
+}
+
+func TestSuccessfulOnePassDispatchIsReadyForImmediateMerge(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 57, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head, token := "owner/security", 851, "afafafaf12345678", "one-pass-session"
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		round, err := st.NewRound(repo, pr, head[:9], base)
+		if err != nil {
+			return err
+		}
+		if ok, why := round.ClaimDispatchModels("test", token, base, 1, []string{"gpt-5.6-sol"}); !ok {
+			return errors.New(why)
+		}
+		round.Dispatch.OnePass = true
+		st.RememberDispatch(repo, pr, *round.Dispatch)
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report := NextReport{Repo: repo, PR: pr, Head: head}
+	onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onePass {
+		t.Fatal("successful one-pass dispatch was not identified as one-pass")
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, ok := st.OnePassProgressFor(repo, pr); !ok || progress.ReadyHead != head {
+		t.Fatalf("ready handoff = %+v, ok=%t", progress, ok)
 	}
 }
 

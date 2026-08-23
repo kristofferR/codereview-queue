@@ -919,7 +919,7 @@ func watchDispatchOption(dispatch, noDispatch bool) *bool {
 
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {
 	if len(args) == 0 {
-		fatal(errors.New("usage: crq debug <enqueue|pump|refresh|retire-merged|state>"))
+		fatal(errors.New("usage: crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>"))
 		return 1
 	}
 	if err := cfg.RequireState(); err != nil {
@@ -977,6 +977,28 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			return 1
 		}
 		printJSON(map[string]any{"status": "merged", "repo": crq.NormalizeRepo(repo), "pr": pr})
+		return 0
+	case "merge-ready":
+		repo, pr, err := target(ctx, service, args[1:], "crq debug merge-ready [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		eligible, merged, reason, err := service.MergeOnePassReady(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		status := "not_ready"
+		if eligible {
+			status = "waiting"
+		}
+		if merged {
+			status = "merged"
+		}
+		printJSON(map[string]any{
+			"status": status, "repo": crq.NormalizeRepo(repo), "pr": pr, "reason": reason,
+		})
 		return 0
 	case "state":
 		state, _, err := store.Load(ctx)
@@ -1063,7 +1085,7 @@ USAGE
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
-  crq debug <enqueue|pump|refresh|state>
+  crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
@@ -1705,7 +1727,7 @@ Move a tracked pull request to the top of both the review and autofix queues.
 Inside a pull request checkout, the target can be omitted.
 `)
 	case "debug":
-		fmt.Print(`crq debug <enqueue|pump|refresh|state>
+		fmt.Print(`crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
 
 Maintenance tools for diagnosis only. Human and agent review loops should use crq loop.
 `)

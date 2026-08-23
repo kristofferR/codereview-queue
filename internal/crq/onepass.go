@@ -188,7 +188,7 @@ func (s *Service) completeSuccessfulDispatch(
 	report NextReport,
 	token string,
 	readyHead string,
-) error {
+) (bool, error) {
 	var marked bool
 	st, err := s.store.Update(ctx, func(st *State) error {
 		onePass := st.OnePassDispatch(report.Repo, report.PR, token)
@@ -210,10 +210,10 @@ func (s *Service) completeSuccessfulDispatch(
 		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.sync(ctx, st)
-	return nil
+	return marked, nil
 }
 
 // mergeOnePassReady performs the post-fix merge gate. eligible is false for an
@@ -275,6 +275,13 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, true, "merged the fixed head with " + cfg.MergeMethod, err
 	}
 	return true, true, "merged the fixed head with " + cfg.MergeMethod, nil
+}
+
+// MergeOnePassReady exposes the exact-head post-fix merge gate for operational
+// recovery and rolling upgrades. It performs the same policy and head checks as
+// the watcher, so callers cannot turn a merely open PR into a campaign merge.
+func (s *Service) MergeOnePassReady(ctx context.Context, repo string, pr int) (eligible, merged bool, reason string, err error) {
+	return s.mergeOnePassReady(ctx, repo, pr)
 }
 
 // RetireMerged verifies the pull request is merged before recording that

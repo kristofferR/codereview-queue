@@ -38,7 +38,9 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxRequestBody = 16 << 20
+	// GitHub accepts 100 MiB git blobs. A UTF-8 blob request JSON-escapes the
+	// state content, so leave enough bounded room for the largest supported blob.
+	const maxRequestBody = 256 << 20
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "GitHub request body is too large"})

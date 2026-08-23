@@ -32,6 +32,15 @@ func (g *recordingGateway) CanWrite(context.Context, string) (bool, error) {
 	return g.canWrite, g.canWriteError
 }
 
+type sizingGateway struct{ bodyBytes int }
+
+func (g *sizingGateway) Forward(_ context.Context, _ string, _ string, body []byte) (GitHubResponse, error) {
+	g.bodyBytes = len(body)
+	return GitHubResponse{Status: http.StatusOK, Body: []byte(`{}`)}, nil
+}
+
+func (*sizingGateway) CanWrite(context.Context, string) (bool, error) { return true, nil }
+
 func gatewayRequest(t *testing.T, srv *Server, method, rawURL, remote, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), method, rawURL, strings.NewReader(`{"value":1}`))
@@ -83,6 +92,22 @@ func TestGitHubGatewayPreservesEscapedPaths(t *testing.T) {
 	sha, err := client.GetRef(t.Context(), "o/r", "state%prod#draft")
 	if err != nil || sha != "abc" || gateway.uri != "/repos/o/r/git/ref/heads/state%25prod%23draft" {
 		t.Fatalf("escaped gateway ref = SHA %q, URI %q, err %v", sha, gateway.uri, err)
+	}
+}
+
+func TestGitHubGatewayAcceptsStateBlobRequestsBeyondTheOldLimit(t *testing.T) {
+	gateway := &sizingGateway{}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Gateway: gateway})
+	body := strings.Repeat("x", (16<<20)+1)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
+		"http://127.0.0.1:7777/api/github/repos/o/r/git/blobs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:4321"
+	req.Header.Set("X-CRQ-Client", "1")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || gateway.bodyBytes != len(body) {
+		t.Fatalf("large gateway request = %d, forwarded %d of %d bytes", rec.Code, gateway.bodyBytes, len(body))
 	}
 }
 

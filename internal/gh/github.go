@@ -123,7 +123,10 @@ const maxETagEntries = 1024
 // fetches, and replaying them buys nothing worth the memory).
 const maxETagBody = 1 << 20
 
-const maxForwardBody = 16 << 20
+// GitHub accepts git blobs up to 100 MiB. Blob reads are base64-encoded and
+// blob writes JSON-escape the UTF-8 state, so the gateway envelope needs room
+// beyond the raw object limit. Requests remain authenticated and bounded.
+const maxForwardBody = 256 << 20
 
 func (g *GitHub) etagLookup(url string) *etagEntry {
 	g.etagMu.Lock()
@@ -309,7 +312,12 @@ func NewGitHubViaServer(serverURL, token string) (*GitHub, error) {
 	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = 5 * time.Second
 	return &GitHub{
-		httpClient:     &http.Client{Transport: transport},
+		httpClient: &http.Client{
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("refusing redirect from crq serve")
+			},
+		},
 		apiBase:        "https://api.github.com",
 		graphBase:      "https://api.github.com/graphql",
 		gatewayURL:     strings.TrimRight(raw, "/") + "/api/github",

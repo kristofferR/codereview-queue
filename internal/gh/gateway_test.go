@@ -1,6 +1,7 @@
 package gh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -309,6 +310,47 @@ func TestServerClientFailsClosedWhenServerIsUnavailable(t *testing.T) {
 	defer cancel()
 	if _, err := client.GetPull(ctx, "o/r", 7); err == nil {
 		t.Fatal("an unavailable crq server must fail instead of falling back to GitHub")
+	}
+}
+
+func TestServerClientRejectsRedirects(t *testing.T) {
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetCalls++
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	client, err := NewGitHubViaServer(redirect.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetPull(t.Context(), "o/r", 7); err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Fatalf("redirect error = %v", err)
+	}
+	if targetCalls != 0 {
+		t.Fatalf("redirect target received %d requests", targetCalls)
+	}
+}
+
+func TestGatewayForwardsStateBlobResponsesBeyondTheOldLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), (16<<20)+1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	direct := NewTestClient(upstream.URL, upstream.Client())
+	result, err := direct.Forward(t.Context(), http.MethodGet, "/large-state-blob", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Body) != len(payload) {
+		t.Fatalf("forwarded body = %d bytes, want %d", len(result.Body), len(payload))
 	}
 }
 

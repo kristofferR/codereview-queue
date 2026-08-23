@@ -2,10 +2,18 @@ package crq
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+type installLoadErrorStore struct{ StateStore }
+
+func (installLoadErrorStore) Load(context.Context) (State, Revision, error) {
+	return State{}, Revision{}, errors.New("gateway unavailable")
+}
 
 func TestServeUnitCarriesShellProvidedConfiguration(t *testing.T) {
 	env := map[string]string{
@@ -59,6 +67,26 @@ func TestServeInstallPreservesPollInterval(t *testing.T) {
 	got := strings.Join(serveArgv(plan), " ")
 	if !strings.Contains(got, "--poll 30s") {
 		t.Fatalf("serve argv = %q, want the configured poll interval", got)
+	}
+}
+
+func TestAutoreviewInstallValidatesItsServerBackedStateTransport(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("PATH", t.TempDir())
+
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if err := svc.serviceCanStart(t.Context(), "autoreview"); err != nil {
+		t.Fatalf("server-backed autoreview validation required a local GitHub credential: %v", err)
+	}
+
+	svc.store = installLoadErrorStore{StateStore: store}
+	err := svc.serviceCanStart(t.Context(), "autoreview")
+	if err == nil || !strings.Contains(err.Error(), "gateway unavailable") {
+		t.Fatalf("unreadable server-backed state validation error = %v", err)
 	}
 }
 

@@ -128,13 +128,12 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 		return plan, nil
 	}
 
-	// Both units read GitHub on every pass and neither inherits this shell's
-	// variables, so the same check the autofix install makes belongs here.
-	// Without it `systemctl restart` succeeds, the install prints Started, and
-	// the process then fails its state reads for ever — no reviews, no
-	// dashboard, and nothing that says why.
+	// Prove the transport each unit will actually use. serve owns the GitHub
+	// credential, while autoreview is a gateway client and needs only to read the
+	// shared state through the configured server. Without this check the service
+	// manager can report Started while every pass fails silently.
 	if !skipAuth {
-		if err := serviceCanAuthenticate(ctx, service); err != nil {
+		if err := s.serviceCanStart(ctx, service); err != nil {
 			return plan, err
 		}
 	}
@@ -174,6 +173,16 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 	}
 	plan.Started = true
 	return plan, nil
+}
+
+func (s *Service) serviceCanStart(ctx context.Context, service string) error {
+	if service == "autoreview" {
+		if _, _, err := s.store.Load(ctx); err != nil {
+			return fmt.Errorf("the autoreview service could not read shared state through its configured GitHub transport: %w", err)
+		}
+		return nil
+	}
+	return serviceCanAuthenticate(ctx, service)
 }
 
 type serveCommand struct {

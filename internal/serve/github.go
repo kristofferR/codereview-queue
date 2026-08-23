@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -35,10 +36,6 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeGateway(w, r) {
 		return
 	}
-	if s.opts.ReadOnly && r.Method != http.MethodGet {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this server is read-only"})
-		return
-	}
 
 	const maxRequestBody = 16 << 20
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
@@ -46,9 +43,14 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "GitHub request body is too large"})
 		return
 	}
-	requestURI := "/" + r.PathValue("path")
-	if r.URL.RawQuery != "" {
-		requestURI += "?" + r.URL.RawQuery
+	requestURI, ok := githubRequestURI(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid GitHub gateway path"})
+		return
+	}
+	if s.opts.ReadOnly && !githubRequestReadOnly(r.Method, requestURI, body) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this server is read-only"})
+		return
 	}
 	result, err := s.opts.Gateway.Forward(r.Context(), r.Method, requestURI, body)
 	if err != nil {
@@ -69,6 +71,183 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(result.Body)
+}
+
+func githubRequestURI(r *http.Request) (string, bool) {
+	requestURI, ok := strings.CutPrefix(r.URL.EscapedPath(), "/api/github")
+	if !ok || !strings.HasPrefix(requestURI, "/") {
+		return "", false
+	}
+	if r.URL.RawQuery != "" {
+		requestURI += "?" + r.URL.RawQuery
+	}
+	return requestURI, true
+}
+
+func githubRequestReadOnly(method, requestURI string, body []byte) bool {
+	if method == http.MethodGet {
+		return true
+	}
+	path, _, _ := strings.Cut(requestURI, "?")
+	return method == http.MethodPost && path == "/graphql" && graphQLBodyReadOnly(body)
+}
+
+func graphQLBodyReadOnly(body []byte) bool {
+	var request struct {
+		Query string `json:"query"`
+	}
+	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.Query) == "" {
+		return false
+	}
+	tokens, ok := graphQLTokens(request.Query)
+	if !ok {
+		return false
+	}
+	seenOperation := false
+	for i := 0; i < len(tokens); {
+		token := tokens[i]
+		if token.kind == '{' {
+			seenOperation = true
+			i, ok = skipGraphQLSelection(tokens, i)
+			if !ok {
+				return false
+			}
+			continue
+		}
+		if token.kind != 'n' {
+			return false
+		}
+		switch token.text {
+		case "mutation":
+			return false
+		case "query", "subscription":
+			seenOperation = true
+		case "fragment":
+		default:
+			return false
+		}
+		i, ok = findAndSkipGraphQLSelection(tokens, i+1)
+		if !ok {
+			return false
+		}
+	}
+	return seenOperation
+}
+
+// The gateway needs only the top-level operation definitions, not a GraphQL
+// AST. Strings, comments and nested selection sets are skipped so a mutation
+// cannot hide behind a fragment or a second operation in the same document.
+type graphQLToken struct {
+	kind byte
+	text string
+}
+
+func graphQLTokens(query string) ([]graphQLToken, bool) {
+	tokens := make([]graphQLToken, 0, 32)
+	for i := 0; i < len(query); {
+		switch c := query[i]; {
+		case c == '#':
+			for i < len(query) && query[i] != '\n' && query[i] != '\r' {
+				i++
+			}
+		case c == '"':
+			next, ok := skipGraphQLString(query, i)
+			if !ok {
+				return nil, false
+			}
+			i = next
+		case isGraphQLNameStart(c):
+			start := i
+			for i++; i < len(query) && isGraphQLNameContinue(query[i]); i++ {
+			}
+			tokens = append(tokens, graphQLToken{kind: 'n', text: query[start:i]})
+		case strings.ContainsRune("{}()[]", rune(c)):
+			tokens = append(tokens, graphQLToken{kind: c})
+			i++
+		default:
+			i++
+		}
+	}
+	return tokens, true
+}
+
+func skipGraphQLString(query string, start int) (int, bool) {
+	if strings.HasPrefix(query[start:], `"""`) {
+		for i := start + 3; i+2 < len(query); i++ {
+			if query[i] == '\\' {
+				i++
+				continue
+			}
+			if strings.HasPrefix(query[i:], `"""`) {
+				return i + 3, true
+			}
+		}
+		return 0, false
+	}
+	for i := start + 1; i < len(query); i++ {
+		if query[i] == '\\' {
+			i++
+			continue
+		}
+		if query[i] == '"' {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+func findAndSkipGraphQLSelection(tokens []graphQLToken, start int) (int, bool) {
+	parenDepth, bracketDepth := 0, 0
+	for i := start; i < len(tokens); i++ {
+		switch tokens[i].kind {
+		case '(':
+			parenDepth++
+		case ')':
+			parenDepth--
+		case '[':
+			bracketDepth++
+		case ']':
+			bracketDepth--
+		case '{':
+			if parenDepth == 0 && bracketDepth == 0 {
+				return skipGraphQLSelection(tokens, i)
+			}
+			var ok bool
+			i, ok = skipGraphQLSelection(tokens, i)
+			if !ok {
+				return 0, false
+			}
+			i--
+		}
+		if parenDepth < 0 || bracketDepth < 0 {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func skipGraphQLSelection(tokens []graphQLToken, start int) (int, bool) {
+	depth := 0
+	for i := start; i < len(tokens); i++ {
+		switch tokens[i].kind {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func isGraphQLNameStart(c byte) bool {
+	return c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+func isGraphQLNameContinue(c byte) bool {
+	return isGraphQLNameStart(c) || c >= '0' && c <= '9'
 }
 
 func (s *Server) handleGatewayHealth(w http.ResponseWriter, r *http.Request) {

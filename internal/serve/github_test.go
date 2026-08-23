@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,6 +58,25 @@ func TestGitHubGatewayForwardsLoopbackRequests(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-RateLimit-Remaining"); got != "4999" {
 		t.Fatalf("rate-limit header = %q, want it preserved", got)
+	}
+}
+
+func TestGitHubGatewayPreservesEscapedPaths(t *testing.T) {
+	gateway := &recordingGateway{result: GitHubResponse{
+		Status: http.StatusOK,
+		Body:   []byte(`{"object":{"sha":"abc"}}`),
+	}}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Gateway: gateway})
+	httpServer := httptest.NewServer(srv.routes())
+	defer httpServer.Close()
+
+	client, err := ghapi.NewGitHubViaServer(httpServer.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := client.GetRef(t.Context(), "o/r", "state%prod#draft")
+	if err != nil || sha != "abc" || gateway.uri != "/repos/o/r/git/ref/heads/state%25prod%23draft" {
+		t.Fatalf("escaped gateway ref = SHA %q, URI %q, err %v", sha, gateway.uri, err)
 	}
 }
 
@@ -167,5 +187,49 @@ func TestReadOnlyServerRefusesGitHubMutations(t *testing.T) {
 		"http://127.0.0.1:7777/api/github/repos/o/r", "127.0.0.1:4321", "")
 	if rec.Code != http.StatusOK || gateway.calls != 1 {
 		t.Fatalf("read-only GET = %d, calls = %d", rec.Code, gateway.calls)
+	}
+}
+
+func TestReadOnlyServerAllowsGraphQLQueriesButRejectsMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  int
+		calls int
+	}{
+		{
+			name:  "named query with object default",
+			query: `query Review($filter: Filter = {name: "mutation"}) { repository { name } }`,
+			want:  http.StatusOK, calls: 1,
+		},
+		{
+			name: "fragment before query",
+			query: `# mutation in a comment
+fragment mutation on Repository { name }
+query Read { repository { ...mutation } }`,
+			want: http.StatusOK, calls: 1,
+		},
+		{name: "anonymous query", query: `{ viewer { login } }`, want: http.StatusOK, calls: 1},
+		{name: "mutation", query: `mutation Resolve { resolveReviewThread(input: {}) { clientMutationId } }`, want: http.StatusForbidden},
+		{name: "mutation after query", query: `query Read { viewer { login } } mutation Write { deleteThing }`, want: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gateway := &recordingGateway{result: GitHubResponse{Status: http.StatusOK, Body: []byte(`{"data":{}}`)}}
+			srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Gateway: gateway, ReadOnly: true})
+			body, err := json.Marshal(map[string]string{"query": tc.query})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
+				"http://127.0.0.1:7777/api/github/graphql", strings.NewReader(string(body)))
+			req.RemoteAddr = "127.0.0.1:4321"
+			req.Header.Set("X-CRQ-Client", "1")
+			rec := httptest.NewRecorder()
+			srv.routes().ServeHTTP(rec, req)
+
+			if rec.Code != tc.want || gateway.calls != tc.calls {
+				t.Fatalf("response = %d, calls = %d; want %d, %d", rec.Code, gateway.calls, tc.want, tc.calls)
+			}
+		})
 	}
 }

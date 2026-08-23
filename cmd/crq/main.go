@@ -676,7 +676,8 @@ func run(ctx context.Context, args []string) int {
 				Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
 				Severities: v.Severities, AskMode: v.AskMode,
-				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
+				SkipAuthors: v.SkipAuthors, OnePass: v.OnePass, MergeMethod: v.MergeMethod,
+				Sources: v.Sources, By: v.By,
 				Lagging: hostsOfWriters(v.Lagging),
 			}
 			// Which hosts can actually run the agent — capability, beside the
@@ -958,17 +959,17 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 		printJSON(state.Account)
 		return 0
 	case "retire-merged":
-		verified := len(args) > 1 && args[1] == "--verified"
+		assumeMerged := len(args) > 1 && args[1] == "--assume-merged"
 		targetArgs := args[1:]
-		if verified {
+		if assumeMerged {
 			targetArgs = args[2:]
 		}
-		repo, pr, err := target(ctx, service, targetArgs, "crq debug retire-merged [--verified] [<repo> <pr>]")
+		repo, pr, err := target(ctx, service, targetArgs, "crq debug retire-merged [--assume-merged] [<repo> <pr>]")
 		if err != nil {
 			fatal(err)
 			return 1
 		}
-		if verified {
+		if assumeMerged {
 			err = service.RetireMergedVerified(ctx, repo, pr)
 		} else {
 			err = service.RetireMerged(ctx, repo, pr)
@@ -3231,10 +3232,12 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
 		Severities: change.Severities, AskMode: change.AskMode,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
+		OnePass: change.OnePass, MergeMethod: change.MergeMethod,
 		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
 		UnsetPrompt: change.UnsetPrompt, UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
 		UnsetForks:       change.UnsetForks,
 		UnsetSkipAuthors: change.UnsetSkipAuthors,
+		UnsetOnePass:     change.UnsetOnePass, UnsetMerge: change.UnsetMerge,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's
 	// --fleet flag expresses.

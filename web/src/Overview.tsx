@@ -495,7 +495,9 @@ export function OverviewPage({
                         <CommitLink repo={d.repo} sha={d.head} />
                       </Td>
                       <Td>
-                        <Pill tone={d.outcome === "completed" || d.outcome === "merged" ? "ok" : "mut"}>
+                        <Pill
+                          tone={d.outcome === "completed" || d.outcome === "merged" ? "ok" : "mut"}
+                        >
                           {d.outcome === "merged" ? "Merged" : d.outcome}
                         </Pill>
                         {d.note && d.note !== d.outcome && (

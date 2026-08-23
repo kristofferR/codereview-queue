@@ -138,6 +138,8 @@ type RepoSolver struct {
 	AskMode      string            `json:"ask_mode"`
 	Forks        bool              `json:"forks"`
 	SkipAuthors  []string          `json:"skip_authors"`
+	OnePass      bool              `json:"one_pass"`
+	MergeMethod  string            `json:"merge_method,omitempty"`
 	Sources      map[string]string `json:"sources"`
 	By           string            `json:"by,omitempty"`
 	Lagging      []string          `json:"lagging_hosts,omitempty"`

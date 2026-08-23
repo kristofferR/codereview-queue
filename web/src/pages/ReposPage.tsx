@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AddRepo, EnrollmentEditor } from "../AddRepo";
 import { act } from "../actions";
 import type { BotCard, FleetImpact, HeldRow, RepoRow, Snapshot } from "../api";
+import { CampaignEditor } from "../CampaignEditor";
 import { Confirm } from "../Confirm";
 import { HOLD_ACTIONS_ENABLED } from "../features";
 import { SolverEditor } from "../SolverEditor";
@@ -99,6 +100,7 @@ export function ReposPage({
                         {r.active_rounds > 0 && ` · ${r.active_rounds} active`}
                         {r.held_prs > 0 && ` · ${r.held_prs} held`}
                         {r.fixing > 0 && ` · ${r.fixing} fixing`}
+                        {r.solver?.one_pass && " · one-pass campaign"}
                       </div>
                     </button>
                   </li>
@@ -135,6 +137,11 @@ export function ReposPage({
             {selected.override && <Pill tone="warn">Override</Pill>}
             {selected.primary_off && <Pill tone="bad">Primary off</Pill>}
             {selected.solver?.overridden && <Pill tone="warn">Fix settings</Pill>}
+            {selected.solver?.one_pass && (
+              <Pill tone="ok">
+                Campaign{selected.solver.merge_method ? ` · ${selected.solver.merge_method}` : ""}
+              </Pill>
+            )}
             <span className="text-[12.5px] text-faint">
               {selected.active_rounds} active · {selected.queued_rounds} queued
               {selected.override_by && ` · set by ${selected.override_by}`}
@@ -180,12 +187,20 @@ export function ReposPage({
             onSnapshot={onSnapshot}
           />
           {selected.solver && (
-            <SolverEditor
-              key={`${selected.repo}-solver`}
-              repo={selected.repo}
-              solver={selected.solver}
-              onSnapshot={onSnapshot}
-            />
+            <>
+              <CampaignEditor
+                key={`${selected.repo}-campaign`}
+                repo={selected.repo}
+                solver={selected.solver}
+                onSnapshot={onSnapshot}
+              />
+              <SolverEditor
+                key={`${selected.repo}-solver`}
+                repo={selected.repo}
+                solver={selected.solver}
+                onSnapshot={onSnapshot}
+              />
+            </>
           )}
         </div>
       )}

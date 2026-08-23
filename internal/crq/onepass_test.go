@@ -51,6 +51,34 @@ func TestOnePassUsesTheOnlyReviewThenCreatesOneFinalizer(t *testing.T) {
 	}
 }
 
+func TestInteractiveNextLeavesCampaignFinalizerToAutofix(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 10, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 901, "bcbcbcbc12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
+	enableOnePass(t, f, repo, "squash")
+
+	report, err := f.svc.Next(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionBlocked) ||
+		!strings.Contains(report.Reason, "owned by unattended autofix") ||
+		hasOnePassFinalizer(report.Findings) {
+		t.Fatalf("interactive report = %+v, want a released hand-off to autofix", report)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim, ok := st.WorkClaim(repo, pr, f.clk.now()); ok {
+		t.Fatalf("terminal interactive answer retained work claim: %+v", claim)
+	}
+}
+
 func TestOnePassStillFiresTheFirstQueuedReview(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 30, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
@@ -69,6 +97,52 @@ func TestOnePassStillFiresTheFirstQueuedReview(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 1 {
 		t.Fatalf("first review posts = %d, want 1", got)
+	}
+}
+
+func TestOnePassDoesNotFinalizeACompletedRoundWithoutReviewEvidence(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 35, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 902, "bdbdbdbd12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	enableOnePass(t, f, repo, "squash")
+	seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseCompleted, base, 0)
+
+	report, err := f.svc.nextAutomated(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionBlocked) ||
+		!strings.Contains(report.Reason, "without review evidence") ||
+		hasOnePassFinalizer(report.Findings) {
+		t.Fatalf("unreviewed completed round = %+v, want a terminal campaign block", report)
+	}
+}
+
+func TestDispatchRejectsFinalizerFromEndedCampaign(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 40, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 903, "bebebebe12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
+	enableOnePass(t, f, repo, "squash")
+	report, err := f.svc.nextAutomated(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasOnePassFinalizer(report.Findings) || report.onePassCampaign == "" {
+		t.Fatalf("campaign report = %+v, want a campaign-bound finalizer", report)
+	}
+	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{UnsetOnePass: true, UnsetMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why, byDesign := f.svc.claimDispatch(f.ctx, report, "stale-finalizer", 1); ok ||
+		!byDesign || !strings.Contains(why, "no longer active") {
+		t.Fatalf("stale finalizer claim = ok %t byDesign %t reason %q", ok, byDesign, why)
 	}
 }
 
@@ -104,6 +178,8 @@ func TestOnePassPreservesTheReviewSettleWait(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 50, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr, head := "owner/security", 87, "adadadad1"
+	f.openPull(repo, pr, head)
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
 	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
 		round, err := st.NewRound(repo, pr, head, base)
@@ -120,7 +196,7 @@ func TestOnePassPreservesTheReviewSettleWait(t *testing.T) {
 	report := NextReport{Action: string(engine.ActionWait), Repo: repo, PR: pr, Head: head, RecheckAfter: &recheck}
 	action := engine.Action{Kind: engine.ActionWait, Reason: "review is settling"}
 
-	got, handled, err := f.svc.onePassNext(f.ctx, report, action)
+	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
 	if err != nil || !handled {
 		t.Fatalf("handled = %t, err = %v", handled, err)
 	}
@@ -149,7 +225,7 @@ func TestOnePassCollectsEveryRequiredReviewBeforeItsOnlyFixer(t *testing.T) {
 	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
 	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}, Pending: []string{"later-reviewer[bot]"}}
 
-	got, handled, err := f.svc.onePassNext(f.ctx, report, action)
+	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
 	if err != nil || !handled {
 		t.Fatalf("handled = %t, err = %v", handled, err)
 	}
@@ -162,6 +238,8 @@ func TestOnePassAddsFinalizerToTheReviewFindings(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 54, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr, head := "owner/security", 872, "adadadad3"
+	f.openPull(repo, pr, head)
+	f.botReview(repo, pr, 1, head, base.Add(-time.Minute))
 	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
 		round, err := st.NewRound(repo, pr, head, base)
@@ -178,7 +256,7 @@ func TestOnePassAddsFinalizerToTheReviewFindings(t *testing.T) {
 	report := NextReport{Action: string(engine.ActionFix), Repo: repo, PR: pr, Head: head, Findings: []dialect.Finding{finding}}
 	action := engine.Action{Kind: engine.ActionFix, Findings: []dialect.Finding{finding}}
 
-	got, handled, err := f.svc.onePassNext(f.ctx, report, action)
+	got, handled, err := f.svc.onePassNext(f.ctx, report, action, true)
 	if err != nil || !handled {
 		t.Fatalf("handled = %t, err = %v", handled, err)
 	}
@@ -202,13 +280,13 @@ func TestOnePassHoldBlocksFinalizerAndMerge(t *testing.T) {
 	f.gh.mu.Unlock()
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
 		st.Hold(repo, pr, "operator pause", "test", base)
-		st.MarkOnePassReady(repo, pr, head, "test", base)
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	report, handled, err := f.svc.onePassNext(f.ctx, NextReport{Repo: repo, PR: pr, Head: head}, engine.Action{Kind: engine.ActionDone})
+	report, handled, err := f.svc.onePassNext(f.ctx, NextReport{Repo: repo, PR: pr, Head: head}, engine.Action{Kind: engine.ActionDone}, true)
 	if err != nil || !handled || report.Action != string(engine.ActionBlocked) || !strings.Contains(report.Reason, "operator pause") {
 		t.Fatalf("held next = handled %t report %+v err %v", handled, report, err)
 	}
@@ -252,7 +330,7 @@ func TestEnablingOnePassDoesNotAdoptAnOrdinaryLiveSession(t *testing.T) {
 	}
 	enableOnePass(t, f, repo, "squash")
 	report := NextReport{Repo: repo, PR: pr, Head: head}
-	if onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head); err != nil {
+	if onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head, head); err != nil {
 		t.Fatal(err)
 	} else if onePass {
 		t.Fatal("ordinary successful dispatch was identified as one-pass")
@@ -288,7 +366,7 @@ func TestSuccessfulOnePassDispatchIsReadyForImmediateMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := NextReport{Repo: repo, PR: pr, Head: head}
-	onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head)
+	onePass, err := f.svc.completeSuccessfulDispatch(f.ctx, report, token, head, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +418,7 @@ func TestOnePassCompletionFromReplacedCampaignIsDiscarded(t *testing.T) {
 	}
 
 	marked, err := f.svc.completeSuccessfulDispatch(f.ctx,
-		NextReport{Repo: repo, PR: 852, Head: head}, "successful-old-campaign", head)
+		NextReport{Repo: repo, PR: 852, Head: head}, "successful-old-campaign", head, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +460,7 @@ func TestOnePassReadyHeadMergesOnceWithExactSHAWhenChecksAreUnstable(t *testing.
 	f.gh.pulls[fakeKey(repo, pr)] = pull
 	f.gh.mu.Unlock()
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
-		st.MarkOnePassReady(repo, pr, head, "test", base)
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -411,6 +489,82 @@ func TestOnePassReadyHeadMergesOnceWithExactSHAWhenChecksAreUnstable(t *testing.
 	}
 	if _, ok := st.OnePassProgressFor(repo, pr); ok {
 		t.Fatal("successful merge left a reusable one-pass hand-off")
+	}
+}
+
+func TestOnePassReadyHeadCannotOutliveItsFinalizedBase(t *testing.T) {
+	base := time.Date(2026, 8, 23, 11, 10, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 904, "cacababa12345678"
+	oldBase, movedBase := "1111111112345678", "2222222212345678"
+	f.openPull(repo, pr, head)
+	enableOnePass(t, f, repo, "squash")
+	mergeable := true
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Base.SHA = movedBase
+	pull.Mergeable, pull.MergeableState = &mergeable, "clean"
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, pr, head, oldBase, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	eligible, merged, reason, err := f.svc.mergeOnePassReady(f.ctx, repo, pr)
+	if err != nil || !eligible || merged || !strings.Contains(reason, "base moved") {
+		t.Fatalf("moved-base merge = eligible %t merged %t reason %q err %v", eligible, merged, reason, err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, ok := st.OnePassProgressFor(repo, pr); !ok || progress.ReadyHead != "" {
+		t.Fatalf("moved base retained reusable merge hand-off: %+v, ok=%t", progress, ok)
+	}
+	f.gh.mu.Lock()
+	pull = f.gh.pulls[fakeKey(repo, pr)]
+	pull.Base.SHA = oldBase
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	if eligible, merged, _, err := f.svc.mergeOnePassReady(f.ctx, repo, pr); err != nil || eligible || merged {
+		t.Fatalf("restored base resurrected merge authorization: eligible %t merged %t err %v", eligible, merged, err)
+	}
+}
+
+func TestClosedPRInvalidatesReadyCampaignHandoff(t *testing.T) {
+	base := time.Date(2026, 8, 23, 11, 12, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 905, "cacacaca12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	enableOnePass(t, f, repo, "squash")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.retireClosedRounds(f.ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, ok := st.OnePassProgressFor(repo, pr); !ok || progress.ReadyHead != "" {
+		t.Fatalf("closed PR retained ready hand-off: %+v, ok=%t", progress, ok)
+	}
+	report, err := f.svc.nextAutomated(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionBlocked) || !strings.Contains(report.Reason, "already ran") {
+		t.Fatalf("reopened same head = %+v, want a terminal campaign block", report)
 	}
 }
 
@@ -458,7 +612,7 @@ func TestAlreadyMergedOnePassPropagatesRetirementFailure(t *testing.T) {
 	f.gh.pulls[fakeKey(repo, pr)] = pull
 	f.gh.mu.Unlock()
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
-		st.MarkOnePassReady(repo, pr, head, "test", base)
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -479,7 +633,7 @@ func TestOnePassDryRunNeverMergesOrClearsTheReadyHead(t *testing.T) {
 	f.openPull(repo, pr, head)
 	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
-		st.MarkOnePassReady(repo, pr, head, "test", base)
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -512,7 +666,7 @@ func TestOnePassNeverRefixesOrMergesAHeadThatMovedAfterFixing(t *testing.T) {
 	f.setLocalWork(false, "")
 	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
-		st.MarkOnePassReady(repo, pr, fixed, "test", base)
+		st.MarkOnePassReady(repo, pr, fixed, fixed, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -547,7 +701,7 @@ func TestWatchKeepsMovedOnePassReadyHeadBlocked(t *testing.T) {
 	f.gh.mu.Unlock()
 	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
-		st.MarkOnePassReady(repo, pr, fixed, "test", base)
+		st.MarkOnePassReady(repo, pr, fixed, fixed, "test", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)

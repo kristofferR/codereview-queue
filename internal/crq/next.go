@@ -26,6 +26,10 @@ type NextReport struct {
 	// `crq next` wire contract: Next does not fetch the head repository, while
 	// watch already has the Pull object and must carry that fact into the CAS.
 	Fork bool `json:"-"`
+	// onePassCampaign binds a synthetic finalizer to the exact repository
+	// campaign that produced it. It is watch-only state: the dispatch CAS checks
+	// it again so disabling/restarting a campaign cannot launch stale work.
+	onePassCampaign string
 	// dispatchUntil is the locally known expiry of a watch-only dispatch claim.
 	// It lets the session stop at the lease boundary if shared-state writes fail.
 	dispatchUntil time.Time
@@ -73,7 +77,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	if !outcome.acquired {
 		return workClaimConflictReport(repo, pr, outcome, s.clock(), s.waitTick()), nil
 	}
-	report, err := s.nextAutomated(ctx, repo, pr)
+	report, err := s.nextDriven(ctx, repo, pr, false)
 	if err == nil {
 		// GitHub transport retries can outlive the claim. Revalidate after the
 		// decision so a caller never receives actionable work after another host
@@ -99,6 +103,14 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 // the same decision and mutations as Next without taking interactive ownership
 // of the PR. The autofix dispatch CAS separately refuses live WorkClaims.
 func (s *Service) nextAutomated(ctx context.Context, repo string, pr int) (NextReport, error) {
+	return s.nextDriven(ctx, repo, pr, true)
+}
+
+// nextDriven is the common queue decision. Only the unattended watcher may
+// receive a campaign's synthetic fixer/finalizer: an interactive Next call has
+// already claimed the PR and has no completion hook that can release the exact
+// fixed head to the campaign merger.
+func (s *Service) nextDriven(ctx context.Context, repo string, pr int, allowFinalizer bool) (NextReport, error) {
 	repo = NormalizeRepo(repo)
 	report := NextReport{Repo: repo, PR: pr, Findings: []dialect.Finding{}, CheckedAt: s.clock()}
 
@@ -121,7 +133,7 @@ func (s *Service) nextAutomated(ctx context.Context, repo string, pr int) (NextR
 			return report, err
 		}
 	}
-	if report, handled, err := s.onePassNext(ctx, report, action); err != nil {
+	if report, handled, err := s.onePassNext(ctx, report, action, allowFinalizer); err != nil {
 		return report, err
 	} else if handled {
 		return report, nil

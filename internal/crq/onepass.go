@@ -19,6 +19,7 @@ func (s *Service) onePassNext(
 	ctx context.Context,
 	report NextReport,
 	action engine.Action,
+	allowFinalizer bool,
 ) (NextReport, bool, error) {
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -77,6 +78,20 @@ func (s *Service) onePassNext(
 	if round := st.Round(report.Repo, report.PR); round != nil && round.Head == report.Head {
 		switch round.Phase {
 		case PhaseCompleted:
+			// Completed is a scheduling phase, not proof that code was reviewed:
+			// summary-only and explicit-skipped primary responses deliberately
+			// complete a round so it does not retry forever. Remove the marker and
+			// ask the PR-wide evidence predicate before authorizing the campaign's
+			// only fixer and any merge that follows.
+			probe := cloneState(st)
+			delete(probe.Rounds, QueueKey(report.Repo, report.PR))
+			need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
+			if err != nil {
+				return report, true, err
+			}
+			if need {
+				return blockedOnePass(report, "the one-pass round completed without review evidence; refusing to run a fixer or merge"), true, nil
+			}
 			reviewed = true
 		case PhaseQueued:
 			// Ignore this not-yet-fired marker while asking whether an older
@@ -150,6 +165,10 @@ func (s *Service) onePassNext(
 		report.RecheckAfter = &at
 		return report, true, nil
 	}
+	if !allowFinalizer {
+		return blockedOnePass(report, "the one-pass fixer/finalizer is owned by unattended autofix; interactive work was not claimed"), true, nil
+	}
+	report.onePassCampaign = st.EffectiveSolver(report.Repo).OnePassCampaign
 
 	// Keep real feedback and add the final integration/security pass to the same
 	// sole session. A non-clean first review needs that finalizer just as much as
@@ -170,6 +189,15 @@ func (s *Service) onePassNext(
 	return report, true, nil
 }
 
+func blockedOnePass(report NextReport, reason string) NextReport {
+	report.Action = string(engine.ActionBlocked)
+	report.Reason = reason
+	report.Findings = []dialect.Finding{}
+	report.Pending = nil
+	report.RecheckAfter = nil
+	return report
+}
+
 func onePassFinalizer(head string) dialect.Finding {
 	return dialect.Finding{
 		ID:       onePassFinalizeSource,
@@ -182,6 +210,15 @@ func onePassFinalizer(head string) dialect.Finding {
 		Commit: head,
 		Source: onePassFinalizeSource,
 	}
+}
+
+func hasOnePassFinalizer(findings []dialect.Finding) bool {
+	for _, finding := range findings {
+		if finding.Source == onePassFinalizeSource {
+			return true
+		}
+	}
+	return false
 }
 
 // completeUnsuccessfulDispatch records a real, available code-fix session as
@@ -222,7 +259,7 @@ func (s *Service) completeSuccessfulDispatch(
 	ctx context.Context,
 	report NextReport,
 	token string,
-	readyHead string,
+	readyHead, readyBase string,
 ) (bool, error) {
 	var marked bool
 	st, err := s.store.Update(ctx, func(st *State) error {
@@ -238,7 +275,10 @@ func (s *Service) completeSuccessfulDispatch(
 			if !released {
 				return errors.New("the successful fixer no longer owns its dispatch claim")
 			}
-			st.MarkOnePassReady(report.Repo, report.PR, readyHead, s.cfg.Host, s.clock())
+			if strings.TrimSpace(readyHead) == "" || strings.TrimSpace(readyBase) == "" {
+				return errors.New("the successful one-pass fixer did not prove an exact head and base")
+			}
+			st.MarkOnePassReady(report.Repo, report.PR, readyHead, readyBase, s.cfg.Host, s.clock())
 			marked = true
 		}
 		if !released && !marked {
@@ -266,13 +306,6 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	if !cfg.OnePass || cfg.MergeMethod == "" || !ready || progress.ReadyHead == "" {
 		return false, false, "", nil
 	}
-	if !st.AutofixEnabled(repo) {
-		return true, false, "post-fix merge is paused because autofix is off for this repository", nil
-	}
-	if s.cfg.DryRun {
-		return true, false, "dry run: exact-head merge not performed", nil
-	}
-
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
 		return true, false, "", err
@@ -284,7 +317,12 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, true, "already merged", nil
 	}
 	if !strings.EqualFold(pull.State, "open") {
-		return true, false, "pull request is no longer open", nil
+		if !s.cfg.DryRun {
+			if err := s.invalidateOnePassReady(ctx, repo, pr); err != nil {
+				return true, false, "pull request is no longer open", err
+			}
+		}
+		return true, false, "pull request is no longer open; its campaign hand-off was retired", nil
 	}
 	if pull.Draft {
 		return true, false, "waiting: pull request is still a draft", nil
@@ -294,6 +332,24 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	}
 	if !st.OnePassReady(repo, pr, pull.Head.SHA) {
 		return true, false, fmt.Sprintf("head moved after the one-pass fixer (%s); refusing an unverified merge", progress.ReadyHead), nil
+	}
+	if !st.OnePassReadyOn(repo, pr, pull.Head.SHA, pull.Base.SHA) {
+		reason := "the finalized base is unknown; refusing an unverified merge"
+		if progress.ReadyBase != "" && pull.Base.SHA != "" {
+			reason = fmt.Sprintf("base moved after the one-pass fixer (%s); refusing an unverified merge", progress.ReadyBase)
+		}
+		if !s.cfg.DryRun {
+			if err := s.invalidateOnePassReady(ctx, repo, pr); err != nil {
+				return true, false, reason, err
+			}
+		}
+		return true, false, reason, nil
+	}
+	if !st.AutofixEnabled(repo) {
+		return true, false, "post-fix merge is paused because autofix is off for this repository", nil
+	}
+	if s.cfg.DryRun {
+		return true, false, "dry run: exact-head and exact-base merge not performed", nil
 	}
 	if pull.Mergeable == nil || strings.EqualFold(pull.MergeableState, "unknown") || pull.MergeableState == "" {
 		return true, false, "waiting for GitHub to compute mergeability", nil
@@ -317,6 +373,33 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return true, true, "merged the fixed head with " + cfg.MergeMethod, err
 	}
 	return true, true, "merged the fixed head with " + cfg.MergeMethod, nil
+}
+
+// invalidateOnePassReady spends no additional fixer attempt. It converts an
+// already-used ready hand-off into the terminal attempted form so reopening a
+// PR or returning the base to an older SHA cannot resurrect merge authority.
+func (s *Service) invalidateOnePassReady(ctx context.Context, repo string, pr int) error {
+	repo = NormalizeRepo(repo)
+	st, err := s.store.Update(ctx, func(st *State) error {
+		progress, ok := st.OnePassProgressFor(repo, pr)
+		if !ok || progress.ReadyHead == "" {
+			return ErrNoChange
+		}
+		head := progress.AttemptHead
+		if head == "" {
+			head = progress.ReadyHead
+		}
+		st.MarkOnePassAttempted(repo, pr, head, s.cfg.Host, s.clock())
+		return nil
+	})
+	if errors.Is(err, ErrNoChange) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.sync(ctx, st)
+	return nil
 }
 
 // MergeOnePassReady exposes the exact-head post-fix merge gate for operational

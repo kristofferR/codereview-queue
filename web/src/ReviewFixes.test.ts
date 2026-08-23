@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FleetSettings, RepoSolver, Snapshot } from "./api";
+import { campaignChange } from "./CampaignEditor";
 import { isFirstRun } from "./FirstRun";
 import { fleetChange } from "./FleetEditor";
 import { solverChange } from "./SolverEditor";
@@ -49,6 +50,7 @@ describe("settings deltas", () => {
       ask_mode: "blocked",
       forks: false,
       skip_authors: ["dependabot[bot]"],
+      one_pass: false,
       sources: {},
     };
 
@@ -82,6 +84,7 @@ describe("settings deltas", () => {
       ask_mode: "blocked",
       forks: false,
       skip_authors: [],
+      one_pass: false,
       sources: {},
     };
 
@@ -97,6 +100,37 @@ describe("settings deltas", () => {
         authors: "",
       }),
     ).toEqual({ models: [] });
+  });
+
+  it("starts a one-pass auto-merge campaign as one atomic solver change", () => {
+    const solver: RepoSolver = {
+      overridden: false,
+      models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+      model_choices: ["gpt-5.6-sol", "gpt-5.6-terra"],
+      model: "gpt-5.6-terra",
+      effort: "high",
+      max_attempts: 5,
+      severities: ["critical", "major"],
+      ask_mode: "blocked",
+      forks: false,
+      skip_authors: [],
+      one_pass: false,
+      sources: {},
+    };
+
+    expect(
+      campaignChange(solver, {
+        model: "gpt-5.6-sol",
+        effort: "medium",
+        mergeMethod: "squash",
+      }),
+    ).toEqual({
+      models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+      effort: "medium",
+      max_attempts: 1,
+      one_pass: true,
+      merge_method: "squash",
+    });
   });
 });
 

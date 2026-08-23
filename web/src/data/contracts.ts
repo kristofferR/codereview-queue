@@ -196,6 +196,8 @@ export const RepoSolverSchema = Schema.Struct({
   ask_mode: Schema.String,
   forks: Schema.Boolean,
   skip_authors: MutableArray(Schema.String),
+  one_pass: Schema.Boolean,
+  merge_method: Optional(Schema.String),
   sources: StringRecord,
   by: Optional(Schema.String),
   lagging_hosts: Optional(MutableArray(Schema.String)),

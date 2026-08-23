@@ -1,6 +1,8 @@
 package state
 
 import (
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,8 +14,12 @@ type OnePassProgress struct {
 	AttemptHead string     `json:"attempt_head,omitempty"`
 	AttemptedAt *time.Time `json:"attempted_at,omitempty"`
 	ReadyHead   string     `json:"ready_head,omitempty"`
-	ReadyAt     *time.Time `json:"ready_at,omitempty"`
-	By          string     `json:"by,omitempty"`
+	// ReadyBase is the base revision the finalizer demonstrably integrated.
+	// ReadyHead alone is insufficient: GitHub can later report the same head
+	// conflict-free against a different base the agent never inspected.
+	ReadyBase string     `json:"ready_base,omitempty"`
+	ReadyAt   *time.Time `json:"ready_at,omitempty"`
+	By        string     `json:"by,omitempty"`
 
 	unknown unknownFields
 }
@@ -26,6 +32,15 @@ func (s *State) OnePassReady(repo string, pr int, head string) bool {
 		(strings.HasPrefix(head, p.ReadyHead) || strings.HasPrefix(p.ReadyHead, head))
 }
 
+// OnePassReadyOn reports whether both sides of the finalized combination are
+// still exact. GitHub's merge API separately binds the merge to ReadyHead; this
+// base check prevents an unchanged head being merged after the base advances.
+func (s *State) OnePassReadyOn(repo string, pr int, head, base string) bool {
+	p, ok := s.OnePass[Key(repo, pr)]
+	return ok && s.OnePassReady(repo, pr, head) && p.ReadyBase != "" && base != "" &&
+		(strings.HasPrefix(base, p.ReadyBase) || strings.HasPrefix(p.ReadyBase, base))
+}
+
 // OnePassProgressFor returns the campaign hand-off, when a fixer has already
 // completed for this pull request.
 func (s *State) OnePassProgressFor(repo string, pr int) (OnePassProgress, bool) {
@@ -34,7 +49,7 @@ func (s *State) OnePassProgressFor(repo string, pr int) (OnePassProgress, bool) 
 }
 
 // MarkOnePassReady records the head a successful fixer actually left on the PR.
-func (s *State) MarkOnePassReady(repo string, pr int, head, by string, now time.Time) {
+func (s *State) MarkOnePassReady(repo string, pr int, head, base, by string, now time.Time) {
 	if s.OnePass == nil {
 		s.OnePass = map[string]OnePassProgress{}
 	}
@@ -42,7 +57,7 @@ func (s *State) MarkOnePassReady(repo string, pr int, head, by string, now time.
 	at := now.UTC()
 	next := OnePassProgress{
 		AttemptHead: head, AttemptedAt: &at,
-		ReadyHead: head, ReadyAt: &at, By: by,
+		ReadyHead: head, ReadyBase: base, ReadyAt: &at, By: by,
 	}
 	if prev, ok := s.OnePass[key]; ok {
 		if prev.AttemptHead != "" {
@@ -51,6 +66,32 @@ func (s *State) MarkOnePassReady(repo string, pr int, head, by string, now time.
 		next.unknown = carryUnknown(next.unknown, prev.unknown)
 	}
 	s.OnePass[key] = next
+}
+
+// InvalidateClosedOnePass converts every ready hand-off for a PR absent from
+// the repository's authoritative open list into a terminal attempted record.
+// Reopening the same head must not resurrect pre-closure merge authorization;
+// a person has to start a new campaign to make that PR eligible again.
+func (s *State) InvalidateClosedOnePass(repo string, open map[int]bool, by string, now time.Time) []int {
+	prefix := normalizeRepoKey(repo) + "#"
+	var closed []int
+	for key, progress := range s.OnePass {
+		if !strings.HasPrefix(key, prefix) || progress.ReadyHead == "" {
+			continue
+		}
+		pr, err := strconv.Atoi(strings.TrimPrefix(key, prefix))
+		if err != nil || pr <= 0 || open[pr] {
+			continue
+		}
+		head := progress.AttemptHead
+		if head == "" {
+			head = progress.ReadyHead
+		}
+		s.MarkOnePassAttempted(repo, pr, head, by, now)
+		closed = append(closed, pr)
+	}
+	sort.Ints(closed)
+	return closed
 }
 
 // MarkOnePassAttempted records that the campaign's single fixer session ran

@@ -412,7 +412,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				var action engine.Action
 				report, action, _, err = s.nextFromState(ctx, repo, pull.Number)
 				if err == nil && report.Action == string(engine.ActionFix) {
-					if onePassReport, handled, onePassErr := s.onePassNext(ctx, report, action); onePassErr != nil {
+					if onePassReport, handled, onePassErr := s.onePassNext(ctx, report, action, true); onePassErr != nil {
 						err = onePassErr
 					} else if handled {
 						report = onePassReport
@@ -891,6 +891,12 @@ func (s *Service) dispatchWithStart(
 		return false, fmt.Sprintf("pull request head moved from %s to %s; stale fix session skipped",
 			shortSHA(claimedHead), shortSHA(liveHead))
 	}
+	readyBase := strings.TrimSpace(pull.Base.SHA)
+	if hasOnePassFinalizer(report.Findings) && readyBase == "" {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "GitHub did not report the campaign's base revision; fix session skipped"
+	}
 	if err := cmd.Start(); err != nil {
 		// A command that never reached a process did not use up the per-head
 		// budget. Correcting a missing agent must leave this head retryable.
@@ -980,8 +986,14 @@ func (s *Service) dispatchWithStart(
 		return false, "the successful session's exact HEAD could not be read"
 	}
 	readyHead = strings.TrimSpace(readyHead)
+	if hasOnePassFinalizer(report.Findings) {
+		if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", readyBase, readyHead); err != nil {
+			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+			return false, "the one-pass finalizer did not integrate the exact base " + shortSHA(readyBase)
+		}
+	}
 	onePass, err := s.completeSuccessfulDispatch(
-		context.WithoutCancel(ctx), report, token, readyHead,
+		context.WithoutCancel(ctx), report, token, readyHead, readyBase,
 	)
 	if err != nil {
 		// Keep the checkout as an audit trail. The branch already holds the fix,
@@ -1288,6 +1300,13 @@ func (s *Service) claimDispatchModels(
 		// limit after this pass's initial read. Resolve all three from the state
 		// revision this CAS will write.
 		claimCfg := s.cfgFor(*st, report.Repo)
+		solver := st.EffectiveSolver(report.Repo)
+		if hasOnePassFinalizer(report.Findings) &&
+			(!claimCfg.OnePass || report.onePassCampaign == "" ||
+				solver.OnePassCampaign != report.onePassCampaign) {
+			reason, byDesign = "the campaign that produced this one-pass finalizer is no longer active", true
+			return ErrNoChange
+		}
 		// A one-pass campaign can be enabled while an ordinary fixer is still
 		// running. Installing the campaign binary stops that old process, but its
 		// stale attempt counter remains on the round. With the campaign limit set
@@ -1296,7 +1315,6 @@ func (s *Service) claimDispatchModels(
 		// longer live, discard only attempts older than the repository setting
 		// that enabled this campaign. A real one-pass attempt has progress state
 		// and is never reset here.
-		solver := st.EffectiveSolver(report.Repo)
 		_, onePassStarted := st.OnePassProgressFor(report.Repo, report.PR)
 		if claimCfg.OnePass && !onePassStarted && round.Dispatch != nil &&
 			!round.DispatchHeld(s.clock()) && solver.UpdatedAt != nil &&
@@ -1808,6 +1826,28 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 		if s.log != nil {
 			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+		}
+	}
+	if s.cfg.DryRun {
+		return nil
+	}
+	var invalidated []int
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		invalidated = st.InvalidateClosedOnePass(repo, open, s.cfg.Host, s.clock())
+		if len(invalidated) == 0 {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return err
+	}
+	if err == nil {
+		s.sync(ctx, updated)
+	}
+	for _, pr := range invalidated {
+		if s.log != nil {
+			s.log.Printf("watch: %s#%d retired its one-pass merge hand-off: pr closed", repo, pr)
 		}
 	}
 	return nil

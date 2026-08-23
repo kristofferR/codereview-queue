@@ -29,7 +29,7 @@ func TestOnePassSolverIsTemporaryAndRepositoryScoped(t *testing.T) {
 		t.Fatalf("one-pass solver view = %+v", view)
 	}
 	if _, err := store.Update(ctx, func(st *State) error {
-		st.MarkOnePassReady("o/r", 7, "abcdef123", "test", time.Now())
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "basebase1", "test", time.Now())
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestMergePolicyChangePreservesCompletedOnePassHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.Update(ctx, func(st *State) error {
-		st.MarkOnePassReady("o/r", 7, "abcdef123", "test", time.Now())
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "basebase1", "test", time.Now())
 		return nil
 	}); err != nil {
 		t.Fatal(err)

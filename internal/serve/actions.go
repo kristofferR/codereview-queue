@@ -546,6 +546,8 @@ type SolverChange struct {
 	AskMode          *string  `json:"ask_mode"`
 	Forks            *bool    `json:"forks"`
 	SkipAuthors      []string `json:"skip_authors"`
+	OnePass          *bool    `json:"one_pass"`
+	MergeMethod      *string  `json:"merge_method"`
 	UnsetModels      bool     `json:"unset_models,omitempty"`
 	UnsetEffort      bool     `json:"unset_effort,omitempty"`
 	UnsetPrompt      bool     `json:"unset_prompt,omitempty"`
@@ -553,5 +555,7 @@ type SolverChange struct {
 	UnsetAskMode     bool     `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool     `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool     `json:"unset_skip_authors,omitempty"`
+	UnsetOnePass     bool     `json:"unset_one_pass,omitempty"`
+	UnsetMerge       bool     `json:"unset_merge,omitempty"`
 	Clear            bool     `json:"clear"`
 }

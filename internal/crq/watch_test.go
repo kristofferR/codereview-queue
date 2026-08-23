@@ -263,7 +263,11 @@ func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
 	cfg.WorkspaceRoot = t.TempDir()
 	cfg.AllowRepos = map[string]bool{repo: true}
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 5, sha
+	gh.pulls[fakeKey(repo, 5)] = pull
+	svc := NewService(cfg, gh, store, nil)
 	report := NextReport{Repo: repo, PR: 5, Head: sha, Action: "fix"}
 	seedRound(t, store, cfg, repo, 5, sha, PhaseQueued, time.Now().UTC(), 0)
 
@@ -308,6 +312,9 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{repo: true}
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 18, sha
+	gh.pulls[fakeKey(repo, 18)] = pull
 	store := NewMemoryStore(cfg)
 	switchable := &loadSwitchStore{StateStore: store}
 	svc := NewService(cfg, gh, switchable, nil)
@@ -609,6 +616,7 @@ func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
 	gh.pulls[fakeKey(repo, pr)] = pull
 	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	gh.graphQL = func(query string, _ map[string]any, out any) error {
@@ -701,6 +709,7 @@ func TestOneShotDispatchReportsImmediateOnePassMergeFailure(t *testing.T) {
 	mergeable := true
 	var pull ghapi.Pull
 	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
 	pull.Mergeable, pull.MergeableState = &mergeable, "clean"
 	gh.pulls[fakeKey(repo, pr)] = pull
 	mergeErr := errors.New("merge endpoint unavailable")
@@ -716,6 +725,11 @@ func TestOneShotDispatchReportsImmediateOnePassMergeFailure(t *testing.T) {
 		Repo: repo, PR: pr, Head: sha, Action: string(engine.ActionFix),
 		Findings: []dialect.Finding{{ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: sha, Severity: "major"}},
 	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
 	token := "one-pass-token"
 	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 1); !ok {
 		t.Fatalf("claimDispatch refused: %s", why)
@@ -735,7 +749,11 @@ func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
 
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	report := NextReport{
 		Repo: repo, PR: pr, Head: sha, Action: "fix",
 		Findings: []dialect.Finding{{ID: "f1", Commit: sha}},
@@ -1120,7 +1138,11 @@ func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 15, sha
+	gh.pulls[fakeKey(repo, 15)] = pull
+	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, 15, sha, PhaseQueued, time.Now().UTC(), 0)
 	script := filepath.Join(t.TempDir(), "agent.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {

@@ -68,6 +68,9 @@ const (
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
 	// CapsSolver is the capability a host needs to honour solver settings.
 	CapsSolver = crqstate.CapsSolver
+	// CapsOnePass is the capability autoreview/autofix hosts need for one-pass
+	// review capping and post-fix merge hand-offs.
+	CapsOnePass = crqstate.CapsOnePass
 	// CapsPreflightSkipBlocked is the capability a host needs to honour the
 	// shared blocked-preflight policy.
 	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked

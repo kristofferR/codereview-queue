@@ -39,6 +39,7 @@ var (
 	workClaimFields     = jsonFieldNames(reflect.TypeOf(WorkClaim{}))
 	hostReportFields    = jsonFieldNames(reflect.TypeOf(HostReport{}))
 	toolReportFields    = jsonFieldNames(reflect.TypeOf(ToolReport{}))
+	onePassFields       = jsonFieldNames(reflect.TypeOf(OnePassProgress{}))
 )
 
 // UnmarshalJSON decodes an interactive work claim and preserves fields written
@@ -312,6 +313,30 @@ func (s *RepoAutofixSwitch) UnmarshalJSON(raw []byte) error {
 func (s RepoAutofixSwitch) MarshalJSON() ([]byte, error) {
 	type plain RepoAutofixSwitch
 	return mergeUnknown(plain(s), s.unknown)
+}
+
+// UnmarshalJSON decodes a one-pass hand-off and preserves fields written by a
+// newer binary. The containing map is known to this binary, so the record must
+// carry its own unknown members.
+func (p *OnePassProgress) UnmarshalJSON(raw []byte) error {
+	type plain OnePassProgress
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, onePassFields)
+	if err != nil {
+		return err
+	}
+	*p = OnePassProgress(decoded)
+	p.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a one-pass hand-off with unknown members intact.
+func (p OnePassProgress) MarshalJSON() ([]byte, error) {
+	type plain OnePassProgress
+	return mergeUnknown(plain(p), p.unknown)
 }
 
 // The same nesting argument applies to records that have been recognised for

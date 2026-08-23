@@ -5,7 +5,50 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestOnePassSolverIsTemporaryAndRepositoryScoped(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	merge := "squash"
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &merge}); err == nil {
+		t.Fatal("post-fix merge without one-pass was accepted")
+	}
+	on := true
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{OnePass: &on}); err == nil {
+		t.Fatal("one-pass was accepted as a fleet-wide default")
+	}
+	view, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on, MergeMethod: &merge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.OnePass || view.MergeMethod != "squash" || view.Sources["one_pass"] != "repo" {
+		t.Fatalf("one-pass solver view = %+v", view)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "test", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = svc.SetSolver(ctx, "o/r", SolverChange{Clear: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.OnePass || view.MergeMethod != "" || view.Overridden {
+		t.Fatalf("cleared solver view = %+v", view)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.OnePassProgressFor("o/r", 7); ok {
+		t.Fatal("clearing the repository solver kept campaign hand-offs")
+	}
+}
 
 // Solver settings exist so two repositories the same watcher handles can be
 // fixed differently, so what this pins is the layering and — because these

@@ -657,6 +657,34 @@ func TestListCheckRunsEnvelopePagination(t *testing.T) {
 	}
 }
 
+func TestMergePullSendsExactHeadAndMethod(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var gotMethod, gotPath string
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"sha":"abc123","merged":true,"message":"merged"}`))
+	}))
+	defer srv.Close()
+	g := &GitHub{
+		token: "test-token", httpClient: srv.Client(), apiBase: srv.URL,
+		maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond,
+	}
+	result, err := g.MergePull(context.Background(), "owner/repo", 17, "abc123", "squash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Merged || gotMethod != http.MethodPut || gotPath != "/repos/owner/repo/pulls/17/merge" {
+		t.Fatalf("result=%+v method=%s path=%s", result, gotMethod, gotPath)
+	}
+	if gotBody["sha"] != "abc123" || gotBody["merge_method"] != "squash" {
+		t.Fatalf("merge body = %#v", gotBody)
+	}
+}
+
 // TestListCheckRunsRidesETagCache: a 304 revalidation must replay the cached
 // envelope instead of failing or double-charging the REST quota.
 func TestListCheckRunsRidesETagCache(t *testing.T) {

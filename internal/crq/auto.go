@@ -372,7 +372,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if pr.Title != "" {
 				titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
 			}
-			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
+			// A one-pass campaign asks whether this PR has ever received its one
+			// review, regardless of later heads. The watcher owns the single fixer
+			// and exact-head merge after that boundary.
+			incremental := opts.Incremental && !s.cfgFor(state, repo).OnePass
+			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, incremental)
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
@@ -473,15 +477,27 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		}
 		return need, head, nil
 	}
-	if lastBotReview != "" {
+	// First-review mode is about the PR, not specifically the metered primary.
+	// A primary-off repository reviewed only by Codex has already spent its one
+	// round just as surely as a CodeRabbit repository has. Looking only at Bot
+	// made --no-incremental continuously enqueue Codex-only repositories.
+	if len(cfg.Reviewers) == 0 && lastBotReview != "" {
+		// Programmatic/legacy Config values predate the canonical reviewer list;
+		// Bot is their primary reviewer and remains a valid one-round marker.
 		return false, head, nil
+	}
+	for _, reviewer := range cfg.Reviewers {
+		if reviewedHere[dialect.NormalizeBotName(reviewer.Login)] != "" {
+			return false, head, nil
+		}
 	}
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
 	}
+	marker := strings.TrimSpace(s.cfg.ReviewDoneMarker)
 	for _, comment := range comments {
-		if dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
+		if marker != "" && dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, marker) {
 			return false, head, nil
 		}
 	}
@@ -489,7 +505,7 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
-	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
+	if marker != "" && strings.Contains(pull.Body, marker) {
 		return false, head, nil
 	}
 	announce(repo, pr, head, "never reviewed")

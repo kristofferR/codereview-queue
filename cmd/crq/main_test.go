@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	crqcore "github.com/kristofferR/coderabbit-queue/internal/crq"
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
@@ -167,6 +168,25 @@ func TestSolverTargetIsUnambiguous(t *testing.T) {
 		if err := validateSolverTarget(target.repo, target.fleet); err != nil {
 			t.Errorf("valid target %+v was rejected: %v", target, err)
 		}
+	}
+}
+
+func TestRunSolverParsesOnePassCampaign(t *testing.T) {
+	cfg := crqcore.Config{Host: "test"}
+	store := crqcore.NewMemoryStore(cfg)
+	svc := crqcore.NewService(cfg, nil, store, nil)
+	if code := runSolver(t.Context(), svc, []string{
+		"set", "owner/repo", "--models", "gpt-5.6-sol", "--effort", "medium",
+		"--attempts", "1", "--one-pass", "on", "--merge", "squash",
+	}); code != 0 {
+		t.Fatalf("runSolver campaign exit = %d", code)
+	}
+	view, err := svc.Solver(t.Context(), "owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.OnePass || view.MergeMethod != "squash" || view.Model != "gpt-5.6-sol" || view.Effort != "medium" || view.MaxAttempts != 1 {
+		t.Fatalf("campaign view = %+v", view)
 	}
 }
 

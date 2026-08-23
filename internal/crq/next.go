@@ -121,6 +121,11 @@ func (s *Service) nextAutomated(ctx context.Context, repo string, pr int) (NextR
 			return report, err
 		}
 	}
+	if report, handled, err := s.onePassNext(ctx, report, action); err != nil {
+		return report, err
+	} else if handled {
+		return report, nil
+	}
 
 	// Uncleared feedback for THIS head: publish nothing. Another review of the
 	// same head would spend account quota to be told what the caller is already

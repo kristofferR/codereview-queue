@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -23,6 +24,9 @@ type fakeGitHub struct {
 	pullReads       map[string]int
 	pullErrOnRead   map[string]int
 	pullErrs        map[string]error
+	mergeErrs       map[string]error
+	mergeResults    map[string]ghapi.MergeResult
+	merged          []string
 	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
 	reviews         map[string][]ghapi.Review
@@ -108,6 +112,8 @@ func newFakeGitHub() *fakeGitHub {
 		pullReads:       map[string]int{},
 		pullErrOnRead:   map[string]int{},
 		pullErrs:        map[string]error{},
+		mergeErrs:       map[string]error{},
+		mergeResults:    map[string]ghapi.MergeResult{},
 		commits:         map[string]ghapi.Commit{},
 		commitErrs:      map[string]error{},
 		reviews:         map[string][]ghapi.Review{},
@@ -182,6 +188,20 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull
 		return ghapi.Pull{}, errors.New("missing pull")
 	}
 	return pull, nil
+}
+
+func (f *fakeGitHub) MergePull(_ context.Context, repo string, pr int, sha, method string) (ghapi.MergeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeKey(repo, pr)
+	if err := f.mergeErrs[key]; err != nil {
+		return ghapi.MergeResult{}, err
+	}
+	f.merged = append(f.merged, fmt.Sprintf("%s@%s:%s", key, sha, method))
+	if result, ok := f.mergeResults[key]; ok {
+		return result, nil
+	}
+	return ghapi.MergeResult{SHA: sha, Merged: true, Message: "Pull Request successfully merged"}, nil
 }
 
 func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (ghapi.Commit, error) {

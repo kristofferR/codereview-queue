@@ -810,6 +810,7 @@ type Issue struct {
 type Pull struct {
 	Number  int    `json:"number"`
 	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
 	Title   string `json:"title"`
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
@@ -828,7 +829,9 @@ type Pull struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
 	} `json:"head"`
-	Merged bool `json:"merged"`
+	Merged         bool   `json:"merged"`
+	Mergeable      *bool  `json:"mergeable"`
+	MergeableState string `json:"mergeable_state"`
 	// Additions/Deletions/ChangedFiles are only populated by the single-pull
 	// endpoint, not by list or search results. They cost nothing extra there,
 	// and they are what a cost estimate is computed from.
@@ -913,6 +916,28 @@ func (g *GitHub) CreateIssue(ctx context.Context, repo, title, body string) (Iss
 func (g *GitHub) GetPull(ctx context.Context, repo string, pr int) (Pull, error) {
 	var out Pull
 	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d", repoPath(repo), pr), nil, &out)
+	return out, err
+}
+
+// MergeResult is GitHub's answer to an exact-head pull-request merge. Merged
+// can be false without a transport error when GitHub refuses a stale or
+// currently unmergeable head; Message carries that reason.
+type MergeResult struct {
+	SHA     string `json:"sha"`
+	Merged  bool   `json:"merged"`
+	Message string `json:"message"`
+}
+
+// MergePull merges only sha using one of GitHub's supported merge methods.
+// Supplying the head SHA is the safety boundary: a push racing the readiness
+// checks makes the endpoint refuse instead of merging code the fixer did not
+// release.
+func (g *GitHub) MergePull(ctx context.Context, repo string, pr int, sha, method string) (MergeResult, error) {
+	var out MergeResult
+	err := g.request(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/pulls/%d/merge", repoPath(repo), pr), map[string]string{
+		"sha":          sha,
+		"merge_method": method,
+	}, &out)
 	return out, err
 }
 

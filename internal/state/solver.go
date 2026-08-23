@@ -56,6 +56,17 @@ type SolverSettings struct {
 	// distinguishes "not chosen" from "chosen to be nobody".
 	SkipAuthors    []string `json:"skip_authors,omitempty"`
 	SetSkipAuthors bool     `json:"set_skip_authors,omitempty"`
+	// OnePass turns the automated workflow into one review round followed by a
+	// fixer session and, optionally, a merge. It is deliberately repository-
+	// scoped: bulk campaigns need the throughput, while ordinary feature work
+	// should keep the normal incremental review loop.
+	OnePass    bool `json:"one_pass,omitempty"`
+	SetOnePass bool `json:"set_one_pass,omitempty"`
+	// MergeMethod is empty/off, merge, squash, or rebase. SetMerge distinguishes
+	// an explicit off from inheritance. A merge is attempted only after the
+	// one-pass fixer completed successfully for the exact current head.
+	MergeMethod string `json:"merge_method,omitempty"`
+	SetMerge    bool   `json:"set_merge,omitempty"`
 
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
@@ -77,7 +88,7 @@ func (s SolverSettings) Empty() bool {
 		!s.SetEffort && s.Effort == "" && !s.SetPrompt && s.Prompt == "" &&
 		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 &&
 		!s.SetAskMode && s.AskMode == "" &&
-		s.Forks == nil && !s.SetSkipAuthors &&
+		s.Forks == nil && !s.SetSkipAuthors && !s.SetOnePass && !s.SetMerge &&
 		len(s.unknown) == 0
 }
 
@@ -121,6 +132,12 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 	}
 	if over.SetSkipAuthors {
 		out.SkipAuthors, out.SetSkipAuthors = over.SkipAuthors, true
+	}
+	if over.SetOnePass {
+		out.OnePass, out.SetOnePass = over.OnePass, true
+	}
+	if over.SetMerge {
+		out.MergeMethod, out.SetMerge = over.MergeMethod, true
 	}
 	if over.UpdatedAt != nil {
 		out.By, out.UpdatedAt = over.By, over.UpdatedAt

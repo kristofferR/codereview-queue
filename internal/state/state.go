@@ -617,6 +617,9 @@ type State struct {
 	HostReports map[string]HostReport `json:"host_reports,omitempty"`
 	// RepoSolver is how a fix session runs, per repository. See solver.go.
 	RepoSolver map[string]SolverSettings `json:"repo_solver,omitempty"`
+	// OnePass is the fixer-to-merger hand-off for repository-scoped one-pass
+	// campaigns. See onepass.go.
+	OnePass map[string]OnePassProgress `json:"one_pass,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,
 	// so the decision lives with the fleet rather than in one host's env file.
 	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
@@ -662,7 +665,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 12
+const WriterCaps = 13
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -697,6 +700,10 @@ const CapsFleetDefaults = 4
 // inheritance, so the dashboard must name it before claiming the saved answer
 // applies fleet-wide.
 const CapsSolver = 8
+
+// CapsOnePass is the capability required by both autoreview and autofix hosts
+// to honour the one-review cap and the fixer-to-merge hand-off.
+const CapsOnePass = 13
 
 // CapsPreflightSkipBlocked is the capability that makes the shared
 // CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local

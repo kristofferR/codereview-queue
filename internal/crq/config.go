@@ -86,6 +86,11 @@ type Config struct {
 	// FixAskMode controls when it should stop and surface a clarification.
 	FixSeverities map[string]bool
 	FixAskMode    string
+	// OnePass caps automated review at the first round for a pull request.
+	// MergeMethod optionally merges the exact head a successful fixer released.
+	// Both come from repository/fleet solver state, never the host environment.
+	OnePass     bool
+	MergeMethod string
 	// DispatchForks allows fix sessions on pull requests whose head branch lives
 	// in another repository. Off by default: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.

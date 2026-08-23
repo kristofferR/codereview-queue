@@ -427,8 +427,10 @@ crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly
 crq solver <repo>         # models, scope, clarification policy, attempts, forks and prompt
 crq solver set <repo> [--models <first,next,...>] [--severities minor,potential] [--ask uncertain]
 crq solver set <repo> [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
-crq solver set <repo> --inherit models,effort,severities,ask,forks,skip-authors # follow the fleet
+crq solver set <repo> [--one-pass on|off] [--merge off|merge|squash|rebase]
+crq solver set <repo> --inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge
 crq solver set --fleet [...]                          # the default every repository inherits
+crq solver clear <repo> | crq solver clear --fleet
 
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
@@ -455,6 +457,15 @@ crq help [command]        # help, optionally for one command
 account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocked_until`. If shared
 state cannot be read, it falls back to running the local CLI normally. Set
 `CRQ_PREFLIGHT_SKIP_BLOCKED=0` to force the CLI request instead.
+
+For a temporary bulk campaign, `--one-pass on` caps each PR at its first review round and then
+dispatches one fixer/finalizer even when that review was clean. `--merge squash` (or `merge` /
+`rebase`) makes the autofix watcher merge only the exact head that session released, after GitHub
+reports it clean. A later push, a failed fixer, a draft, a conflict, or failing checks is never
+silently merged and never starts a second fixer. Keep this repository-scoped and restore ordinary
+incremental behavior afterwards with `crq solver set <repo> --inherit one-pass,merge`, which
+preserves unrelated repository solver overrides. `crq solver clear <repo>` instead discards every
+solver override for that repository.
 
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
 the exit code. **`crq loop` exit codes:** `0` converged, no

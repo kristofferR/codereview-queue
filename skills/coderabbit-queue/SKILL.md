@@ -214,6 +214,26 @@ Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<he
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
 
+For a temporary bulk campaign that explicitly wants one review and one fixer per PR followed by a
+merge, use the repository-scoped solver policy:
+
+```bash
+crq solver set "$REPO" --models gpt-5.6-sol --effort medium --attempts 1 \
+  --one-pass on --merge squash
+crq autofix on "$REPO"
+crq repos add "$REPO"
+```
+
+One-pass counts any configured review already present on the PR, so enabling it mid-campaign does
+not buy another round. The watcher always runs one fixer/finalizer, including after a clean review,
+then merges only the exact head that session released and only when GitHub reports it clean. A moved
+head, failed fixer, draft, conflict, or failing check blocks without a second fixer or an unverified
+merge. If `crq solver` reports `lagging_hosts`, upgrade and reinstall those autoreview/autofix
+daemons before enrollment. Restore ordinary behavior afterwards with `crq solver clear "$REPO"`.
+Use `crq solver set "$REPO" --inherit one-pass,merge` instead when unrelated repository solver
+overrides must be preserved; `clear` is appropriate when the command above created the whole
+temporary override.
+
 Interactive `next`, `wait`, and `loop` calls and unattended dispatch are mutually exclusive per PR.
 Whichever side wins the shared CAS works. Plain `crq next` returns a conflict or wait action to the
 losing caller; commands that explicitly wait block until the claim is available. Claim creation

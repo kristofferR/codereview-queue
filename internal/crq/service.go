@@ -23,6 +23,7 @@ type Logger interface {
 
 type GitHubAPI interface {
 	GetPull(context.Context, string, int) (ghapi.Pull, error)
+	MergePull(context.Context, string, int, string, string) (ghapi.MergeResult, error)
 	GetCommit(context.Context, string, string) (ghapi.Commit, error)
 	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
 	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)

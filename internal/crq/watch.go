@@ -409,8 +409,15 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// finding can make Next enqueue and Pump the current head before
 				// returning "fix"; claiming only afterwards spends a metered
 				// review on the code this session is about to replace.
-				report, _, _, err = s.nextFromState(ctx, repo, pull.Number)
-				if err == nil && report.Action != string(engine.ActionFix) {
+				var action engine.Action
+				report, action, _, err = s.nextFromState(ctx, repo, pull.Number)
+				if err == nil && report.Action == string(engine.ActionFix) {
+					if onePassReport, handled, onePassErr := s.onePassNext(ctx, report, action); onePassErr != nil {
+						err = onePassErr
+					} else if handled {
+						report = onePassReport
+					}
+				} else if err == nil {
 					report, err = s.nextAutomated(ctx, repo, pull.Number)
 				}
 			} else {
@@ -430,6 +437,29 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, err))
 				}
 				continue
+			}
+			if opts.dispatching() && report.Action != string(engine.ActionFix) {
+				eligible, merged, mergeReason, mergeErr := s.mergeOnePassReady(ctx, repo, pull.Number)
+				if mergeErr != nil {
+					if _, throttled := ghapi.ThrottleWait(mergeErr); throttled {
+						return mergeErr
+					}
+					if s.log != nil {
+						s.log.Printf("watch: merging %s#%d: %v", repo, pull.Number, mergeErr)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s#%d merge: %v", repo, pull.Number, mergeErr))
+					}
+					report.Action = string(engine.ActionWait)
+					report.Reason = "post-fix merge check failed: " + mergeErr.Error()
+				} else if eligible {
+					report.Reason = mergeReason
+					if merged {
+						report.Action = "merged"
+					} else {
+						report.Action = string(engine.ActionWait)
+					}
+				}
 			}
 			event := WatchEvent{
 				Repo: repo, PR: pull.Number,
@@ -884,15 +914,19 @@ func (s *Service) dispatchWithStart(
 				failure.Reason, failure.RetryAt.Format(time.RFC3339), logPath)
 		}
 	}
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 		return false, "another watcher took this round; the session was stopped"
 	}
 	if runErr != nil {
 		if !attempted {
+			s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 			// Say which kind of ending this was: "failed" reads as the fix being
 			// wrong, and the reader's next move is different when crq stopped it.
 			return false, fmt.Sprintf("fix session stopped with the watcher, and keeps its attempt (log: %s)", logPath)
+		}
+		if err := s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token); err != nil {
+			return false, fmt.Sprintf("fix session failed and its one-pass stop could not be recorded: %v (log: %s)", err, logPath)
 		}
 		// Keep the worktree AND name the log: a failed session is the one whose
 		// state somebody needs to look at.
@@ -903,10 +937,26 @@ func (s *Service) dispatchWithStart(
 	// were made but not pushed, which is the one outcome a fix session must
 	// never suffer.
 	if kept, why := sessionWork(context.WithoutCancel(ctx), co, report.Head); kept {
+		if err := s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token); err != nil {
+			why += "; its one-pass stop could not be recorded: " + err.Error()
+		}
 		if s.log != nil {
 			s.log.Printf("watch: keeping %s — %s", co.Dir, why)
 		}
 		return false, why
+	}
+	readyHead, err := co.Git(context.WithoutCancel(ctx), "rev-parse", "HEAD")
+	if err != nil {
+		_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+		return false, "the successful session's exact HEAD could not be read"
+	}
+	readyHead = strings.TrimSpace(readyHead)
+	if err := s.completeSuccessfulDispatch(
+		context.WithoutCancel(ctx), report, token, readyHead,
+	); err != nil {
+		// Keep the checkout as an audit trail. The branch already holds the fix,
+		// but without a durable exact-head hand-off crq must not merge it.
+		return false, "could not release the fixed head for merge: " + err.Error()
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""

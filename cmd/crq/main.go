@@ -1272,7 +1272,8 @@ crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text
                       [--severities <critical,major,potential,minor,unknown>]
                       [--ask blocked|uncertain|ambiguous]
                       [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-                      [--inherit models,effort,severities,ask,forks,skip-authors]
+                      [--one-pass on|off] [--merge off|merge|squash|rebase]
+                      [--inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1295,7 +1296,14 @@ this repository. .sources says which layer answered for each setting.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
-  --inherit       hand models, effort, forks or skip-authors to the layer beneath
+  --one-pass     one review round, then exactly one fixer/finalizer session
+  --merge        merge the exact fixed head after checks (requires one-pass)
+  --inherit      hand named settings to the layer beneath
+
+One-pass and merge are repository-scoped temporary campaign settings; they
+cannot be set as fleet defaults. 'crq solver set <repo> --inherit one-pass,merge'
+ends the campaign and removes its hand-offs while preserving unrelated solver
+overrides. 'crq solver clear <repo>' discards every repository solver override.
 
 Models are tried in order. A provider/model outage is parked until its reset
 time, the next model is tried, and no attempt is spent. Ordinary failed fixes
@@ -3039,6 +3047,25 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				return 1
 			}
 			change.Forks = &on
+		case "--one-pass":
+			hasMutation = true
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			on := strings.EqualFold(strings.TrimSpace(v), "on")
+			if !on && !strings.EqualFold(strings.TrimSpace(v), "off") {
+				fatal(errors.New("--one-pass takes on or off"))
+				return 1
+			}
+			change.OnePass = &on
+		case "--merge":
+			hasMutation = true
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.MergeMethod = &v
 		case "--skip-authors":
 			hasMutation = true
 			v, ok := value()
@@ -3071,8 +3098,12 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
+				case "one-pass", "one_pass":
+					change.UnsetOnePass = true
+				case "merge", "merge-method", "merge_method":
+					change.UnsetMerge = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors, one-pass, merge)", field))
 					return 1
 				}
 			}

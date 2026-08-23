@@ -33,6 +33,8 @@ type SolverView struct {
 	AskMode      string   `json:"ask_mode"`
 	Forks        bool     `json:"forks"`
 	SkipAuthors  []string `json:"skip_authors"`
+	OnePass      bool     `json:"one_pass"`
+	MergeMethod  string   `json:"merge_method,omitempty"`
 
 	// Sources says, per setting, whether the value came from this repository's
 	// record, the fleet default, or this host's env.
@@ -67,7 +69,8 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
 		Severities: sortedKeys(cfg.FixSeverities), AskMode: cfg.FixAskMode,
 		SkipAuthors: sortedKeys(cfg.SkipAuthors),
-		Sources:     map[string]string{},
+		OnePass:     cfg.OnePass, MergeMethod: cfg.MergeMethod,
+		Sources: map[string]string{},
 	}
 	// Three layers, and the view names which one answered — the same
 	// distinction the fleet settings make, for the same reason: a value showing
@@ -95,6 +98,8 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		fleet.SetAskMode || fleet.AskMode != "")
 	source("forks", own.Forks != nil, fleet.Forks != nil)
 	source("skip_authors", own.SetSkipAuthors, fleet.SetSkipAuthors)
+	source("one_pass", own.SetOnePass, fleet.SetOnePass)
+	source("merge_method", own.SetMerge, fleet.SetMerge)
 
 	// This host's own answer when it runs fix sessions, and the fleet's
 	// self-reports otherwise. The dashboard is normally the second case: the
@@ -120,7 +125,11 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	// consumed when a fix session STARTS, and the watcher that starts one holds
 	// neither the leader lease nor the fire slot.
 	if (has && own.UpdatedAt != nil) || fleet.UpdatedAt != nil {
-		view.Lagging = st.LaggingRoleWriters(CapsSolver, s.clock().UTC(), "autofix")
+		caps, roles := CapsSolver, []string{"autofix"}
+		if cfg.OnePass || cfg.MergeMethod != "" {
+			caps, roles = CapsOnePass, []string{"autoreview", "autofix"}
+		}
+		view.Lagging = st.LaggingRoleWriters(caps, s.clock().UTC(), roles...)
 	}
 	return view
 }
@@ -163,6 +172,8 @@ type SolverChange struct {
 	AskMode     *string  `json:"ask_mode"`
 	Forks       *bool    `json:"forks"`
 	SkipAuthors []string `json:"skip_authors"`
+	OnePass     *bool    `json:"one_pass"`
+	MergeMethod *string  `json:"merge_method"`
 	// Unset* hands ONE setting back to the layer beneath, the same instruction
 	// FleetChange's Unset* fields carry. An empty model ranking and an empty
 	// effort both mean "use the agent default", false is a real fork policy, and
@@ -174,6 +185,8 @@ type SolverChange struct {
 	UnsetAskMode     bool `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
+	UnsetOnePass     bool `json:"unset_one_pass,omitempty"`
+	UnsetMerge       bool `json:"unset_merge,omitempty"`
 	// Clear drops the whole record, returning every setting to the fleet default.
 	Clear bool `json:"clear"`
 }
@@ -194,7 +207,14 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
 		if change.Clear {
-			if !st.ClearSolver(repo) {
+			before := st.EffectiveSolver(repo)
+			cleared := st.ClearSolver(repo)
+			after := st.EffectiveSolver(repo)
+			progress := false
+			if before.OnePass != after.OnePass || before.MergeMethod != after.MergeMethod {
+				progress = st.ClearOnePassRepo(repo)
+			}
+			if !cleared && !progress {
 				return ErrNoChange
 			}
 			return nil
@@ -208,10 +228,25 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			// Setting every field back to nothing IS clearing it: leaving an
 			// empty record behind would report the repository as overridden
 			// while overriding nothing.
-			if !st.ClearSolver(repo) {
+			before := st.EffectiveSolver(repo)
+			cleared := st.ClearSolver(repo)
+			after := st.EffectiveSolver(repo)
+			progress := false
+			if before.OnePass != after.OnePass || before.MergeMethod != after.MergeMethod {
+				progress = st.ClearOnePassRepo(repo)
+			}
+			if !cleared && !progress {
 				return ErrNoChange
 			}
 			return nil
+		}
+		effective := st.Fleet.Solver.Merge(next)
+		if effective.MergeMethod != "" && !effective.OnePass {
+			return errors.New("post-fix merge requires one-pass review mode")
+		}
+		before := st.EffectiveSolver(repo)
+		if before.OnePass != effective.OnePass || before.MergeMethod != effective.MergeMethod {
+			st.ClearOnePassRepo(repo)
 		}
 		st.SetSolver(repo, next, s.cfg.Host, now)
 		return nil
@@ -232,6 +267,9 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 
 // SetFleetSolver records the fleet-wide default every repository inherits.
 func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (SolverSettings, error) {
+	if change.OnePass != nil || change.MergeMethod != nil || change.UnsetOnePass || change.UnsetMerge {
+		return SolverSettings{}, errors.New("one-pass review and post-fix merge are repository-scoped settings")
+	}
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
 		if change.Clear {
@@ -255,6 +293,9 @@ func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (Solv
 			fd.Solver = SolverSettings{}
 			st.SetFleetDefaults(fd, s.cfg.Host, now)
 			return nil
+		}
+		if next.MergeMethod != "" && !next.OnePass {
+			return errors.New("post-fix merge requires one-pass review mode")
 		}
 		at := now
 		next.By, next.UpdatedAt = s.cfg.Host, &at
@@ -391,6 +432,25 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		}
 		sort.Strings(authors)
 		sv.SkipAuthors, sv.SetSkipAuthors = authors, true
+	}
+	if change.UnsetOnePass {
+		sv.OnePass, sv.SetOnePass = false, false
+	} else if change.OnePass != nil {
+		sv.OnePass, sv.SetOnePass = *change.OnePass, true
+	}
+	if change.UnsetMerge {
+		sv.MergeMethod, sv.SetMerge = "", false
+	} else if change.MergeMethod != nil {
+		method := strings.ToLower(strings.TrimSpace(*change.MergeMethod))
+		if method == "off" {
+			method = ""
+		}
+		switch method {
+		case "", "merge", "squash", "rebase":
+			sv.MergeMethod, sv.SetMerge = method, true
+		default:
+			return sv, fmt.Errorf("merge method %q is not one of off, merge, squash, rebase", method)
+		}
 	}
 	return sv, nil
 }

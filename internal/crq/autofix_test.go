@@ -373,6 +373,19 @@ func TestAutofixEnvCarriesConfiguredWorkspace(t *testing.T) {
 	}
 }
 
+func TestAutofixEnvCarriesConfiguredStateGitIdentity(t *testing.T) {
+	cfg := firingConfig()
+	cfg.StateGitAuthorName = "Queue Operator"
+	cfg.StateGitAuthorEmail = "queue@example.invalid"
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.autofixEnv(AutofixInstall{})
+	if env["CRQ_STATE_GIT_AUTHOR_NAME"] != cfg.StateGitAuthorName ||
+		env["CRQ_STATE_GIT_AUTHOR_EMAIL"] != cfg.StateGitAuthorEmail {
+		t.Fatalf("state Git identity was not carried into autofix: %v", env)
+	}
+}
+
 func TestInstallAutofixMakesRelativeWorkspaceAbsolute(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)

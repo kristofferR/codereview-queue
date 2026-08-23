@@ -875,6 +875,10 @@ func configValueOf(cfg Config, key string) string {
 		return cfg.GateRepo
 	case "CRQ_STATE_REF":
 		return cfg.StateRef
+	case "CRQ_STATE_GIT_AUTHOR_NAME":
+		return cfg.StateGitAuthorName
+	case "CRQ_STATE_GIT_AUTHOR_EMAIL":
+		return cfg.StateGitAuthorEmail
 	case "CRQ_ISSUE":
 		return fmt.Sprint(cfg.DashboardIssue)
 	case "CRQ_SCOPE":

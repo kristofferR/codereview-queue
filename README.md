@@ -562,6 +562,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
 | `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v6, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
+| `CRQ_STATE_GIT_AUTHOR_NAME` | `kristofferR` | optional author name for commits made by the Git state fallback |
+| `CRQ_STATE_GIT_AUTHOR_EMAIL` | public GitHub noreply address | optional author email for commits made by the Git state fallback; use a non-private address |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues, and the autofix watcher never touches (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |

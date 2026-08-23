@@ -119,6 +119,24 @@ func TestGitFallbackLoadsAndUpdatesStateRef(t *testing.T) {
 	}
 }
 
+func TestGitFallbackUsesConfiguredCommitIdentity(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	remote, _ := seedGitStateRemote(t)
+	store := newGitFallbackTestStore(t, remote)
+	store.cfg.GitAuthorName = "Queue Operator"
+	store.cfg.GitAuthorEmail = "queue-operator@example.invalid"
+
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.Source = "configured-identity"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGit(t, "--git-dir", remote, "show", "-s", "--format=%an <%ae>", "refs/heads/crq-state-v3"); got != "Queue Operator <queue-operator@example.invalid>" {
+		t.Fatalf("state commit identity = %q, want the configured operator", got)
+	}
+}
+
 func TestGitFallbackStateRefUsesGitTransport(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "1")
 	remote, _ := seedGitStateRemote(t)

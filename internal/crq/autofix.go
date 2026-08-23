@@ -500,6 +500,12 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 	if s.cfg.StateRef != "" {
 		env["CRQ_STATE_REF"] = s.cfg.StateRef
 	}
+	if s.cfg.StateGitAuthorName != "" {
+		env["CRQ_STATE_GIT_AUTHOR_NAME"] = s.cfg.StateGitAuthorName
+	}
+	if s.cfg.StateGitAuthorEmail != "" {
+		env["CRQ_STATE_GIT_AUTHOR_EMAIL"] = s.cfg.StateGitAuthorEmail
+	}
 	if s.cfg.DashboardIssue > 0 {
 		env["CRQ_ISSUE"] = fmt.Sprint(s.cfg.DashboardIssue)
 	}

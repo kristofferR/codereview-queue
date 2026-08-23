@@ -51,6 +51,10 @@ type StoreConfig struct {
 	DashboardIssue int
 	Timezone       string
 	Scope          []string
+	// GitAuthorName and GitAuthorEmail attribute commits made by the optional
+	// git transport. Empty uses crq's privacy-safe public noreply identity.
+	GitAuthorName  string
+	GitAuthorEmail string
 	// TokenSource resolves credentials immediately before each fallback fetch
 	// or push. Empty leaves authentication to the host's Git configuration.
 	TokenSource func(context.Context) string
@@ -496,11 +500,12 @@ func (s *GitStateStore) compareAndSwapGit(
 	if rev.CommitSHA != "" {
 		commitArgs = append(commitArgs, "-p", rev.CommitSHA)
 	}
+	authorName, authorEmail := s.gitAuthorIdentity()
 	identityEnv := []string{
-		"GIT_AUTHOR_NAME=" + gitStateAuthorName,
-		"GIT_AUTHOR_EMAIL=" + gitStateAuthorEmail,
-		"GIT_COMMITTER_NAME=" + gitStateAuthorName,
-		"GIT_COMMITTER_EMAIL=" + gitStateAuthorEmail,
+		"GIT_AUTHOR_NAME=" + authorName,
+		"GIT_AUTHOR_EMAIL=" + authorEmail,
+		"GIT_COMMITTER_NAME=" + authorName,
+		"GIT_COMMITTER_EMAIL=" + authorEmail,
 	}
 	message := []byte(fmt.Sprintf("crq: state rev %d\n", revision))
 	commitOut, stderr, err := s.git(ctx, identityEnv, message, commitArgs...)
@@ -521,6 +526,18 @@ func (s *GitStateStore) compareAndSwapGit(
 	}
 	_, _, _ = s.git(ctx, nil, nil, "update-ref", gitStateCacheRef, commitSHA)
 	return nil
+}
+
+func (s *GitStateStore) gitAuthorIdentity() (string, string) {
+	name := strings.TrimSpace(s.cfg.GitAuthorName)
+	if name == "" {
+		name = gitStateAuthorName
+	}
+	email := strings.TrimSpace(s.cfg.GitAuthorEmail)
+	if email == "" {
+		email = gitStateAuthorEmail
+	}
+	return name, email
 }
 
 func (s *GitStateStore) gitHashObject(ctx context.Context, content []byte) (string, error) {

@@ -12,7 +12,7 @@ import (
 
 func TestCheckServerReportsHealth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/gateway/health" {
+		if r.URL.Path != "/api/gateway/health" || r.URL.Query().Get("write") != "1" {
 			http.NotFound(w, r)
 			return
 		}
@@ -23,7 +23,23 @@ func TestCheckServerReportsHealth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got := checkServer(t.Context(), server.URL, "secret")
+	got := checkServer(t.Context(), server.URL, "secret", true)
+	if !got.Reachable || !got.Healthy || got.Error != "" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
+
+func TestCheckServerReadOnlyProbeOmitsWriteRequirement(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["write"]; ok {
+			http.Error(w, "unexpected write requirement", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "", false)
 	if !got.Reachable || !got.Healthy || got.Error != "" {
 		t.Fatalf("server health = %+v", got)
 	}
@@ -35,7 +51,7 @@ func TestCheckServerDistinguishesAnUnhealthyServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got := checkServer(t.Context(), server.URL, "")
+	got := checkServer(t.Context(), server.URL, "", true)
 	if !got.Reachable || got.Healthy || got.Error != "state unavailable" {
 		t.Fatalf("server health = %+v", got)
 	}

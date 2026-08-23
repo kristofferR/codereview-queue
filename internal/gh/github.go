@@ -360,7 +360,7 @@ func ProbeServer(ctx context.Context, serverURL, token string, requireWrite bool
 	if err != nil {
 		return fmt.Errorf("crq serve health check failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var health struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`

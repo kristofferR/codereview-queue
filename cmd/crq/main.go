@@ -2275,7 +2275,7 @@ func doctor(ctx context.Context, direct bool) doctorReport {
 		},
 		Tools:         tools,
 		GitHub:        checkGitHubAuth(ctx, tools["gh"].Found),
-		Server:        checkServer(ctx, cfg.ServerURL, cfg.ServerToken),
+		Server:        checkServer(ctx, cfg.ServerURL, cfg.ServerToken, !direct),
 		CodeRabbitCLI: codeRabbitCLI,
 		Environment: doctorEnvironment{
 			CodeRabbitAPIKey: os.Getenv("CODERABBIT_API_KEY") != "",
@@ -2309,7 +2309,7 @@ func doctor(ctx context.Context, direct bool) doctorReport {
 	} else if !report.Server.Reachable {
 		report.Recommendations = append(report.Recommendations, "start the GitHub control plane with crq serve install")
 	} else if !report.Server.Healthy {
-		report.Recommendations = append(report.Recommendations, "repair crq serve: it is reachable but cannot read the shared state")
+		report.Recommendations = append(report.Recommendations, "repair crq serve: it is reachable but cannot provide writable GitHub access")
 	}
 	if !report.Tools["cr"].Found && !report.Tools["coderabbit"].Found {
 		report.Recommendations = append(report.Recommendations, "optional: install CodeRabbit CLI for local pre-push review with cr review --agent")
@@ -2327,7 +2327,7 @@ func doctor(ctx context.Context, direct bool) doctorReport {
 	return report
 }
 
-func checkServer(ctx context.Context, serverURL, token string) doctorServer {
+func checkServer(ctx context.Context, serverURL, token string, requireWrite bool) doctorServer {
 	result := doctorServer{URL: strings.TrimSpace(serverURL)}
 	if result.URL == "" {
 		result.Error = "CRQ_SERVER_URL is empty"
@@ -2335,8 +2335,11 @@ func checkServer(ctx context.Context, serverURL, token string) doctorServer {
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(toolCtx, http.MethodGet,
-		strings.TrimRight(result.URL, "/")+"/api/gateway/health", nil)
+	healthURL := strings.TrimRight(result.URL, "/") + "/api/gateway/health"
+	if requireWrite {
+		healthURL += "?write=1"
+	}
+	req, err := http.NewRequestWithContext(toolCtx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		result.Error = err.Error()
 		return result

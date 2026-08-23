@@ -862,6 +862,29 @@ func (s *Service) dispatchWithStart(
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
 	}
+	// Checkout preparation can take long enough for another fixer to land and
+	// merge the pull request. The pass-level open-PR snapshot is no longer proof
+	// that this claimed head still needs an agent, so re-read it at the last safe
+	// point before starting a code-writing process.
+	pull, err := s.gh.GetPull(runCtx, report.Repo, report.PR)
+	if err != nil {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "could not refresh the pull request before starting its fix session: " + err.Error()
+	}
+	if pull.State != "open" || pull.Merged {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "pull request is no longer open; stale fix session skipped"
+	}
+	liveHead := strings.TrimSpace(pull.Head.SHA)
+	claimedHead := strings.TrimSpace(report.Head)
+	if liveHead == "" || claimedHead == "" || !strings.HasPrefix(liveHead, claimedHead) {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, fmt.Sprintf("pull request head moved from %s to %s; stale fix session skipped",
+			shortSHA(claimedHead), shortSHA(liveHead))
+	}
 	if err := cmd.Start(); err != nil {
 		// A command that never reached a process did not use up the per-head
 		// budget. Correcting a missing agent must leave this head retryable.

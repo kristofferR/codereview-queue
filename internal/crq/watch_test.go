@@ -964,6 +964,56 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	}
 }
 
+// A watch pass lists open PRs once, but checkout preparation happens later and
+// can overlap another merge. Never spend CPU on an agent after that snapshot is
+// stale, and refund the claim because no fix attempt actually ran.
+func TestDispatchRechecksThePullBeforeStartingTheAgent(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "closed"
+	pull.Merged = true
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 7)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 7, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	marker := filepath.Join(t.TempDir(), "agent-started")
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := newDispatchPool(0)
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script, marker}, MaxAttempts: 3,
+	}, pool, NextReport{Repo: repo, PR: 7, Head: sha, Action: "fix"}); ok {
+		t.Fatal("a stale merged pull request started a fix session")
+	} else if !strings.Contains(why, "no longer open") {
+		t.Fatalf("dispatch refusal = %q, want the stale-open explanation", why)
+	}
+	pool.wait()
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("agent marker stat = %v, want the agent never started", err)
+	}
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 7)
+	if round == nil || round.Dispatch == nil || round.Dispatch.Attempts != 0 {
+		t.Fatalf("round after stale skip = %#v, want the unspent attempt refunded", round)
+	}
+}
+
 func TestWatchQueuesCheckoutWithoutBlockingThePass(t *testing.T) {
 	bin := t.TempDir()
 	git := filepath.Join(bin, "git")

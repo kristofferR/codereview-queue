@@ -19,3 +19,11 @@ func TestServiceWorkspaceUsesTheConfiguredRootAndCurrentToken(t *testing.T) {
 		t.Errorf("workspace token = %q, want the one the API client resolves", got)
 	}
 }
+
+func TestStateStoreUsesTheCurrentToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghp_from_the_environment")
+	cfg := Config{}.storeConfig()
+	if got := cfg.TokenSource(context.Background()); got != "ghp_from_the_environment" {
+		t.Errorf("state store token = %q, want the one the API client resolves", got)
+	}
+}

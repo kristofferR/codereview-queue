@@ -104,6 +104,7 @@ func run(ctx context.Context, args []string) int {
 	}
 	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 
 	switch args[0] {
@@ -1807,6 +1808,7 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.P
 		return nil
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 	report, err := service.SkipBlockedPreflight(readCtx, opts, func() string {
 		return codeRabbitOrg(readCtx, binary)
@@ -1843,6 +1845,7 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 		return &crq.CLIQuotaResult{Reason: "could not reach github to record the block: " + err.Error()}
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 	result, err := service.RecordCLIQuota(shareCtx, report, codeRabbitOrg(shareCtx, report.Tool))
 	if err != nil {

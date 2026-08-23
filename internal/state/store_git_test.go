@@ -132,6 +132,63 @@ func TestGitFallbackStateRefUsesGitTransport(t *testing.T) {
 	}
 }
 
+func TestGitFallbackCloseRemovesPrivateCache(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	remote, _ := seedGitStateRemote(t)
+	store := newGitFallbackTestStore(t, remote)
+	if _, _, err := store.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dir := store.gitDir
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("git cache still exists after Close: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestGitFallbackRemoteCommandsInjectCurrentToken(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	script := filepath.Join(binDir, "git")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CRQ_TEST_ARGS\"\nprintf '%s' \"$CRQ_STATE_GIT_TOKEN\" > \"$CRQ_TEST_TOKEN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("CRQ_TEST_ARGS", argsPath)
+	t.Setenv("CRQ_TEST_TOKEN", tokenPath)
+
+	store := &GitStateStore{
+		cfg:    StoreConfig{TokenSource: func(context.Context) string { return "current-token" }},
+		gitDir: "/tmp/private-state-cache",
+	}
+	if _, _, err := store.gitRemote(context.Background(), nil, nil, "fetch", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "credential.helper="+gitStateCredentialHelper) {
+		t.Fatalf("git args lack the state credential helper: %s", args)
+	}
+	if strings.Contains(string(args), "current-token") {
+		t.Fatal("token leaked into git argv")
+	}
+	token, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(token) != "current-token" {
+		t.Fatalf("git token env = %q, want current token", token)
+	}
+}
+
 func TestGitFallbackMapsNonFastForwardToCASConflict(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "1")
 	remote, _ := seedGitStateRemote(t)

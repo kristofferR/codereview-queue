@@ -391,7 +391,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return false, nil
 			}
 			if need {
-				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head, Title: pr.Title})
+				solver := state.EffectiveSolver(repo)
+				candidates = append(candidates, queueCandidate{
+					Repo: repo, PR: pr.Number, Head: head, Title: pr.Title,
+					PolicyChecked: true, OnePass: reviewCfg.OnePass, OnePassCampaign: solver.OnePassCampaign,
+				})
 			}
 			return false, nil
 		})

@@ -94,6 +94,7 @@ func (c Config) storeConfig() StoreConfig {
 		DashboardIssue: c.DashboardIssue,
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
+		TokenSource:    ghapi.LookupToken,
 		CoReviewers:    c.coReviewerSummary(),
 		ResolveCoReviewers: func(fleet FleetDefaults) string {
 			return c.WithFleet(fleet).coReviewerSummary()

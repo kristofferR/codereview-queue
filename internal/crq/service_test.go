@@ -1039,6 +1039,35 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchRejectsCandidateFromObsoleteOnePassPolicy(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetSolver("o/app", SolverSettings{
+			SetOnePass: true, OnePass: true, OnePassCampaign: "new-campaign",
+		}, "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{
+		Repo: "o/app", PR: 1, Head: "aaaaaaaa1", PolicyChecked: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/app", 1); round != nil {
+		t.Fatalf("candidate evaluated before one-pass was enabled was enqueued: %+v", round)
+	}
+}
+
 func TestLatestCalibrationReplyToleratesBotSuffix(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", CalibrationPR: 1, CalibrationMarker: "auto-generated reply by CodeRabbit"}
 	gh := newFakeGitHub()

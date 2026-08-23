@@ -509,6 +509,12 @@ type queueCandidate struct {
 	// search result carries it, so recording it costs nothing and spares every
 	// later list a request per row.
 	Title string
+	// Autoreview candidates carry the one-pass policy they were evaluated
+	// against. enqueueBatch rejects them if an administrative change landed
+	// after the scan snapshot was loaded.
+	PolicyChecked   bool
+	OnePass         bool
+	OnePassCampaign string
 }
 
 // enqueueBatch appends several PRs in a single compare-and-swap write plus one
@@ -526,6 +532,13 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 			repo := NormalizeRepo(it.Repo)
 			if _, held := st.HeldPR(repo, it.PR); held {
 				continue
+			}
+			if it.PolicyChecked {
+				solver := st.EffectiveSolver(repo)
+				currentOnePass := s.cfg.withSolver(solver).OnePass
+				if currentOnePass != it.OnePass || solver.OnePassCampaign != it.OnePassCampaign {
+					continue
+				}
 			}
 			// Asked again here, against the state this write lands on, for the
 			// same reason reviewersChanged is: the scan decided from a snapshot,

@@ -25,12 +25,14 @@ var ErrCASConflict = errors.New("state changed while writing")
 var ErrNoChange = errors.New("state unchanged")
 
 const (
-	statePath           = "state.json"
-	dashboardPath       = "dashboard.md"
-	gitFallbackEnv      = "CRQ_STATE_GIT_FALLBACK"
-	gitStateCacheRef    = "refs/crq/state"
-	gitStateAuthorName  = "kristofferR"
-	gitStateAuthorEmail = "481270+kristofferR@users.noreply.github.com"
+	statePath                = "state.json"
+	dashboardPath            = "dashboard.md"
+	gitFallbackEnv           = "CRQ_STATE_GIT_FALLBACK"
+	gitStateCacheRef         = "refs/crq/state"
+	gitStateAuthorName       = "kristofferR"
+	gitStateAuthorEmail      = "481270+kristofferR@users.noreply.github.com"
+	gitStateTokenEnv         = "CRQ_STATE_GIT_TOKEN"
+	gitStateCredentialHelper = `!f() { p=; h=; while IFS= read -r l; do case "$l" in protocol=*) p=${l#protocol=} ;; host=*) h=${l#host=} ;; esac; done; if test "$1" = get && test "$p" = https && test "$h" = github.com; then printf 'username=x-access-token\npassword=%s\n' "$CRQ_STATE_GIT_TOKEN"; fi; }; f`
 )
 
 // Logger is the minimal logging surface the store uses (for the loud
@@ -47,6 +49,9 @@ type StoreConfig struct {
 	DashboardIssue int
 	Timezone       string
 	Scope          []string
+	// TokenSource resolves credentials immediately before each fallback fetch
+	// or push. Empty leaves authentication to the host's Git configuration.
+	TokenSource func(context.Context) string
 	// CoReviewers is a preformatted display string of the enabled co-reviewer
 	// bots ("" hides the dashboard row, keeping co-bot-less dashboards
 	// byte-identical).
@@ -136,6 +141,20 @@ func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateS
 		log:         log,
 		gitFallback: strings.TrimSpace(os.Getenv(gitFallbackEnv)) == "1",
 	}
+}
+
+// Close removes the process-private repository used by the git fallback.
+// Normal commands and daemons call this as they exit so short-lived processes
+// do not leave an unbounded trail of state history in the system temp dir.
+func (s *GitStateStore) Close() error {
+	s.gitMu.Lock()
+	defer s.gitMu.Unlock()
+	if s.gitDir == "" {
+		return nil
+	}
+	dir := s.gitDir
+	s.gitDir = ""
+	return os.RemoveAll(dir)
 }
 
 // SetRenderConfig installs the effective configuration used for dashboard.md
@@ -358,7 +377,7 @@ func (s *GitStateStore) loadGit(ctx context.Context) (State, Revision, error) {
 		return State{}, Revision{}, err
 	}
 	remoteRef := s.gitRemoteRef()
-	_, stderr, err := s.git(ctx, nil, nil,
+	_, stderr, err := s.gitRemote(ctx, nil, nil,
 		"fetch", "--quiet", "--no-tags", "origin", "+"+remoteRef+":"+gitStateCacheRef)
 	if err != nil {
 		if isMissingGitRemoteRef(stderr) {
@@ -476,7 +495,7 @@ func (s *GitStateStore) compareAndSwapGit(
 	}
 	commitSHA := strings.TrimSpace(string(commitOut))
 
-	stdout, stderr, err := s.git(ctx, nil, nil,
+	stdout, stderr, err := s.gitRemote(ctx, nil, nil,
 		"push", "--porcelain", "origin", commitSHA+":"+s.gitRemoteRef())
 	if err != nil {
 		if isGitNonFastForward(stdout, stderr) {
@@ -533,6 +552,29 @@ func (s *GitStateStore) git(
 ) ([]byte, []byte, error) {
 	fullArgs := append([]string{"--git-dir", s.gitDir}, args...)
 	return runGit(ctx, env, stdin, fullArgs...)
+}
+
+// gitRemote runs a fallback network command with the same freshly resolved
+// GitHub credential available to the REST transport. The secret stays in the
+// child environment; argv and the bare repository contain only the helper.
+func (s *GitStateStore) gitRemote(
+	ctx context.Context,
+	env []string,
+	stdin []byte,
+	args ...string,
+) ([]byte, []byte, error) {
+	token := ""
+	if s.cfg.TokenSource != nil {
+		token = strings.TrimSpace(s.cfg.TokenSource(ctx))
+	}
+	if token != "" {
+		env = append(append([]string(nil), env...), gitStateTokenEnv+"="+token)
+		args = append([]string{
+			"-c", "credential.helper=",
+			"-c", "credential.helper=" + gitStateCredentialHelper,
+		}, args...)
+	}
+	return s.git(ctx, env, stdin, args...)
 }
 
 func runGit(ctx context.Context, env []string, stdin []byte, args ...string) ([]byte, []byte, error) {

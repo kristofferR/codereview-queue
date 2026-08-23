@@ -300,6 +300,47 @@ func (g *GitHub) SetLogger(l Logger) { g.log = l }
 // direct clients retain the existing concurrency semantics.
 func (g *GitHub) EnableGETCoalescing() { g.coalesceGETs = true }
 
+// ProbeServer verifies that the configured crq control plane is healthy and,
+// when requested, accepts the writes a daemon needs. It performs no GitHub API
+// operation, so installers can validate their future transport without
+// spending quota or mutating shared state.
+func ProbeServer(ctx context.Context, serverURL, token string, requireWrite bool) error {
+	g, err := NewGitHubViaServer(serverURL, token)
+	if err != nil {
+		return err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	healthURL := strings.TrimSuffix(g.gatewayURL, "/api/github") + "/api/gateway/health"
+	if requireWrite {
+		healthURL += "?write=1"
+	}
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return err
+	}
+	g.decorate(req)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("crq serve health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+	var health struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health); err != nil {
+		return fmt.Errorf("crq serve returned an invalid health response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK || !health.OK {
+		if health.Error == "" {
+			health.Error = resp.Status
+		}
+		return errors.New(health.Error)
+	}
+	return nil
+}
+
 func (g *GitHub) request(ctx context.Context, method, path string, in, out any) error {
 	body, err := marshalBody(in)
 	if err != nil {
@@ -1046,6 +1087,9 @@ type Pull struct {
 
 type RepoInfo struct {
 	DefaultBranch string `json:"default_branch"`
+	Permissions   struct {
+		Push bool `json:"push"`
+	} `json:"permissions"`
 }
 
 type IssueComment struct {

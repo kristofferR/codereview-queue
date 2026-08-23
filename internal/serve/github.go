@@ -15,6 +15,7 @@ import (
 // anything about GitHub's API client.
 type GitHubGateway interface {
 	Forward(ctx context.Context, method, requestURI string, body []byte) (GitHubResponse, error)
+	CanWrite(ctx context.Context, repo string) (bool, error)
 }
 
 type GitHubResponse struct {
@@ -257,6 +258,25 @@ func (s *Server) handleGatewayHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.authorizeGateway(w, r) {
 		return
+	}
+	if r.URL.Query().Get("write") == "1" && s.opts.ReadOnly {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "the GitHub gateway is read-only"})
+		return
+	}
+	if r.URL.Query().Get("write") == "1" {
+		if strings.TrimSpace(s.opts.Fleet.GateRepo) == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "the gate repository is not configured"})
+			return
+		}
+		canWrite, err := s.opts.Gateway.CanWrite(r.Context(), s.opts.Fleet.GateRepo)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "could not verify GitHub write access: " + err.Error()})
+			return
+		}
+		if !canWrite {
+			writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "the GitHub credential cannot write the gate repository"})
+			return
+		}
 	}
 	snap, loaded, err := s.snapshot()
 	body := map[string]any{"ok": loaded && err == nil, "rev": snap.Overview.Rev}

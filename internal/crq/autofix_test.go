@@ -228,6 +228,8 @@ func TestAutofixUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	cfg.Scope = []string{"reviewed-org", "second-org"}
 	cfg.DashboardIssue = 7
 	cfg.CalibrationPR = 1
+	cfg.ServerURL = "https://crq.example.test"
+	cfg.ServerToken = "shared-gateway-secret"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
 	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
@@ -245,6 +247,8 @@ func TestAutofixUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 		"CRQ_ISSUE",
 		"CRQ_CAL_PR",
 		"CRQ_STATE_REF=" + cfg.StateRef,
+		"CRQ_SERVER_URL=" + cfg.ServerURL,
+		"CRQ_SERVER_TOKEN=" + cfg.ServerToken,
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("the unit does not carry %q; the autofix watcher would not find it:\n%s", want, unit)

@@ -12,18 +12,24 @@ import (
 )
 
 type recordingGateway struct {
-	calls  int
-	method string
-	uri    string
-	body   string
-	result GitHubResponse
-	err    error
+	calls         int
+	method        string
+	uri           string
+	body          string
+	result        GitHubResponse
+	err           error
+	canWrite      bool
+	canWriteError error
 }
 
 func (g *recordingGateway) Forward(_ context.Context, method, uri string, body []byte) (GitHubResponse, error) {
 	g.calls++
 	g.method, g.uri, g.body = method, uri, string(body)
 	return g.result, g.err
+}
+
+func (g *recordingGateway) CanWrite(context.Context, string) (bool, error) {
+	return g.canWrite, g.canWriteError
 }
 
 func gatewayRequest(t *testing.T, srv *Server, method, rawURL, remote, token string) *httptest.ResponseRecorder {
@@ -113,6 +119,41 @@ func TestGitHubGatewayRequiresClientHeader(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden || gateway.calls != 0 {
 		t.Fatalf("missing-header response = %d, calls = %d", rec.Code, gateway.calls)
+	}
+}
+
+func TestGatewayHealthReportsWriteCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		readOnly  bool
+		canWrite  bool
+		wantError string
+	}{
+		{name: "writable", canWrite: true},
+		{name: "server read only", readOnly: true, canWrite: true, wantError: "read-only"},
+		{name: "credential read only", wantError: "cannot write"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gateway := &recordingGateway{canWrite: tc.canWrite}
+			srv := New(&stubLoader{}, Options{
+				Addr: "127.0.0.1:7777", Gateway: gateway, ReadOnly: tc.readOnly,
+				Fleet: FleetConfig{GateRepo: "o/gate"},
+			})
+			srv.refresh(t.Context())
+			httpServer := httptest.NewServer(srv.routes())
+			defer httpServer.Close()
+
+			if err := ghapi.ProbeServer(t.Context(), httpServer.URL, "", false); err != nil {
+				t.Fatalf("read capability probe: %v", err)
+			}
+			err := ghapi.ProbeServer(t.Context(), httpServer.URL, "", true)
+			if tc.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("write capability probe = %v, want %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

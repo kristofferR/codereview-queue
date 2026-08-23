@@ -60,6 +60,11 @@ func (g githubGateway) Forward(ctx context.Context, method, requestURI string, b
 	return serve.GitHubResponse{Status: result.Status, Header: result.Header, Body: result.Body}, nil
 }
 
+func (g githubGateway) CanWrite(ctx context.Context, repo string) (bool, error) {
+	info, err := g.client.GetRepo(ctx, repo)
+	return info.Permissions.Push, err
+}
+
 func run(ctx context.Context, args []string) int {
 	direct := len(args) > 0 && args[0] == "--direct"
 	if direct {
@@ -1626,7 +1631,7 @@ queue entry, so they re-attach to the same wait instead of firing a duplicate re
 
   --once             scan once and exit
   --no-incremental   only review PRs that have never been reviewed by CodeRabbit
-  --skip-auth-check  with install: do not prove the service can authenticate first
+  --skip-auth-check  with install: compatibility flag; gateway capability is still checked
 
 Use this instead of CodeRabbit native auto-review. Native auto-review must be off.
 `)
@@ -2554,7 +2559,7 @@ func parseAutofixArgs(args []string) (autofixArgs, error) {
 	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and run")
 	skipAuth := fs.Bool("skip-auth-check", false,
-		"install without proving the service can authenticate (a macOS host reached over SSH, where gh's keychain is the GUI session's)")
+		"skip the local Git credential check (the crq server is still validated)")
 	sub, rest := "", args
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		sub, rest = rest[0], rest[1:]

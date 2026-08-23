@@ -2,18 +2,12 @@ package crq
 
 import (
 	"context"
-	"errors"
-	"path/filepath"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
-
-type installLoadErrorStore struct{ StateStore }
-
-func (installLoadErrorStore) Load(context.Context) (State, Revision, error) {
-	return State{}, Revision{}, errors.New("gateway unavailable")
-}
 
 func TestServeUnitCarriesShellProvidedConfiguration(t *testing.T) {
 	env := map[string]string{
@@ -70,23 +64,41 @@ func TestServeInstallPreservesPollInterval(t *testing.T) {
 	}
 }
 
-func TestAutoreviewInstallValidatesItsServerBackedStateTransport(t *testing.T) {
-	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing"))
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "")
-	t.Setenv("PATH", t.TempDir())
+func TestAutoreviewInstallRequiresAWritableGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		response  string
+		wantError string
+	}{
+		{name: "writable", status: http.StatusOK, response: `{"ok":true}`},
+		{name: "read only", status: http.StatusForbidden, response: `{"ok":false,"error":"the GitHub gateway is read-only"}`, wantError: "read-only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/gateway/health" || r.URL.Query().Get("write") != "1" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer secret" {
+					t.Error("gateway probe did not carry the configured token")
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer server.Close()
 
-	cfg := firingConfig()
-	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
-	if err := svc.serviceCanStart(t.Context(), "autoreview"); err != nil {
-		t.Fatalf("server-backed autoreview validation required a local GitHub credential: %v", err)
-	}
-
-	svc.store = installLoadErrorStore{StateStore: store}
-	err := svc.serviceCanStart(t.Context(), "autoreview")
-	if err == nil || !strings.Contains(err.Error(), "gateway unavailable") {
-		t.Fatalf("unreadable server-backed state validation error = %v", err)
+			cfg := firingConfig()
+			cfg.ServerURL, cfg.ServerToken = server.URL, "secret"
+			svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+			err := svc.serviceCanUseGateway(t.Context(), "autoreview")
+			if tc.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("gateway validation error = %v, want %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

@@ -24,9 +24,16 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	repo := "owner/thing"
 	sha := originRepo(t, filepath.Join(base, repo))
 	t.Setenv("CRQ_REMOTE_BASE", base)
+	t.Setenv("GITHUB_TOKEN", "ghp_session_token")
+	t.Setenv(workspace.TokenEnv, "stale_git_token")
 
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
+	if realRoot, err := filepath.EvalSymlinks(cfg.WorkspaceRoot); err != nil {
+		t.Fatal(err)
+	} else {
+		cfg.WorkspaceRoot = realRoot
+	}
 	cfg.AllowRepos = map[string]bool{repo: true}
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
@@ -43,8 +50,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.json")
 	script := filepath.Join(t.TempDir(), "session.sh")
 	body := "#!/bin/sh\n" +
-		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\"}' " +
-		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" > " + record + "\n"
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\",\"github_token\":\"%s\",\"git_token\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" \"$GITHUB_TOKEN\" \"$CRQ_GIT_TOKEN\" > " + record + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +68,16 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	pool.wait()
 
-	var got struct{ Repo, PR, Head, Cwd, Findings, Token string }
+	var got struct {
+		Repo        string `json:"repo"`
+		PR          string `json:"pr"`
+		Head        string `json:"head"`
+		Cwd         string `json:"cwd"`
+		Findings    string `json:"findings"`
+		Token       string `json:"token"`
+		GitHubToken string `json:"github_token"`
+		GitToken    string `json:"git_token"`
+	}
 	data, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatalf("the session did not run: %v", err)
@@ -82,6 +98,9 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	if got.Token == "" {
 		t.Fatal("the session was given no dispatch token for its crq next calls")
+	}
+	if got.GitHubToken != "ghp_session_token" || got.GitToken != "ghp_session_token" {
+		t.Fatalf("session credentials = github:%q git:%q, want the daemon's current token", got.GitHubToken, got.GitToken)
 	}
 	// OUTSIDE the worktree: at the repository root it is an untracked file, and
 	// a session following the documented `git add -A` push would commit crq's

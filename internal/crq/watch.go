@@ -850,13 +850,18 @@ func (s *Service) dispatchWithStart(
 		"CRQ_FIX_EFFORT="+solver.FixEffort,
 		"CRQ_FIX_PROMPT="+sessionPrompt,
 	)
-	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
-	// its own. The mirror carries a credential helper that reads this variable
-	// (configureOrigin), so a daemon authenticated by a token alone can land its
-	// fixes instead of failing at the last step of every one of them. In the
-	// environment, never in the config: the snippet is on disk, the secret is not.
-	if ws.Token != "" {
-		cmd.Env = append(cmd.Env, workspace.TokenEnv+"="+ws.Token)
+	// The session's push is a plain `git push`, and its crq/gh commands also need
+	// the daemon's GitHub identity. Resolve the current token immediately before
+	// launch: a long-lived daemon must not retain the credential it started with,
+	// and the agent's login shell may put a broken gh shim first on PATH. The
+	// secret lives only in the child environment, never in argv or git config.
+	sessionToken := strings.TrimSpace(ws.Token)
+	if ws.TokenSource != nil {
+		sessionToken = strings.TrimSpace(ws.TokenSource(runCtx))
+	}
+	if sessionToken != "" {
+		cmd.Env = setCommandEnv(cmd.Env, workspace.TokenEnv, sessionToken)
+		cmd.Env = setCommandEnv(cmd.Env, "GITHUB_TOKEN", sessionToken)
 	}
 	if s.log != nil {
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
@@ -995,6 +1000,17 @@ func (s *Service) dispatchWithStart(
 		}
 	}
 	return true, ""
+}
+
+func setCommandEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dialect.Finding {

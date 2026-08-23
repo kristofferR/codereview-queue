@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,7 +41,35 @@ func main() {
 	os.Exit(code)
 }
 
+func configuredGitHub(ctx context.Context, cfg crq.Config, direct bool) (*ghapi.GitHub, error) {
+	if direct {
+		return ghapi.NewGitHub(ctx)
+	}
+	return ghapi.NewGitHubViaServer(cfg.ServerURL, cfg.ServerToken)
+}
+
+type githubGateway struct {
+	client *ghapi.GitHub
+}
+
+func (g githubGateway) Forward(ctx context.Context, method, requestURI string, body []byte) (serve.GitHubResponse, error) {
+	result, err := g.client.Forward(ctx, method, requestURI, body)
+	if err != nil {
+		return serve.GitHubResponse{}, err
+	}
+	return serve.GitHubResponse{Status: result.Status, Header: result.Header, Body: result.Body}, nil
+}
+
+func (g githubGateway) CanWrite(ctx context.Context, repo string) (bool, error) {
+	info, err := g.client.GetRepo(ctx, repo)
+	return info.Permissions.Push, err
+}
+
 func run(ctx context.Context, args []string) int {
+	direct := len(args) > 0 && args[0] == "--direct"
+	if direct {
+		args = args[1:]
+	}
 	if len(args) == 0 {
 		usage()
 		return 0
@@ -61,14 +90,14 @@ func run(ctx context.Context, args []string) int {
 		fmt.Printf("crq %s\n", crq.Version)
 		return 0
 	case "doctor":
-		report := doctor(ctx)
+		report := doctor(ctx, direct)
 		printJSON(report)
 		if report.Ready {
 			return 0
 		}
 		return 1
 	case "preflight":
-		return preflight(ctx, args[1:])
+		return preflight(ctx, args[1:], direct)
 	case "autofix":
 		// A dry run is documented as a PREVIEW: it writes nothing and reads no
 		// GitHub state. Deciding it here, before the authenticated client is
@@ -97,10 +126,16 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
-	gh, err := ghapi.NewGitHub(ctx)
+	// init bootstraps the state the server needs, and serve IS the one process
+	// allowed to reach GitHub. Every other command fails closed through it unless
+	// an operator explicitly asks for the recovery-only --direct path.
+	gh, err := configuredGitHub(ctx, cfg, direct || args[0] == "init" || args[0] == "serve")
 	if err != nil {
 		fatal(err)
 		return 1
+	}
+	if args[0] == "serve" {
+		gh.EnableGETCoalescing()
 	}
 	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
@@ -778,15 +813,17 @@ func run(ctx context.Context, args []string) int {
 			AllowReposFor: func(st crq.State) []string {
 				return keysOf(service.ConfigIn(st, "").AllowRepos)
 			},
-			Discoverer:  repoDiscoverer{service},
-			Previewer:   enrollPreviewer{service},
-			Poll:        *poll,
-			Assets:      serve.Assets(),
-			Log:         stderrLogger{},
-			Host:        host,
-			LookupToken: ghapi.LookupToken,
-			Observer:    prObserver{svc: service, readOnly: dashboardReadOnly},
-			Coster:      prCoster{service},
+			Discoverer:   repoDiscoverer{service},
+			Previewer:    enrollPreviewer{service},
+			Poll:         *poll,
+			Assets:       serve.Assets(),
+			Log:          stderrLogger{},
+			Host:         host,
+			LookupToken:  ghapi.LookupToken,
+			Gateway:      githubGateway{client: gh},
+			GatewayToken: cfg.ServerToken,
+			Observer:     prObserver{svc: service, readOnly: dashboardReadOnly},
+			Coster:       prCoster{service},
 			TailLog: func(ctx context.Context, repo, path string, maxBytes int64) (serve.LogTail, error) {
 				tail, err := service.TailSessionLog(ctx, repo, path, maxBytes)
 				return serve.LogTail{Text: tail.Text, Size: tail.Size, Truncated: tail.Truncated}, err
@@ -979,7 +1016,7 @@ QUEUE WORKFLOWS
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq unclaim [<repo> <pr>]        abandon this interactive loop so autofix may take over
   crq autoreview                   keep open PRs reviewed through the same queue
-  crq serve                        the live web dashboard (--read-only to refuse writes)
+  crq serve                        GitHub control plane + live dashboard
   crq status [--line]              show the queue, in-flight review, and quota state
 
 DRIVING A PR REVIEW
@@ -1049,6 +1086,8 @@ EXIT CODES
   loop: 0 converged/no actionable findings/skipped, 10 actionable feedback, 2 timeout
 
 Configure with environment variables or ~/.config/crq/env. CRQ_REPO points at the gate repo.
+GitHub-backed commands use CRQ_SERVER_URL (default http://127.0.0.1:7777) and fail closed.
+crq --direct <command> bypasses the server for operator recovery only.
 For a compact machine-readable contract, read llms.txt in this repository.
 Use "crq help <command>" for command-specific guidance.
 `)
@@ -1204,9 +1243,11 @@ intend to keep working). Thread IDs come from .findings[].thread_id.
 		fmt.Print(`crq serve [--addr host:port] [--allow-host names] [--read-only] [--poll <dur>]
 crq serve install [--addr host:port] [--allow-host names] [--read-only] [--dry-run] [--skip-auth-check]
 
-The live web dashboard: the queue, the repositories, the bots and the settings,
-in a page that updates itself. The GitHub issue dashboard is unaffected and
-stays exactly as it was.
+The persistent GitHub control plane and live dashboard. Every ordinary crq
+process sends REST and GraphQL through this server, sharing one ETag cache,
+same-URL request coalescing, retry policy and rate-limit backoff. The browser
+shows the queue, repositories, bots and settings. The GitHub issue dashboard is
+unaffected.
 
 State is pushed over server-sent events whenever the state ref moves, and
 countdowns tick in the browser between pushes, so the page is live without
@@ -1216,8 +1257,10 @@ cheap state layer always renders immediately, and a GitHub failure costs one
 card rather than the page.
 
   --addr       default 127.0.0.1:7777. Bind 0.0.0.0 to reach it from another
-               machine on a private network; there is NO authentication, so do
-               not put it on one you do not trust.
+               machine on a private network. Non-loopback GitHub clients must
+               send the shared CRQ_SERVER_TOKEN. Dashboard actions remain
+               unauthenticated, so do not expose this directly to an untrusted
+               network; use an authenticated HTTPS reverse proxy there.
   --allow-host extra names an action may be addressed to, comma-separated.
                Actions are accepted on an IP literal, on localhost, on the bound
                address and on this machine's own name — a name that merely
@@ -1588,7 +1631,7 @@ queue entry, so they re-attach to the same wait instead of firing a duplicate re
 
   --once             scan once and exit
   --no-incremental   only review PRs that have never been reviewed by CodeRabbit
-  --skip-auth-check  with install: do not prove the service can authenticate first
+  --skip-auth-check  with install: compatibility flag; gateway capability is still checked
 
 Use this instead of CodeRabbit native auto-review. Native auto-review must be off.
 `)
@@ -1647,7 +1690,8 @@ Emit a JSON readiness report without mutating GitHub state.
 
 Checks include:
   crq config needed for queued PR loops
-  gh availability for GitHub API access
+  CRQ_SERVER_URL reachability and shared-state health
+  local gh availability for server setup and --direct recovery
   optional CodeRabbit CLI availability for local pre-push review
   CODERABBIT_API_KEY presence for headless CodeRabbit CLI auth
 
@@ -1685,7 +1729,7 @@ Maintenance tools for diagnosis only. Human and agent review loops should use cr
 	}
 }
 
-func preflight(ctx context.Context, args []string) int {
+func preflight(ctx context.Context, args []string, direct bool) int {
 	fs := flag.NewFlagSet("preflight", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	reviewType := fs.String("type", "all", "review type")
@@ -1713,7 +1757,7 @@ func preflight(ctx context.Context, args []string) int {
 		preflightCtx, cancel = context.WithTimeout(ctx, *timeout)
 	}
 	defer cancel()
-	if report := skipBlockedPreflight(preflightCtx, opts); report != nil {
+	if report := skipBlockedPreflight(preflightCtx, opts, direct); report != nil {
 		printJSON(report)
 		return 0
 	}
@@ -1722,7 +1766,7 @@ func preflight(ctx context.Context, args []string) int {
 	// so hand it to the queue rather than letting it die in this process. Local
 	// preflight must keep working with no crq config and no GitHub token, so this
 	// is best-effort and its outcome is reported rather than enforced.
-	report.Quota = shareCLIQuota(preflightCtx, report)
+	report.Quota = shareCLIQuota(preflightCtx, report, direct)
 	printJSON(report)
 	if err != nil {
 		fatal(err)
@@ -1735,7 +1779,7 @@ func preflight(ctx context.Context, args []string) int {
 // and guaranteed to fail, so it is a successful skip. Missing configuration,
 // credentials, or GitHub access remain cache misses: local preflight keeps its
 // standalone behavior and runs normally.
-func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.PreflightReport {
+func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions, direct bool) *crq.PreflightReport {
 	if crq.HasExplicitCredentials(opts.ExtraArgs) {
 		return nil
 	}
@@ -1749,7 +1793,7 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.P
 	}
 	readCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
 	defer cancel()
-	gh, err := ghapi.NewGitHub(readCtx)
+	gh, err := configuredGitHub(readCtx, cfg, direct)
 	if err != nil {
 		return nil
 	}
@@ -1767,7 +1811,7 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions) *crq.P
 // shareCLIQuota records a CLI-reported account block in crq's shared state.
 // Every failure path is a nil result with a reason, never an error: preflight is
 // a local review command and must not start depending on GitHub.
-func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuotaResult {
+func shareCLIQuota(ctx context.Context, report crq.PreflightReport, direct bool) *crq.CLIQuotaResult {
 	if !crq.IsCLIAccountBlock(report) {
 		return nil
 	}
@@ -1785,7 +1829,7 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 	// right for a review loop and wrong for a courtesy write.
 	shareCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
 	defer cancel()
-	gh, err := ghapi.NewGitHub(shareCtx)
+	gh, err := configuredGitHub(shareCtx, cfg, direct)
 	if err != nil {
 		return &crq.CLIQuotaResult{Reason: "could not reach github to record the block: " + err.Error()}
 	}
@@ -2147,6 +2191,7 @@ type doctorReport struct {
 	ConfigPath      string              `json:"config_path"`
 	Config          doctorConfig        `json:"config"`
 	GitHub          doctorGitHub        `json:"github"`
+	Server          doctorServer        `json:"server"`
 	CodeRabbitCLI   doctorCodeRabbitCLI `json:"coderabbit_cli"`
 	Tools           map[string]toolInfo `json:"tools"`
 	Environment     doctorEnvironment   `json:"environment"`
@@ -2164,6 +2209,7 @@ type otherInstall struct {
 }
 
 type doctorConfig struct {
+	ServerURL      string   `json:"server_url"`
 	GateRepo       string   `json:"gate_repo,omitempty"`
 	DashboardIssue int      `json:"dashboard_issue,omitempty"`
 	CalibrationPR  int      `json:"calibration_pr,omitempty"`
@@ -2181,6 +2227,13 @@ type doctorGitHub struct {
 	Error         string `json:"error,omitempty"`
 }
 
+type doctorServer struct {
+	URL       string `json:"url"`
+	Reachable bool   `json:"reachable"`
+	Healthy   bool   `json:"healthy"`
+	Error     string `json:"error,omitempty"`
+}
+
 type doctorCodeRabbitCLI struct {
 	Authenticated bool   `json:"authenticated"`
 	AuthType      string `json:"auth_type,omitempty"`
@@ -2196,7 +2249,7 @@ type toolInfo struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func doctor(ctx context.Context) doctorReport {
+func doctor(ctx context.Context, direct bool) doctorReport {
 	cfg, err := crq.LoadConfig()
 	if err != nil {
 		cfg = crq.Config{}
@@ -2212,6 +2265,7 @@ func doctor(ctx context.Context) doctorReport {
 		Version:    crq.Version,
 		ConfigPath: configPath(),
 		Config: doctorConfig{
+			ServerURL:      cfg.ServerURL,
 			GateRepo:       cfg.GateRepo,
 			DashboardIssue: cfg.DashboardIssue,
 			CalibrationPR:  cfg.CalibrationPR,
@@ -2221,6 +2275,7 @@ func doctor(ctx context.Context) doctorReport {
 		},
 		Tools:         tools,
 		GitHub:        checkGitHubAuth(ctx, tools["gh"].Found),
+		Server:        checkServer(ctx, cfg.ServerURL, cfg.ServerToken, !direct),
 		CodeRabbitCLI: codeRabbitCLI,
 		Environment: doctorEnvironment{
 			CodeRabbitAPIKey: os.Getenv("CODERABBIT_API_KEY") != "",
@@ -2237,20 +2292,24 @@ func doctor(ctx context.Context) doctorReport {
 	if report.Config.Scope == nil {
 		report.Config.Scope = []string{}
 	}
-	// crq authenticates via GITHUB_TOKEN/GH_TOKEN or the gh CLI, so either path
-	// counts as GitHub-ready.
 	tokenPresent := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "" || strings.TrimSpace(os.Getenv("GH_TOKEN")) != ""
 	githubReady := report.GitHub.Authenticated || tokenPresent
-	report.Ready = report.Config.Complete && githubReady
+	if direct {
+		report.Ready = report.Config.Complete && githubReady
+	} else {
+		report.Ready = report.Config.Complete && report.Server.Healthy
+	}
 	if !report.Config.Complete {
 		report.Recommendations = append(report.Recommendations, "run crq init and save the printed exports to "+configPath())
 	}
-	if !githubReady {
-		if !report.Tools["gh"].Found {
-			report.Recommendations = append(report.Recommendations, "set GITHUB_TOKEN/GH_TOKEN or install GitHub CLI and run gh auth login")
-		} else {
-			report.Recommendations = append(report.Recommendations, "authenticate GitHub CLI with gh auth login (or set GITHUB_TOKEN/GH_TOKEN)")
+	if direct {
+		if !githubReady {
+			report.Recommendations = append(report.Recommendations, "authenticate gh or set GITHUB_TOKEN/GH_TOKEN for direct recovery")
 		}
+	} else if !report.Server.Reachable {
+		report.Recommendations = append(report.Recommendations, "start the GitHub control plane with crq serve install")
+	} else if !report.Server.Healthy {
+		report.Recommendations = append(report.Recommendations, "repair crq serve: it is reachable but cannot provide writable GitHub access")
 	}
 	if !report.Tools["cr"].Found && !report.Tools["coderabbit"].Found {
 		report.Recommendations = append(report.Recommendations, "optional: install CodeRabbit CLI for local pre-push review with cr review --agent")
@@ -2266,6 +2325,57 @@ func doctor(ctx context.Context) doctorReport {
 		}
 	}
 	return report
+}
+
+func checkServer(ctx context.Context, serverURL, token string, requireWrite bool) doctorServer {
+	result := doctorServer{URL: strings.TrimSpace(serverURL)}
+	if result.URL == "" {
+		result.Error = "CRQ_SERVER_URL is empty"
+		return result
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	healthURL := strings.TrimRight(result.URL, "/") + "/api/gateway/health"
+	if requireWrite {
+		healthURL += "?write=1"
+	}
+	req, err := http.NewRequestWithContext(toolCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	req.Header.Set("X-CRQ-Client", "1")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("refusing redirect from crq serve")
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	defer func() { _ = resp.Body.Close() }()
+	result.Reachable = true
+	var health struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health); err != nil {
+		result.Error = "invalid health response: " + err.Error()
+		return result
+	}
+	result.Healthy = resp.StatusCode == http.StatusOK && health.OK
+	if !result.Healthy {
+		result.Error = health.Error
+		if result.Error == "" {
+			result.Error = resp.Status
+		}
+	}
+	return result
 }
 
 // otherInstalls finds every other crq this host can run.
@@ -2457,7 +2567,7 @@ func parseAutofixArgs(args []string) (autofixArgs, error) {
 	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and run")
 	skipAuth := fs.Bool("skip-auth-check", false,
-		"install without proving the service can authenticate (a macOS host reached over SSH, where gh's keychain is the GUI session's)")
+		"skip the local Git credential check (the crq server is still validated)")
 	sub, rest := "", args
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		sub, rest = rest[0], rest[1:]

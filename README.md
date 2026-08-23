@@ -43,8 +43,8 @@ yourself anymore — you ask `crq`, and `crq`:
   time, in FIFO order, only when the account is actually unblocked.** No stampede, no spam.
 - 📊 **Shows you the line** — a live GitHub issue is the dashboard: who's queued, what's in flight,
   recent history, and when the next slot opens.
-- 🌍 **Works across machines** — all state lives on GitHub, so agents on your laptop, a server, and
-  a CI box all share the same queue with zero extra infrastructure.
+- 🌍 **Works across machines** — agents on your laptop, a server, and a CI box share one queue and
+  send GitHub API work through one persistent `crq serve` control plane.
 - 🔁 **Drives the round** — `crq next` doesn't just trigger; it tracks CodeRabbit *and* Codex on the
   current head and answers with the one thing to do now: fix these findings, hold the head, push,
   wait until this time, or done.
@@ -79,24 +79,21 @@ and the chaos is gone.
 
 ```text
    agent A ─┐
-   agent B ─┼─►  crq next <repo> <pr>
-   agent C ─┘          │
-                       ▼
-        ┌──────────────────────────────┐     asks "any capacity?"
-        │  typed state in a git ref     │ ───────────────────────►  CodeRabbit
-        │  (compare-and-swap) + FIFO    │ ◄───────────────────────  "available now" / "in 3h"
-        │  queue, mirrored to an issue  │
-        └──────────────────────────────┘
-                       │  when unblocked, fire the FIFO head — exactly one
-                       ▼
-        posts "@coderabbitai review" on the next PR in line, then waits for feedback
+   agent B ─┼─► crq next <repo> <pr> ─► crq serve
+   agent C ─┘                              │
+                           ┌───────────────┴───────────────┐
+                           ▼                               ▼
+               typed state in a git ref          PR comments + reviews
+               compare-and-swap + FIFO    ◄────► GitHub API ◄────► CodeRabbit
 ```
 
-Everything lives in one small **gate repo** (private is fine):
+Durable queue state lives in one small **gate repo** (private is fine), with one
+`crq serve` process acting as the control plane:
 
 | Piece | What it is |
 |-------|-----------|
-| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
+| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database or service account. |
+| 🌐 **Control plane** | `crq serve` owns the GitHub credential, REST/GraphQL retries, backoff, and the shared ETag cache. CLI commands fail closed through it instead of each process spending GitHub quota independently. |
 | 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
@@ -104,7 +101,8 @@ Everything lives in one small **gate repo** (private is fine):
 
 ## Quick start
 
-**1. Install** (needs [`gh`](https://cli.github.com/) logged in, or `GITHUB_TOKEN`/`GH_TOKEN` set):
+**1. Install.** The machine running `crq serve` needs [`gh`](https://cli.github.com/) logged in, or
+`GITHUB_TOKEN`/`GH_TOKEN` set:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash
@@ -130,7 +128,7 @@ mv -f ~/.local/bin/crq.new ~/.local/bin/crq
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
 cp -R "skills/coderabbit-queue" "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
-crq doctor   # verify gh/auth/config readiness
+crq version
 ```
 
 The top-level `./crq` is a dev launcher that runs `go run ./cmd/crq`.
@@ -166,7 +164,22 @@ EOF
 > crq posts calibration comments *as you*, which re-subscribes you to the gate repo. Set it to
 > **Watch ▾ → Ignore** on GitHub so the machine-only calibration PR never emails you.
 
-**3. Use it.** In any review loop, replace this:
+**3. Start the control plane:**
+
+```bash
+crq serve install
+crq doctor
+```
+
+By default every command uses `http://127.0.0.1:7777`. For one server shared across machines, set
+`CRQ_SERVER_URL` on the clients and the same `CRQ_SERVER_TOKEN` on the server and clients, then bind
+the server on the private network with `crq serve install --addr 0.0.0.0:7777 --allow-host <name>`.
+Use HTTPS at a reverse proxy if that network is not trusted. The token is optional only on loopback.
+
+Every GitHub-backed command fails closed when the server is unavailable. `crq --direct <command>`
+is the explicit recovery path for an operator; agents and daemons should never use it.
+
+**4. Use it.** In any review loop, replace this:
 
 ```bash
 gh pr comment "$PR" --repo "$REPO" --body "@coderabbitai review"   # ❌ competes with other agents
@@ -181,7 +194,7 @@ crq next "$REPO" "$PR"   # ✅ tells you the one thing to do next
 `crq next` gets the PR in line, fires the review exactly once when CodeRabbit has capacity, and
 answers with a single instruction: `fix` (findings are attached), `hold` (a required reviewer is
 still pending — don't move the head), `push`, `wait` until a time crq computed, `done`, or `blocked`.
-Call it, do what it says, call it again. It is non-blocking and idempotent, so there is no long-lived
+Call it, do what it says, call it again. It is non-blocking and idempotent, so there is no per-PR
 process to babysit. It also takes a two-hour renewable work claim on the PR before reading feedback.
 The unattended autofix daemon checks that claim in the same atomic update that starts a fix session,
 so it cannot duplicate work an interactive agent has already taken. `done` and `blocked` release the
@@ -413,7 +426,8 @@ crq hold                                                    # list held PRs
 
 crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
 
-crq serve                 # ⭐ the live web dashboard (crq serve install enables a reboot-persistent service)
+crq serve                 # ⭐ GitHub control plane + live web dashboard
+crq serve install         #    enable the reboot-persistent service
 
 crq cost <repo> <pr>      # what one more review round there would cost, before firing it
                           # (CRQ_WEEKLY_LIMIT sets the fair-use threshold the dashboard forecasts)
@@ -527,6 +541,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
+| `CRQ_SERVER_URL` | `http://127.0.0.1:7777` | `crq serve` endpoint that owns every GitHub API request; GitHub-backed commands fail closed when it is unavailable |
+| `CRQ_SERVER_TOKEN` | _(none)_ | shared bearer token required for non-loopback clients; configure the same value on the server and clients |
 | `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the state ref, dashboard, calibration PR |
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
@@ -556,8 +572,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_AUTOREVIEW_POLL` | `1m` | how often the `autoreview` daemon scans for PRs to enqueue |
 | `CRQ_INFLIGHT_TIMEOUT` | `15m` | backstop to release a stuck in-flight review |
 | `CRQ_LEADER_TTL` | `3m` | when a crashed `autoreview` leader is considered gone |
-| `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | GitHub rate-limit / 5xx backoff budget per request |
-| `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
+| `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | server-owned GitHub rate-limit / 5xx backoff budget per request |
+| `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | server-side cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
 | `CRQ_WORK_OWNER` | session ID, then checkout | optional stable identity for an interactive work claim; normally inferred automatically |
 
 The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
@@ -698,11 +714,12 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 
 | Symptom | Fix |
 |---------|-----|
-| `crq doctor` not ready | Set `GITHUB_TOKEN`/`GH_TOKEN` or run `gh auth login`, and finish `crq init`. |
+| `crq doctor` not ready | Finish `crq init`, start `crq serve`, and inspect its health error. The server host needs `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth login`. |
+| `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; it also auto-clears after `CRQ_INFLIGHT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
-| `github … rate limit hit … resets …` | crq backs off and retries automatically (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
-| Internet drops for a while | crq rides it out — it keeps retrying (the request *is* the connectivity probe) every ~30s with **no timeout by default**, logging `github unreachable … offline …` to stderr and `reachable again` on recovery, so a long outage blocks and resumes instead of failing your loop or daemon. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
+| `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
+| Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |
 
 ## How concurrency works (for the curious)

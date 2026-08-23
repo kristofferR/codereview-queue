@@ -41,10 +41,9 @@ type ServeInstall struct {
 	// ReadOnly installs a dashboard that refuses every write, for pointing at a
 	// fleet you do not administer.
 	ReadOnly bool `json:"read_only,omitempty"`
-	// SkipAuthCheck installs without proving the service can authenticate. Same
-	// escape hatch as the autofix install: a macOS host reached over SSH cannot
-	// read the GUI session's keychain, so an expired token and a perfectly good
-	// one look identical from there.
+	// SkipAuthCheck skips the local credential check for a direct serve process.
+	// A gateway-backed daemon is still probed because server reachability and
+	// write capability do not have the macOS keychain ambiguity.
 	SkipAuthCheck bool     `json:"skip_auth_check,omitempty"`
 	Commands      []string `json:"commands"`
 	DryRun        bool     `json:"dry_run,omitempty"`
@@ -128,12 +127,14 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 		return plan, nil
 	}
 
-	// Both units read GitHub on every pass and neither inherits this shell's
-	// variables, so the same check the autofix install makes belongs here.
-	// Without it `systemctl restart` succeeds, the install prints Started, and
-	// the process then fails its state reads for ever — no reviews, no
-	// dashboard, and nothing that says why.
-	if !skipAuth {
+	// Prove the transport each unit will actually use. serve owns the local
+	// GitHub credential. autoreview is a gateway client and must be able to write
+	// leases and queue transitions through the configured control plane.
+	if service == "autoreview" {
+		if err := s.serviceCanUseGateway(ctx, service); err != nil {
+			return plan, err
+		}
+	} else if !skipAuth {
 		if err := serviceCanAuthenticate(ctx, service); err != nil {
 			return plan, err
 		}
@@ -240,7 +241,7 @@ func unitDescription(service string) string {
 	if service == "autoreview" {
 		return "crq autoreview (find pull requests needing a review and fire the queue)"
 	}
-	return "crq dashboard (crq serve)"
+	return "crq GitHub control plane and dashboard (crq serve)"
 }
 
 func serveUnitBody(plan ServeInstall) string {

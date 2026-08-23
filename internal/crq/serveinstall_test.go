@@ -2,6 +2,8 @@ package crq
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,44 @@ func TestServeInstallPreservesPollInterval(t *testing.T) {
 	got := strings.Join(serveArgv(plan), " ")
 	if !strings.Contains(got, "--poll 30s") {
 		t.Fatalf("serve argv = %q, want the configured poll interval", got)
+	}
+}
+
+func TestAutoreviewInstallRequiresAWritableGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		response  string
+		wantError string
+	}{
+		{name: "writable", status: http.StatusOK, response: `{"ok":true}`},
+		{name: "read only", status: http.StatusForbidden, response: `{"ok":false,"error":"the GitHub gateway is read-only"}`, wantError: "read-only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/gateway/health" || r.URL.Query().Get("write") != "1" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer secret" {
+					t.Error("gateway probe did not carry the configured token")
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer server.Close()
+
+			cfg := firingConfig()
+			cfg.ServerURL, cfg.ServerToken = server.URL, "secret"
+			svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+			err := svc.serviceCanUseGateway(t.Context(), "autoreview")
+			if tc.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("gateway validation error = %v, want %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

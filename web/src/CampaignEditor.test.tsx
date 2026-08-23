@@ -1,7 +1,9 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import type { RepoSolver } from "./api";
 import { CampaignEditor } from "./CampaignEditor";
+
+afterEach(cleanup);
 
 describe("CampaignEditor", () => {
   it("preserves agent-default effort for an active campaign", () => {
@@ -49,7 +51,7 @@ describe("CampaignEditor", () => {
 
     render(<CampaignEditor repo="owner/repo" solver={solver} />);
 
-    expect(screen.getByText(/old-review/)).toBeDefined();
+    screen.getByText(/old-review/);
     const start = screen.getByRole("button", { name: "Start campaign" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
   });

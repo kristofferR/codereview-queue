@@ -989,13 +989,21 @@ func (s *Service) dispatchWithStart(
 	readyHead = strings.TrimSpace(readyHead)
 	verificationPending := false
 	if finalizingOnePass {
-		// The base can advance while the agent is running. Bind merge authority
-		// to the revision current after the finalizer, not the stale pre-launch
-		// snapshot. The ancestry check proves the resulting head actually
-		// integrated that refreshed base before it is persisted.
+		// Prefer the base current after the finalizer when the resulting head
+		// actually contains it. If GitHub advances again after the agent has
+		// finished, retain the pre-launch base this checkout can still prove and
+		// let the exact-base merge gate wait rather than terminalizing the sole
+		// successful fixer.
 		refreshed, refreshErr := s.gh.GetPull(context.WithoutCancel(ctx), report.Repo, report.PR)
-		if refreshErr == nil && strings.TrimSpace(refreshed.Base.SHA) != "" {
-			readyBase = strings.TrimSpace(refreshed.Base.SHA)
+		refreshedBase := strings.TrimSpace(refreshed.Base.SHA)
+		if refreshErr == nil && refreshedBase != "" {
+			if refreshedBase != readyBase {
+				if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", refreshedBase, readyHead); err == nil {
+					readyBase = refreshedBase
+				} else {
+					verificationPending = true
+				}
+			}
 		} else {
 			// The fixer succeeded. A transient REST failure must not turn that
 			// sole allowed session into a terminal failed attempt or launch a

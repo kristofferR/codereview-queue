@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -132,6 +134,18 @@ func TestGitFallbackStateRefUsesGitTransport(t *testing.T) {
 	}
 }
 
+func TestGitFallbackStateRefReportsMissingRemoteRef(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	remote := filepath.Join(t.TempDir(), "state.git")
+	mustGit(t, "init", "--bare", "--quiet", remote)
+	store := newGitFallbackTestStore(t, remote)
+
+	got, err := store.StateRef(context.Background())
+	if got != "" || !errors.Is(err, gh.ErrNotFound) {
+		t.Fatalf("missing state ref = (%q, %v), want empty gh.ErrNotFound", got, err)
+	}
+}
+
 func TestGitFallbackCloseRemovesPrivateCache(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "1")
 	remote, _ := seedGitStateRemote(t)
@@ -149,9 +163,23 @@ func TestGitFallbackCloseRemovesPrivateCache(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+	if _, _, err := store.Load(context.Background()); !errors.Is(err, errGitStateStoreClosed) {
+		t.Fatalf("Load after Close = %v, want the explicit closed-store error", err)
+	}
+
+	unopened := newGitFallbackTestStore(t, remote)
+	if err := unopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := unopened.Load(context.Background()); !errors.Is(err, errGitStateStoreClosed) {
+		t.Fatalf("first Load after an early Close = %v, want the explicit closed-store error", err)
+	}
 }
 
 func TestGitFallbackRemoteCommandsInjectCurrentToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub git shim needs a POSIX shell")
+	}
 	binDir := t.TempDir()
 	argsPath := filepath.Join(t.TempDir(), "args")
 	tokenPath := filepath.Join(t.TempDir(), "token")
@@ -162,6 +190,9 @@ func TestGitFallbackRemoteCommandsInjectCurrentToken(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	t.Setenv("CRQ_TEST_ARGS", argsPath)
 	t.Setenv("CRQ_TEST_TOKEN", tokenPath)
+	if err := exec.Command(script).Run(); err != nil {
+		t.Skipf("the temporary directory cannot execute the POSIX git shim: %v", err)
+	}
 
 	store := &GitStateStore{
 		cfg:    StoreConfig{TokenSource: func(context.Context) string { return "current-token" }},
@@ -221,6 +252,18 @@ func TestGitFallbackMapsNonFastForwardToCASConflict(t *testing.T) {
 	}
 	if loaded.Account.Source != "first-writer" {
 		t.Fatalf("winning source = %q, want first-writer", loaded.Account.Source)
+	}
+}
+
+func TestGitFallbackDoesNotRetryGenericPushRejections(t *testing.T) {
+	generic := []byte("! [remote rejected] refs/crq/state (pre-receive hook declined)")
+	if isGitNonFastForward(generic, nil) {
+		t.Fatal("a generic remote rejection was classified as a retryable CAS conflict")
+	}
+	for _, message := range []string{"non-fast-forward", "fetch first", "stale info"} {
+		if !isGitNonFastForward(nil, []byte(message)) {
+			t.Errorf("lease-specific rejection %q was not classified as a CAS conflict", message)
+		}
 	}
 }
 

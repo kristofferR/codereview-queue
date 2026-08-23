@@ -24,6 +24,8 @@ var ErrCASConflict = errors.New("state changed while writing")
 // returns the current state without writing a new revision.
 var ErrNoChange = errors.New("state unchanged")
 
+var errGitStateStoreClosed = errors.New("git state store is closed")
+
 const (
 	statePath                = "state.json"
 	dashboardPath            = "dashboard.md"
@@ -123,6 +125,7 @@ type GitStateStore struct {
 	gitOnce      sync.Once
 	gitDir       string
 	gitInitErr   error
+	gitClosed    bool
 	gitMu        sync.Mutex
 
 	// renderCfg resolves state-backed fleet settings before rendering. It is
@@ -149,6 +152,10 @@ func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateS
 func (s *GitStateStore) Close() error {
 	s.gitMu.Lock()
 	defer s.gitMu.Unlock()
+	if s.gitClosed {
+		return nil
+	}
+	s.gitClosed = true
 	if s.gitDir == "" {
 		return nil
 	}
@@ -229,7 +236,13 @@ func (s *GitStateStore) StateRef(ctx context.Context) (string, error) {
 		return s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
 	}
 	_, rev, err := s.loadGit(ctx)
-	return rev.CommitSHA, err
+	if err != nil {
+		return "", err
+	}
+	if rev.CommitSHA == "" {
+		return "", gh.ErrNotFound
+	}
+	return rev.CommitSHA, nil
 }
 
 func (s *GitStateStore) decodeState(raw []byte, rev Revision) (State, Revision, error) {
@@ -519,6 +532,9 @@ func (s *GitStateStore) gitHashObject(ctx context.Context, content []byte) (stri
 }
 
 func (s *GitStateStore) ensureGitCache(ctx context.Context) error {
+	if s.gitClosed {
+		return errGitStateStoreClosed
+	}
 	s.gitOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "crq-state-git-"+strconv.Itoa(os.Getpid())+"-*")
 		if err != nil {
@@ -618,7 +634,6 @@ func isMissingGitPath(stderr []byte) bool {
 func isGitNonFastForward(stdout, stderr []byte) bool {
 	message := strings.ToLower(string(append(append([]byte(nil), stdout...), stderr...)))
 	return strings.Contains(message, "non-fast-forward") ||
-		strings.Contains(message, "[rejected]") ||
 		strings.Contains(message, "fetch first") ||
 		strings.Contains(message, "stale info")
 }

@@ -270,11 +270,10 @@ export function campaignChange(
     max_attempts: 1,
   };
   if (edited.model !== (solver.model ?? "")) {
-    const ranking = [
-      edited.model,
-      ...solver.models.filter((model) => model !== edited.model),
-    ].filter(Boolean);
-    change.models = ranking;
+    change.models =
+      edited.model === ""
+        ? []
+        : [edited.model, ...solver.models.filter((model) => model !== edited.model)];
   }
   if (edited.effort !== (solver.effort ?? "")) {
     change.effort = edited.effort;

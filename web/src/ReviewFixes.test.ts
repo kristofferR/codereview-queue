@@ -131,6 +131,19 @@ describe("settings deltas", () => {
       one_pass: true,
       merge_method: "squash",
     });
+
+    expect(
+      campaignChange(solver, {
+        model: "",
+        effort: "high",
+        mergeMethod: "",
+      }),
+    ).toEqual({
+      models: [],
+      max_attempts: 1,
+      one_pass: true,
+      merge_method: "",
+    });
   });
 });
 

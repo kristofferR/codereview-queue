@@ -412,9 +412,10 @@ func (s *GitStateStore) loadGit(ctx context.Context) (State, Revision, error) {
 }
 
 // compareAndSwapGit creates the same two-file state commit as the REST path,
-// preserving every other entry from the loaded tree. A normal (non-force) push
-// is the CAS: if another writer advanced the ref, git rejects our sibling
-// commit as non-fast-forward.
+// preserving every other entry from the loaded tree. The explicit lease is the
+// CAS: it rejects both an advanced ref and a ref deleted after Load. A plain
+// push catches the first race but recreates a missing destination from stale
+// state.
 func (s *GitStateStore) compareAndSwapGit(
 	ctx context.Context,
 	revision int64,
@@ -495,8 +496,10 @@ func (s *GitStateStore) compareAndSwapGit(
 	}
 	commitSHA := strings.TrimSpace(string(commitOut))
 
+	remoteRef := s.gitRemoteRef()
+	lease := "--force-with-lease=" + remoteRef + ":" + rev.CommitSHA
 	stdout, stderr, err := s.gitRemote(ctx, nil, nil,
-		"push", "--porcelain", "origin", commitSHA+":"+s.gitRemoteRef())
+		"push", "--porcelain", lease, "origin", commitSHA+":"+remoteRef)
 	if err != nil {
 		if isGitNonFastForward(stdout, stderr) {
 			return ErrCASConflict

@@ -224,6 +224,27 @@ func TestGitFallbackMapsNonFastForwardToCASConflict(t *testing.T) {
 	}
 }
 
+func TestGitFallbackDeletedRefCannotBeResurrectedByStaleWriter(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	remote, _ := seedGitStateRemote(t)
+	store := newGitFallbackTestStore(t, remote)
+
+	stale, rev, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "--git-dir", remote, "update-ref", "-d", "refs/heads/crq-state-v3")
+	stale.Rev++
+	stale.Account.Source = "stale-writer"
+	if err := store.compareAndSwap(context.Background(), &stale, rev); !errors.Is(err, ErrCASConflict) {
+		t.Fatalf("deleted-ref push error = %v, want ErrCASConflict", err)
+	}
+	if _, _, err := runGit(context.Background(), nil, nil,
+		"--git-dir", remote, "rev-parse", "--verify", "refs/heads/crq-state-v3"); err == nil {
+		t.Fatal("stale writer recreated the deliberately deleted state ref")
+	}
+}
+
 func TestGitFallbackIsOptInAndSkipsDashboardAPI(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "")
 	cfg := StoreConfig{GateRepo: "owner/state", StateRef: "crq-state-v3"}

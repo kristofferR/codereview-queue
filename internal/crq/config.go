@@ -23,6 +23,14 @@ const Version = "2.0.0"
 func init() { ghapi.UserAgent = "crq/" + Version }
 
 type Config struct {
+	// ServerURL is the crq control-plane endpoint used for every GitHub API
+	// request. Short-lived CLI processes therefore share the persistent server's
+	// conditional-request cache and backoff state. The server itself constructs
+	// a direct GitHub client.
+	ServerURL string
+	// ServerToken authenticates non-loopback clients to the GitHub gateway. It
+	// stays empty for the default loopback-only server.
+	ServerToken    string
 	GateRepo       string
 	DashboardIssue int
 	CalibrationPR  int
@@ -312,6 +320,8 @@ func BuildConfig(env map[string]string) (Config, error) {
 		}
 	}
 	cfg := Config{
+		ServerURL:         stringEnv(env, "CRQ_SERVER_URL", "http://127.0.0.1:7777"),
+		ServerToken:       strings.TrimSpace(env["CRQ_SERVER_TOKEN"]),
 		GateRepo:          env["CRQ_REPO"],
 		DashboardIssue:    intEnv(env, "CRQ_ISSUE", 0),
 		CalibrationPR:     intEnv(env, "CRQ_CAL_PR", 0),

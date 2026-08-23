@@ -5,6 +5,11 @@ description: Drive autonomous CodeRabbit/Codex PR-review loops through crq witho
 
 # coderabbit-queue (`crq`)
 
+Every GitHub API operation from an ordinary command goes through the persistent `crq serve` control
+plane. It owns the shared ETag cache, retries, and rate-limit backoff. GitHub-backed commands fail
+closed when it is down. `crq --direct` is for operator recovery only; agents and daemons must never
+use it.
+
 CodeRabbit's PR-review limit is account-wide. Multiple agents posting `@coderabbitai review`
 directly will stampede the same quota. `crq` owns that mechanical loop:
 
@@ -74,8 +79,9 @@ no tokens idling and never narrate a countdown.
 
 It owns no review round. It only renews the interactive work claim, which expires after two hours if
 the process disappears — just run it again (or call `crq next`) to continue. While idle it watches
-the shared state ref with an authenticated conditional request. When GitHub answers that ETag check
-with `304 Not Modified`, it does not count against the primary REST rate limit. Apart from renewing
+the shared state ref through `crq serve`. The server's authenticated conditional request receives
+`304 Not Modified` without spending primary REST quota, and that cache is shared fleet-wide. Apart
+from renewing
 the claim it is read-only in the steady state, but if nothing is advancing your PR (no round for the
 head, or no daemon holding the leader lease) it drives the queue itself rather than wait for nobody,
 which can request a review.

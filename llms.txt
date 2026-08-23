@@ -5,6 +5,11 @@ crq is the repo's CLI for autonomous CodeRabbit/Codex pull-request review loops.
 Core rule: never post `@coderabbitai review` directly. To drive a PR, call `crq next` and do exactly
 what its `.action` says (see Agent Loop below); everything else is reference material.
 
+Every GitHub API operation from an ordinary crq command goes through the persistent `crq serve`
+control plane. It owns the shared ETag cache, retries, and rate-limit backoff. GitHub-backed commands
+fail closed if it is down. `crq --direct` is an operator recovery tool; agents and daemons must never
+use it.
+
 Do not bypass crq to read review status, either. Never hand-poll the GitHub API
 (`gh api .../pulls/N/reviews|comments`, looping on the head) to wait for a review
 or its outcome: it drains the shared account-wide GitHub REST quota (also spent by
@@ -19,8 +24,8 @@ Readiness check:
 crq doctor
 ```
 
-`crq doctor` emits JSON for agents: crq config, `gh`, optional CodeRabbit CLI,
-and `CODERABBIT_API_KEY` presence.
+`crq doctor` emits JSON for agents: crq config, control-plane health, local `gh`, optional CodeRabbit
+CLI, and `CODERABBIT_API_KEY` presence.
 
 ## Setup
 
@@ -32,9 +37,12 @@ export CRQ_ISSUE=1
 export CRQ_CAL_PR=1
 export CRQ_SCOPE=OWNER
 export CRQ_STATE_REF=crq-state-v3
+# Defaults to the local server. Set these on every client for a shared host:
+# export CRQ_SERVER_URL=https://crq.example.test
+# export CRQ_SERVER_TOKEN=shared-secret
 ```
 
-CodeRabbit native auto-review must be off.
+`crq serve` must be running, and CodeRabbit native auto-review must be off.
 
 ## Agent Loop
 
@@ -59,7 +67,7 @@ crq next                      # inside the checkout, the target is inferred
 
 `crq next` always exits 0 on success — read `.action`, never the exit code. It is non-blocking and
 idempotent, and it advances the queue by one step as a side effect, so a PR in a repo outside the
-autoreview fleet still progresses. There is no long-lived process to keep alive: if the harness kills
+autoreview fleet still progresses. There is no per-PR process to keep alive: if the harness kills
 the agent mid-loop, the next `crq next` returns the correct action from persisted state.
 
 Before reading feedback, interactive `next`, `wait`, and `loop` calls take a two-hour renewable work
@@ -82,9 +90,9 @@ burn no tokens idling.
 
 It owns no review round. It renews only the interactive work claim described above, so being killed
 cannot wedge review state; the claim expires after two hours. Run it again or call `crq next` to
-renew and continue. While idle it watches the shared state ref with an authenticated conditional
-request. When GitHub answers that ETag check with 304 Not Modified, it does not count against the
-primary REST rate limit. If no review round or live autoreview leader is progressing the PR, `wait`
+renew and continue. While idle it watches the shared state ref through `crq serve`; the server's
+conditional request receives 304 Not Modified without spending primary REST quota, and the cache is
+shared with every other caller. If no review round or live autoreview leader is progressing the PR, `wait`
 advances the queue itself and may request a review rather than wait forever.
 
 `crq next --wait` is the same thing inline, for a human at a terminal.
@@ -462,8 +470,8 @@ Review bodies have no resolution flag: crq retains the latest body before a new 
 suppresses body findings older than the persisted current-head round so addressed feedback is not
 re-emitted. Unresolved cross-commit threads remain visible.
 
-Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
-network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
+Long waits are not hangs. Queue and reviewer progress stays on the CLI's stderr; GitHub rate-limit
+and outage recovery lives in the `crq serve` log. Stdout stays reserved for the final JSON.
 
 Keeping a loop alive is not your problem. `crq next` returns immediately, and `crq wait` owns no
 review round, so neither leaves queue state for a harness to orphan. Their work claim is deliberately

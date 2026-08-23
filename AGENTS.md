@@ -7,8 +7,8 @@ CLI contract read `README.md` and `llms.txt`; for usage read `crq help`.
 
 ## Package layout
 
-Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state ← crq`,
-`gh ← {state, crq}`, `workspace ← crq`. The engine does no I/O by construction.
+Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine ← crq`,
+`state ← {crq, serve}`, `gh ← {state, crq}`, `workspace ← crq`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
   completion, rate-limit, paused, in-progress, failed, summary-only-plan,
@@ -32,6 +32,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   credential-safe Git execution, stale-worktree pruning, and mirror migration.
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
+- `internal/serve/` — persistent control plane and dashboard. Its GitHub gateway is the only
+  ordinary path to api.github.com: short-lived CLI processes proxy REST/GraphQL through it, sharing
+  one ETag cache, retry/backoff owner, and same-URL GET coalescer. Command semantics stay in `crq`;
+  `serve` receives narrow interfaces wired by `cmd/crq`.
 - `internal/state/` — persisted schema v6: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
   per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,

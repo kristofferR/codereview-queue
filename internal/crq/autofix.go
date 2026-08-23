@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // fixPrompt is what a dispatched session is told. It is embedded so there is one
@@ -50,10 +52,9 @@ type AutofixInstall struct {
 	// still on disk. Empty when there is nothing to retire.
 	Retire string `json:"retire,omitempty"`
 	DryRun bool   `json:"dry_run,omitempty"`
-	// SkipAuthCheck installs without proving the service can authenticate. For
-	// the one case the check cannot decide: a macOS host reached over SSH,
-	// where gh's keychain is readable by the GUI-domain agent and not by this
-	// session.
+	// SkipAuthCheck skips only the local Git credential check. The configured
+	// crq server is always probed because its reachability and write capability
+	// are unambiguous from any session.
 	SkipAuthCheck bool `json:"skip_auth_check,omitempty"`
 	Started       bool `json:"started,omitempty"`
 }
@@ -193,6 +194,9 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (Autofi
 			return plan, err
 		}
 	}
+	if err := s.serviceCanUseGateway(ctx, "autofix"); err != nil {
+		return plan, err
+	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return plan, err
 	}
@@ -203,7 +207,9 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (Autofi
 		mode os.FileMode
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
-		{plan.Unit, s.autofixUnit(plan), 0o644},
+		// The gateway bearer token is part of the effective daemon config, so
+		// the service definition is private to the installing user.
+		{plan.Unit, s.autofixUnit(plan), 0o600},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			return plan, err
@@ -354,6 +360,13 @@ func serviceCanAuthenticate(ctx context.Context, service string) error {
 	return fmt.Errorf("the %s service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", service, ConfigPath())
 }
 
+func (s *Service) serviceCanUseGateway(ctx context.Context, service string) error {
+	if err := ghapi.ProbeServer(ctx, s.cfg.ServerURL, s.cfg.ServerToken, true); err != nil {
+		return fmt.Errorf("the %s service cannot use the configured crq server: %w", service, err)
+	}
+	return nil
+}
+
 // autofixPath is the PATH the service runs with: this shell's, plus wherever crq
 // and the agent were found.
 //
@@ -399,7 +412,9 @@ func autofixPath(plan AutofixInstall) string {
 // none.
 func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 	env := map[string]string{
-		"CRQ_REPOS": strings.Join(plan.Repos, ","),
+		"CRQ_REPOS":        strings.Join(plan.Repos, ","),
+		"CRQ_SERVER_URL":   s.cfg.ServerURL,
+		"CRQ_SERVER_TOKEN": s.cfg.ServerToken,
 		// The denylist travels with the allowlist. Carrying one and not the other
 		// installs a service that watches a repository the operator excluded.
 		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(s.cfg.ExcludeRepos), ","),

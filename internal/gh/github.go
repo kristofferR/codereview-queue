@@ -44,6 +44,8 @@ type GitHub struct {
 	httpClient     *http.Client
 	apiBase        string
 	graphBase      string
+	gatewayURL     string
+	gatewayToken   string
 	log            Logger
 	maxRetries     int
 	maxWait        time.Duration
@@ -55,6 +57,52 @@ type GitHub struct {
 	viewer         string // the token's own login, "" until looked up, "-" when unreadable
 	etagMu         sync.Mutex
 	etags          map[string]*etagEntry // GET URL -> last 200 response, replayed on 304
+	// Server GETs for the same URL share an exact-key gate. A burst of fresh CLI
+	// processes then produces one upstream 200 followed by conditional 304s
+	// instead of racing several uncached requests against the shared REST
+	// allowance. Unrelated URLs never wait behind one another.
+	coalesceGETs bool
+	getGateMu    sync.Mutex
+	getGates     map[string]*requestGate
+}
+
+type requestGate struct {
+	users int
+	token chan struct{}
+}
+
+func (g *GitHub) acquireGETGate(ctx context.Context, requestURL string) (func(), error) {
+	g.getGateMu.Lock()
+	if g.getGates == nil {
+		g.getGates = map[string]*requestGate{}
+	}
+	gate := g.getGates[requestURL]
+	if gate == nil {
+		gate = &requestGate{token: make(chan struct{}, 1)}
+		g.getGates[requestURL] = gate
+	}
+	gate.users++
+	g.getGateMu.Unlock()
+
+	select {
+	case gate.token <- struct{}{}:
+		return func() {
+			<-gate.token
+			g.releaseGETGate(requestURL, gate)
+		}, nil
+	case <-ctx.Done():
+		g.releaseGETGate(requestURL, gate)
+		return nil, ctx.Err()
+	}
+}
+
+func (g *GitHub) releaseGETGate(requestURL string, gate *requestGate) {
+	g.getGateMu.Lock()
+	defer g.getGateMu.Unlock()
+	gate.users--
+	if gate.users == 0 && g.getGates[requestURL] == gate {
+		delete(g.getGates, requestURL)
+	}
 }
 
 // etagEntry is a cached 200 GET response. GitHub serves 304 Not Modified for a
@@ -74,6 +122,11 @@ const maxETagEntries = 1024
 // maxETagBody skips caching oversized responses (they'd mostly be one-off blob
 // fetches, and replaying them buys nothing worth the memory).
 const maxETagBody = 1 << 20
+
+// GitHub accepts git blobs up to 100 MiB. Blob reads are base64-encoded and
+// blob writes JSON-escape the UTF-8 state, so the gateway envelope needs room
+// beyond the raw object limit. Requests remain authenticated and bounded.
+const maxForwardBody = 256 << 20
 
 func (g *GitHub) etagLookup(url string) *etagEntry {
 	g.etagMu.Lock()
@@ -242,8 +295,87 @@ func NewGitHub(ctx context.Context) (*GitHub, error) {
 	}, nil
 }
 
+// NewGitHubViaServer builds a fail-closed client whose GitHub HTTP traffic is
+// carried by crq serve. The caller needs no GitHub credential: the persistent
+// server owns authentication, conditional-request caching, retry and backoff.
+func NewGitHubViaServer(serverURL, token string) (*GitHub, error) {
+	raw := strings.TrimSpace(serverURL)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("CRQ_SERVER_URL must be an http(s) server URL, got %q", serverURL)
+	}
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("http.DefaultTransport is not an *http.Transport")
+	}
+	transport := baseTransport.Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 5 * time.Second
+	return &GitHub{
+		httpClient: &http.Client{
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("refusing redirect from crq serve")
+			},
+		},
+		apiBase:        "https://api.github.com",
+		graphBase:      "https://api.github.com/graphql",
+		gatewayURL:     strings.TrimRight(raw, "/") + "/api/github",
+		gatewayToken:   strings.TrimSpace(token),
+		maxRetries:     0, // the server owns GitHub retries; a client never doubles them
+		backoffBase:    2 * time.Second,
+		networkMaxWait: 5 * time.Second,
+	}, nil
+}
+
 // SetLogger attaches a logger so rate-limit backoff/retry is visible to humans and the daemon log.
 func (g *GitHub) SetLogger(l Logger) { g.log = l }
+
+// EnableGETCoalescing makes concurrent reads of the same URL wait behind the
+// first. crq serve enables it on its one persistent direct client; ordinary
+// direct clients retain the existing concurrency semantics.
+func (g *GitHub) EnableGETCoalescing() { g.coalesceGETs = true }
+
+// ProbeServer verifies that the configured crq control plane is healthy and,
+// when requested, accepts the writes a daemon needs. It performs no GitHub API
+// operation, so installers can validate their future transport without
+// spending quota or mutating shared state.
+func ProbeServer(ctx context.Context, serverURL, token string, requireWrite bool) error {
+	g, err := NewGitHubViaServer(serverURL, token)
+	if err != nil {
+		return err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	healthURL := strings.TrimSuffix(g.gatewayURL, "/api/github") + "/api/gateway/health"
+	if requireWrite {
+		healthURL += "?write=1"
+	}
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return err
+	}
+	g.decorate(req)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("crq serve health check failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var health struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health); err != nil {
+		return fmt.Errorf("crq serve returned an invalid health response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK || !health.OK {
+		if health.Error == "" {
+			health.Error = resp.Status
+		}
+		return errors.New(health.Error)
+	}
+	return nil
+}
 
 func (g *GitHub) request(ctx context.Context, method, path string, in, out any) error {
 	body, err := marshalBody(in)
@@ -308,28 +440,57 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 	if err != nil {
 		return err
 	}
+	resp, envelope, err := g.graphQLResponse(ctx, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &APIError{Method: http.MethodPost, URL: g.graphBase, Status: resp.StatusCode, Body: string(b)}
+	}
+	if len(envelope.Errors) > 0 {
+		return errors.New(envelope.Errors[0].Message)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(envelope.Data, out)
+}
+
+type graphQLEnvelope struct {
+	Data   json.RawMessage `json:"data"`
+	Errors []struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+// graphQLResponse handles GitHub's semantic HTTP-200 rate-limit response. The
+// gateway uses this same path, so a short-lived remote client never becomes a
+// second owner of GraphQL retry or backoff.
+func (g *GitHub) graphQLResponse(ctx context.Context, body []byte) (*http.Response, graphQLEnvelope, error) {
 	for attempt := 0; ; attempt++ {
 		resp, err := g.send(ctx, http.MethodPost, g.graphBase, body)
 		if err != nil {
-			return err
+			return nil, graphQLEnvelope{}, err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			return &APIError{Method: http.MethodPost, URL: g.graphBase, Status: resp.StatusCode, Body: string(b)}
+			return resp, graphQLEnvelope{}, nil
 		}
-		var envelope struct {
-			Data   json.RawMessage `json:"data"`
-			Errors []struct {
-				Type    string `json:"type"`
-				Message string `json:"message"`
-			} `json:"errors"`
-		}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&envelope)
-		reset := resp.Header.Get("X-RateLimit-Reset")
+		payload, readErr := io.ReadAll(io.LimitReader(resp.Body, maxForwardBody+1))
 		resp.Body.Close()
+		if readErr != nil {
+			return nil, graphQLEnvelope{}, readErr
+		}
+		if len(payload) > maxForwardBody {
+			return nil, graphQLEnvelope{}, fmt.Errorf("GitHub response exceeded %d bytes", maxForwardBody)
+		}
+		var envelope graphQLEnvelope
+		decodeErr := json.Unmarshal(payload, &envelope)
+		reset := resp.Header.Get("X-RateLimit-Reset")
 		if decodeErr != nil {
-			return decodeErr
+			return nil, graphQLEnvelope{}, decodeErr
 		}
 		if len(envelope.Errors) > 0 {
 			msg := envelope.Errors[0].Message
@@ -344,7 +505,7 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 				}
 				wait, known, ok := g.backoffWait(rl, attempt)
 				if !ok {
-					return rl
+					return nil, graphQLEnvelope{}, rl
 				}
 				if g.log != nil {
 					if known {
@@ -354,16 +515,14 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 					}
 				}
 				if serr := SleepCtx(ctx, wait); serr != nil {
-					return serr
+					return nil, graphQLEnvelope{}, serr
 				}
 				continue
 			}
-			return errors.New(msg)
 		}
-		if out == nil {
-			return nil
-		}
-		return json.Unmarshal(envelope.Data, out)
+		resp.Body = io.NopCloser(bytes.NewReader(payload))
+		resp.ContentLength = int64(len(payload))
+		return resp, envelope, nil
 	}
 }
 
@@ -372,6 +531,15 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 var UserAgent = "crq"
 
 func (g *GitHub) decorate(req *http.Request) {
+	if g.gatewayURL != "" {
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-CRQ-Client", "1")
+		if g.gatewayToken != "" {
+			req.Header.Set("Authorization", "Bearer "+g.gatewayToken)
+		}
+		req.Header.Set("User-Agent", UserAgent)
+		return
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Authorization", "Bearer "+g.authToken())
@@ -452,6 +620,13 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 		return nil
 	}
+	// A server-owned GraphQL throttle has no GitHub HTTP rate-limit headers:
+	// GitHub returned it inside a 200 GraphQL envelope. Preserve the typed error
+	// across the gateway without adding Retry-After, which would make the remote
+	// client become a second retry/backoff owner.
+	if kind := strings.TrimSpace(resp.Header.Get("X-CRQ-RateLimit-Kind")); kind != "" {
+		return &RateLimitError{Kind: kind, Remaining: -1}
+	}
 	lower := strings.ToLower(body)
 	// Secondary limit: honor an explicit Retry-After (seconds).
 	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
@@ -493,6 +668,10 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 // It also retries 5xx and backs off GitHub rate limits with the bounded
 // maxRetries/maxWait budget. Real caller cancellation (ctx done) is never retried.
 func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) (*http.Response, error) {
+	requestURL, err := g.transportURL(fullURL)
+	if err != nil {
+		return nil, err
+	}
 	attempt := 0    // bounded retries for 5xx + rate limits
 	netAttempt := 0 // consecutive transient-network retries
 	var offlineSince time.Time
@@ -501,6 +680,13 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 	conditional := method == http.MethodGet && body == nil
 	var cached *etagEntry
 	if conditional {
+		if g.coalesceGETs {
+			release, err := g.acquireGETGate(ctx, fullURL)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
+		}
 		cached = g.etagLookup(fullURL)
 	}
 	for {
@@ -508,7 +694,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		if body != nil {
 			rdr = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, fullURL, rdr)
+		req, err := http.NewRequestWithContext(ctx, method, requestURL, rdr)
 		if err != nil {
 			return nil, err
 		}
@@ -533,7 +719,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				// networkMaxWait <= 0 means no cap: keep retrying until the
 				// network is back (only caller cancellation, handled above, stops us).
 				if g.networkMaxWait > 0 && down > g.networkMaxWait {
-					return nil, fmt.Errorf("github unreachable for %s (%s %s): %w", down.Round(time.Second), method, shortURL(fullURL), err)
+					return nil, fmt.Errorf("%s unreachable for %s (%s %s): %w", g.networkTarget(), down.Round(time.Second), method, shortURL(fullURL), err)
 				}
 				wait := networkRetryWait(g.backoffBase, netAttempt)
 				netAttempt++
@@ -542,7 +728,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 					if g.networkMaxWait > 0 {
 						capStr = g.networkMaxWait.String()
 					}
-					g.log.Printf("github unreachable on %s %s (%v); retrying in %s (offline %s / cap %s)", method, shortURL(fullURL), err, wait.Round(time.Second), down.Round(time.Second), capStr)
+					g.log.Printf("%s unreachable on %s %s (%v); retrying in %s (offline %s / cap %s)", g.networkTarget(), method, shortURL(fullURL), err, wait.Round(time.Second), down.Round(time.Second), capStr)
 				}
 				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
@@ -553,7 +739,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		}
 		// A response came back: connectivity is fine, reset the offline tracker.
 		if !offlineSince.IsZero() && g.log != nil {
-			g.log.Printf("github reachable again after %s offline; resuming", time.Since(offlineSince).Round(time.Second))
+			g.log.Printf("%s reachable again after %s offline; resuming", g.networkTarget(), time.Since(offlineSince).Round(time.Second))
 		}
 		netAttempt, offlineSince = 0, time.Time{}
 		// Retry transient server errors (500/502/503/504).
@@ -654,6 +840,103 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			return nil, err
 		}
 	}
+}
+
+func (g *GitHub) networkTarget() string {
+	if g.gatewayURL != "" {
+		return "crq serve"
+	}
+	return "github"
+}
+
+// transportURL maps a GitHub endpoint onto the server gateway. Pagination
+// links are absolute api.github.com URLs, so mapping happens here rather than
+// only when apiBase is assembled. Refusing every other host is the fail-closed
+// guarantee: a malformed link can never bypass the server and hit GitHub.
+func (g *GitHub) transportURL(fullURL string) (string, error) {
+	if g.gatewayURL == "" {
+		return fullURL, nil
+	}
+	u, err := url.Parse(fullURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Host, "api.github.com") {
+		return "", fmt.Errorf("refusing to bypass crq serve for %q", fullURL)
+	}
+	return g.gatewayURL + u.EscapedPath() + querySuffix(u.RawQuery), nil
+}
+
+func querySuffix(query string) string {
+	if query == "" {
+		return ""
+	}
+	return "?" + query
+}
+
+// ForwardResponse is one GitHub response after the persistent client's retry,
+// backoff and ETag handling has run.
+type ForwardResponse struct {
+	Status int
+	Header http.Header
+	Body   []byte
+}
+
+// Forward executes one relative GitHub API request for the server gateway.
+// Only a direct client may forward, which makes an accidental server->server
+// proxy loop impossible.
+func (g *GitHub) Forward(ctx context.Context, method, requestURI string, body []byte) (ForwardResponse, error) {
+	if g.gatewayURL != "" {
+		return ForwardResponse{}, errors.New("a server-backed GitHub client cannot serve as the gateway")
+	}
+	u, err := url.ParseRequestURI(requestURI)
+	if err != nil || !strings.HasPrefix(requestURI, "/") || u.IsAbs() || u.Host != "" {
+		return ForwardResponse{}, fmt.Errorf("invalid GitHub request URI %q", requestURI)
+	}
+	if method == http.MethodGet && len(body) == 0 {
+		body = nil // preserve conditional-GET caching through the gateway
+	}
+	var resp *http.Response
+	if u.Path == "/graphql" && method == http.MethodPost {
+		resp, _, err = g.graphQLResponse(ctx, body)
+	} else {
+		resp, err = g.send(ctx, method, g.apiBase+requestURI, body)
+	}
+	if err != nil {
+		var api *APIError
+		if errors.As(err, &api) {
+			return ForwardResponse{
+				Status: api.Status,
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body:   []byte(api.Body),
+			}, nil
+		}
+		var throttled *RateLimitError
+		if errors.As(err, &throttled) {
+			header := http.Header{"Content-Type": []string{"application/json"}}
+			if throttled.Kind == "graphql" {
+				header.Set("X-CRQ-RateLimit-Kind", throttled.Kind)
+			}
+			if throttled.Remaining >= 0 {
+				header.Set("X-RateLimit-Remaining", strconv.Itoa(throttled.Remaining))
+			}
+			if !throttled.Until.IsZero() {
+				header.Set("X-RateLimit-Reset", strconv.FormatInt(throttled.Until.Unix(), 10))
+			}
+			payload, marshalErr := json.Marshal(map[string]string{"message": throttled.Error()})
+			if marshalErr != nil {
+				return ForwardResponse{}, marshalErr
+			}
+			return ForwardResponse{Status: http.StatusTooManyRequests, Header: header, Body: payload}, nil
+		}
+		return ForwardResponse{}, err
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxForwardBody+1))
+	if err != nil {
+		return ForwardResponse{}, err
+	}
+	if len(payload) > maxForwardBody {
+		return ForwardResponse{}, fmt.Errorf("GitHub response exceeded %d bytes", maxForwardBody)
+	}
+	return ForwardResponse{Status: resp.StatusCode, Header: resp.Header.Clone(), Body: payload}, nil
 }
 
 // networkRetryWait is exponential backoff that plateaus at 30s, so during a long
@@ -850,6 +1133,9 @@ type Pull struct {
 
 type RepoInfo struct {
 	DefaultBranch string `json:"default_branch"`
+	Permissions   struct {
+		Push bool `json:"push"`
+	} `json:"permissions"`
 }
 
 type IssueComment struct {

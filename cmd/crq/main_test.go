@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,74 @@ import (
 	crqcore "github.com/kristofferR/coderabbit-queue/internal/crq"
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
+
+func TestCheckServerReportsHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/gateway/health" || r.URL.Query().Get("write") != "1" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Error("server health request did not carry the configured token")
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"rev":7}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "secret", true)
+	if !got.Reachable || !got.Healthy || got.Error != "" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
+
+func TestCheckServerReadOnlyProbeOmitsWriteRequirement(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["write"]; ok {
+			http.Error(w, "unexpected write requirement", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "", false)
+	if !got.Reachable || !got.Healthy || got.Error != "" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
+
+func TestCheckServerDistinguishesAnUnhealthyServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"state unavailable"}`))
+	}))
+	defer server.Close()
+
+	got := checkServer(t.Context(), server.URL, "", true)
+	if !got.Reachable || got.Healthy || got.Error != "state unavailable" {
+		t.Fatalf("server health = %+v", got)
+	}
+}
+
+func TestCheckServerRejectsRedirects(t *testing.T) {
+	targetReached := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetReached = true
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	got := checkServer(t.Context(), redirect.URL, "", true)
+	if got.Reachable || got.Healthy || got.Error == "" {
+		t.Fatalf("server health = %+v, want rejected redirect", got)
+	}
+	if targetReached {
+		t.Fatal("server health probe followed the redirect")
+	}
+}
 
 func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
 	if got := watchDispatchOption(true, false); got != nil {

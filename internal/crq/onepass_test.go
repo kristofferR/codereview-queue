@@ -121,6 +121,90 @@ func TestOnePassDoesNotFinalizeACompletedRoundWithoutReviewEvidence(t *testing.T
 	}
 }
 
+func TestOnePassCompletedRoundRejectsGenericSummaryMarkersAsReviewEvidence(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 37, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		setup func(*replayFixture, string, int)
+	}{
+		{
+			name: "summary-only bot comment",
+			setup: func(f *replayFixture, repo string, pr int) {
+				f.botComment(repo, pr, 41, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base)
+			},
+		},
+		{
+			name: "review-skipped bot comment",
+			setup: func(f *replayFixture, repo string, pr int) {
+				f.botComment(repo, pr, 42, corpusMessage(t, "coderabbit/review-skipped-too-many-files.md"), base)
+			},
+		},
+		{
+			name: "author-controlled pull body",
+			setup: func(f *replayFixture, repo string, pr int) {
+				f.gh.mu.Lock()
+				defer f.gh.mu.Unlock()
+				pull := f.gh.pulls[fakeKey(repo, pr)]
+				pull.Body = "summarize by coderabbit.ai"
+				f.gh.pulls[fakeKey(repo, pr)] = pull
+			},
+		},
+		{
+			name: "empty submitted-review carrier",
+			setup: func(f *replayFixture, repo string, pr int) {
+				f.gh.mu.Lock()
+				defer f.gh.mu.Unlock()
+				review := ghapi.Review{CommitID: "bcbcbcbc12345678", State: "COMMENTED", Body: ""}
+				review.User.Login = f.bot
+				f.gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReplayFixture(t, base)
+			repo, pr, head := "owner/security", 920+i, "bcbcbcbc12345678"
+			f.openPull(repo, pr, head)
+			f.setCommitDate(head, base.Add(-time.Minute))
+			f.setLocalWork(false, "")
+			enableOnePass(t, f, repo, "squash")
+			seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseCompleted, base, 0)
+			tc.setup(f, repo, pr)
+
+			report, err := f.svc.nextAutomated(f.ctx, repo, pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Action != string(engine.ActionBlocked) ||
+				!strings.Contains(report.Reason, "without review evidence") ||
+				hasOnePassFinalizer(report.Findings) {
+				t.Fatalf("generic marker report = %+v, want campaign merge authorization refused", report)
+			}
+		})
+	}
+}
+
+func TestOnePassCompletedRoundAcceptsClassifiedCleanReviewComment(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 39, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 924, "bdbdbdbd12345678"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	enableOnePass(t, f, repo, "squash")
+	seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseCompleted, base, 0)
+	f.botComment(repo, pr, 43, corpusMessage(t, "coderabbit/no-actionable-comments.md"), base)
+
+	report, err := f.svc.nextAutomated(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionFix) || !hasOnePassFinalizer(report.Findings) {
+		t.Fatalf("classified clean review report = %+v, want the one-pass finalizer", report)
+	}
+}
+
 func TestDispatchRejectsFinalizerFromEndedCampaign(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 40, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

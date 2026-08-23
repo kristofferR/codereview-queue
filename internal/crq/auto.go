@@ -462,6 +462,16 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		if review.CommitID == "" {
 			continue
 		}
+		// Match observe's carrier filter. CodeRabbit posts an empty COMMENTED
+		// review object before its real review body and inline comments finish;
+		// that transport shell cannot consume a campaign's only review round.
+		if cfg.isConfiguredBot(review.User.Login) &&
+			strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "" {
+			continue
+		}
+		if strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
 		if login == bot {
 			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
@@ -532,11 +542,22 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		Primary: cfg.classifierPrimary(), CoReviewers: cfg.classifierCoReviewers(),
 	}
 	for _, comment := range comments {
-		if marker != "" && dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, marker) {
+		event := classifier.Classify(comment.User.Login, comment.Body, comment.ID, comment.CreatedAt, comment.UpdatedAt)
+		if anyConfigured && dialect.NormalizeBotName(comment.User.Login) == bot &&
+			event.Kind == dialect.EvNoAction && !event.SummaryOnly {
 			return false, head, nil
 		}
-		if configuredScope && cfg.coBotEnabled(comment.User.Login) &&
-			classifier.Classify(comment.User.Login, comment.Body, comment.ID, comment.CreatedAt, comment.UpdatedAt).Kind == dialect.EvCoClean {
+		if marker != "" && dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, marker) {
+			// The marker appears in CodeRabbit's summary-only, skipped,
+			// in-progress and failed comments too. Ordinary first-review mode
+			// retains its legacy marker behavior, but a one-pass campaign may
+			// merge after this decision and therefore requires a classified clean
+			// completion when no submitted review object exists.
+			if !anyConfigured {
+				return false, head, nil
+			}
+		}
+		if configuredScope && cfg.coBotEnabled(comment.User.Login) && event.Kind == dialect.EvCoClean {
 			return false, head, nil
 		}
 	}
@@ -544,7 +565,9 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
-	if marker != "" && strings.Contains(pull.Body, marker) {
+	// A pull-request author controls this body. It remains a compatibility
+	// marker for ordinary first-review enrollment, never campaign merge proof.
+	if !anyConfigured && marker != "" && strings.Contains(pull.Body, marker) {
 		return false, head, nil
 	}
 	announce(repo, pr, head, "never reviewed")

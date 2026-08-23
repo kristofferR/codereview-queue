@@ -1465,6 +1465,10 @@ const DispatchTTL = 10 * time.Minute
 // this head has had.
 type DispatchClaim struct {
 	Host string `json:"host"`
+	// OnePass binds this session to the campaign policy that granted it. A
+	// repository setting can change while the process runs; completion must not
+	// reinterpret an older ordinary session as the campaign's merge hand-off.
+	OnePass bool `json:"one_pass,omitempty"`
 	// Token distinguishes two claims from the same host, so a restarted watcher
 	// cannot heartbeat or release the claim of the process it replaced.
 	Token     string    `json:"token"`
@@ -1668,6 +1672,26 @@ func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 		s.Dispatches = map[string]DispatchClaim{}
 	}
 	s.Dispatches[Key(repo, pr)] = claim
+}
+
+// OnePassDispatch reports whether token owns a claim created by one-pass mode.
+// The independent claim map survives the session pushing and archiving its
+// round, while the round scans preserve compatibility with older state shapes.
+func (s *State) OnePassDispatch(repo string, pr int, token string) bool {
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		return claim.OnePass
+	}
+	if round := s.Round(repo, pr); round != nil && round.Dispatch != nil && round.Dispatch.Token == token {
+		return round.Dispatch.OnePass
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Dispatch != nil && round.Dispatch.Token == token {
+			return round.Dispatch.OnePass
+		}
+	}
+	return false
 }
 
 // Live reports whether a session is still behind this claim: a heartbeat within

@@ -416,14 +416,14 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 // It announces each "yes" to the log, which is what makes an autoreview pass
 // explain the work it queued.
 func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, string, error) {
-	return s.reviewNeeded(ctx, state, repo, pr, incremental, s.logEnqueue)
+	return s.reviewNeeded(ctx, state, repo, pr, incremental, false, s.logEnqueue)
 }
 
 // reviewNeeded is the predicate itself, with the announcement injected. The
 // enrollment preview asks exactly this question about pull requests it is not
 // enqueueing, and an "enqueue …" line from a dialog that wrote nothing is how an
 // estimate reads as an action already taken.
-func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
+func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental, anyConfigured bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
@@ -447,6 +447,7 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	cfg := s.cfgFor(state, repo)
 	bot := dialect.NormalizeBotName(cfg.Bot)
 	lastBotReview := ""
+	reviewedEver := map[string]bool{}
 	// Every reviewer this repository gates on, not just the primary. A repo that
 	// requires Codex or Bugbot and already has a CodeRabbit review at the head
 	// would otherwise never be enqueued, so the reviewer it chose is never asked.
@@ -460,6 +461,7 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
 		reviewedHere[login] = dialect.ShortOID(review.CommitID)
+		reviewedEver[login] = true
 	}
 	if incremental {
 		need := lastBotReview != head
@@ -477,18 +479,36 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		}
 		return need, head, nil
 	}
-	// First-review mode is about the PR, not specifically the metered primary.
-	// A primary-off repository reviewed only by Codex has already spent its one
-	// round just as surely as a CodeRabbit repository has. Looking only at Bot
-	// made --no-incremental continuously enqueue Codex-only repositories.
-	if len(cfg.Reviewers) == 0 && lastBotReview != "" {
+	// Ordinary --no-incremental retains its historical contract: it asks only
+	// whether the primary has ever reviewed this PR. A one-pass campaign opts
+	// into the broader PR-wide cap, where any configured reviewer consumes the
+	// single allowed review.
+	configuredScope := anyConfigured || cfg.PrimaryOff
+	if !configuredScope && lastBotReview != "" {
 		// Programmatic/legacy Config values predate the canonical reviewer list;
 		// Bot is their primary reviewer and remains a valid one-round marker.
 		return false, head, nil
 	}
-	for _, reviewer := range cfg.Reviewers {
-		if reviewedHere[dialect.NormalizeBotName(reviewer.Login)] != "" {
+	if configuredScope {
+		if len(cfg.Reviewers) == 0 && lastBotReview != "" {
 			return false, head, nil
+		}
+		for _, reviewer := range cfg.Reviewers {
+			if reviewedEver[dialect.NormalizeBotName(reviewer.Login)] {
+				return false, head, nil
+			}
+		}
+		if cfg.coChecksRelevant() {
+			runs, err := s.gh.ListCheckRuns(ctx, repo, head)
+			if err != nil {
+				return false, "", err
+			}
+			for _, run := range runs {
+				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
+				if cfg.coBotEnabled(login) && (verdict == dialect.CheckDone || verdict == dialect.CheckDoneClean) {
+					return false, head, nil
+				}
+			}
 		}
 	}
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)

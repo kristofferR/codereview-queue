@@ -968,6 +968,12 @@ func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dial
 	}
 	out := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
+		// This is workflow control, not reviewer feedback. Filtering it would
+		// leave a clean one-pass campaign with no finalizer and no merge.
+		if finding.Source == onePassFinalizeSource {
+			out = append(out, finding)
+			continue
+		}
 		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
 		if severity == "" {
 			severity = "unknown"
@@ -1255,6 +1261,7 @@ func (s *Service) claimDispatchModels(
 			reason, byDesign = why, true
 			return ErrNoChange
 		}
+		round.Dispatch.OnePass = claimCfg.OnePass
 		selectedModel = round.Dispatch.Model
 		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)

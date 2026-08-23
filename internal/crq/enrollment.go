@@ -543,7 +543,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 			// as newly eligible promised a backlog, and a bill for it, that the
 			// next auto-review pass deduplicates on sight. Incremental, because
 			// that is how the daemon runs unless someone passes --no-incremental.
-			need, _, nerr := s.reviewNeeded(ctx, st, repo, pr.Number, true, noAnnounce)
+			need, _, nerr := s.reviewNeeded(ctx, st, repo, pr.Number, true, false, noAnnounce)
 			if nerr != nil {
 				if ghapi.IsThrottled(nerr) {
 					return false, nerr

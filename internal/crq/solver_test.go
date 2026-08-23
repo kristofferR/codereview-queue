@@ -50,6 +50,34 @@ func TestOnePassSolverIsTemporaryAndRepositoryScoped(t *testing.T) {
 	}
 }
 
+func TestMergePolicyChangePreservesCompletedOnePassHandoff(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	on, squash := true, "squash"
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on, MergeMethod: &squash}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "test", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	off := ""
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &off}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, ok := st.OnePassProgressFor("o/r", 7); !ok || progress.ReadyHead != "abcdef123" {
+		t.Fatalf("merge-only change discarded handoff: %+v, present %t", progress, ok)
+	}
+}
+
 // Solver settings exist so two repositories the same watcher handles can be
 // fixed differently, so what this pins is the layering and — because these
 // values are handed to an agent's command line — the validation that stops a
@@ -69,6 +97,9 @@ func TestSolverLayering(t *testing.T) {
 	}
 	if view.Overridden || view.MaxAttempts != 3 || view.Model != "" {
 		t.Fatalf("view = %+v, want the env values with no record", view)
+	}
+	if view.Sources["one_pass"] != "default" || view.Sources["merge_method"] != "default" {
+		t.Fatalf("campaign defaults reported wrong sources: %+v", view.Sources)
 	}
 	if view.Agent != "/usr/bin/claude" {
 		t.Errorf("agent = %q, want the fleet's — it is baked into the session script", view.Agent)

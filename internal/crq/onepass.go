@@ -75,7 +75,7 @@ func (s *Service) onePassNext(
 			// path must advance this queued round.
 			probe := cloneState(st)
 			delete(probe.Rounds, QueueKey(report.Repo, report.PR))
-			need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, noAnnounce)
+			need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
 			if err != nil {
 				return report, true, err
 			}
@@ -83,6 +83,16 @@ func (s *Service) onePassNext(
 				return report, false, nil
 			}
 			reviewed = true
+			// Persist the one-pass decision before handing work to the fixer. A
+			// queued marker left fire-eligible can otherwise be restored after
+			// the session and spend a second review round.
+			result, err := s.dedupeRound(ctx, cfg, *round, s.clock(), "one-pass review already consumed")
+			if err != nil {
+				return report, true, err
+			}
+			if result.Action != "deduped" {
+				return report, true, nil
+			}
 		case PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
 			// Findings bound to this head are the review answer. Without them,
 			// this is still the one existing round and must finish or block; it
@@ -96,7 +106,7 @@ func (s *Service) onePassNext(
 	if !reviewed {
 		probe := cloneState(st)
 		delete(probe.Rounds, QueueKey(report.Repo, report.PR))
-		need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, noAnnounce)
+		need, _, err := s.reviewNeeded(ctx, probe, report.Repo, report.PR, false, true, noAnnounce)
 		if err != nil {
 			return report, true, err
 		}
@@ -106,6 +116,12 @@ func (s *Service) onePassNext(
 		return report, false, nil
 	}
 	if action.Kind == engine.ActionPush {
+		return report, true, nil
+	}
+	// A completed review can still be inside its settle window while trailing
+	// inline findings arrive. Preserve that wait; launching the finalizer now
+	// would let it release and merge before those findings are observable.
+	if action.Kind == engine.ActionWait && len(action.Pending) == 0 {
 		return report, true, nil
 	}
 
@@ -144,6 +160,7 @@ func (s *Service) completeUnsuccessfulDispatch(
 	token string,
 ) error {
 	st, err := s.store.Update(ctx, func(st *State) error {
+		onePass := st.OnePassDispatch(report.Repo, report.PR, token)
 		released := st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
 		if round := st.Round(report.Repo, report.PR); round != nil && round.ReleaseDispatch(token) {
 			st.PutRound(*round)
@@ -152,7 +169,7 @@ func (s *Service) completeUnsuccessfulDispatch(
 		if !released {
 			return ErrNoChange
 		}
-		if s.cfgFor(*st, report.Repo).OnePass {
+		if onePass {
 			st.MarkOnePassAttempted(report.Repo, report.PR, report.Head, s.cfg.Host, s.clock())
 		}
 		return nil
@@ -174,12 +191,13 @@ func (s *Service) completeSuccessfulDispatch(
 ) error {
 	var marked bool
 	st, err := s.store.Update(ctx, func(st *State) error {
+		onePass := st.OnePassDispatch(report.Repo, report.PR, token)
 		released := st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
 		if round := st.Round(report.Repo, report.PR); round != nil && round.ReleaseDispatch(token) {
 			st.PutRound(*round)
 			released = true
 		}
-		if s.cfgFor(*st, report.Repo).OnePass {
+		if onePass {
 			if !released {
 				return errors.New("the successful fixer no longer owns its dispatch claim")
 			}
@@ -194,9 +212,7 @@ func (s *Service) completeSuccessfulDispatch(
 	if err != nil {
 		return err
 	}
-	if marked {
-		s.sync(ctx, st)
-	}
+	s.sync(ctx, st)
 	return nil
 }
 
@@ -215,6 +231,9 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	}
 	if !st.AutofixEnabled(repo) {
 		return true, false, "post-fix merge is paused because autofix is off for this repository", nil
+	}
+	if s.cfg.DryRun {
+		return true, false, "dry run: exact-head merge not performed", nil
 	}
 
 	pull, err := s.gh.GetPull(ctx, repo, pr)

@@ -458,8 +458,9 @@ account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocke
 state cannot be read, it falls back to running the local CLI normally. Set
 `CRQ_PREFLIGHT_SKIP_BLOCKED=0` to force the CLI request instead.
 
-For a temporary bulk campaign, `--one-pass on` caps each PR at its first review round and then
-dispatches one fixer/finalizer even when that review was clean. `--merge squash` (or `merge` /
+For a temporary bulk campaign, `--one-pass on` caps each PR at the first review recorded anywhere
+on the PR, including reviews recorded before one-pass was enabled, and then dispatches one
+fixer/finalizer even when that review was clean. `--merge squash` (or `merge` /
 `rebase`) makes the autofix watcher merge only the exact head that session released, as soon as
 GitHub reports no merge conflict. Review and check status are deliberately ignored: the fixer push
 makes the one allowed review stale, and waiting for a new one would turn this mode back into a

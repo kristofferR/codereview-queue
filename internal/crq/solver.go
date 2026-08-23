@@ -100,6 +100,12 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	source("skip_authors", own.SetSkipAuthors, fleet.SetSkipAuthors)
 	source("one_pass", own.SetOnePass, fleet.SetOnePass)
 	source("merge_method", own.SetMerge, fleet.SetMerge)
+	if !own.SetOnePass && !fleet.SetOnePass {
+		view.Sources["one_pass"] = "default"
+	}
+	if !own.SetMerge && !fleet.SetMerge {
+		view.Sources["merge_method"] = "default"
+	}
 
 	// This host's own answer when it runs fix sessions, and the fleet's
 	// self-reports otherwise. The dashboard is normally the second case: the
@@ -211,7 +217,7 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			cleared := st.ClearSolver(repo)
 			after := st.EffectiveSolver(repo)
 			progress := false
-			if before.OnePass != after.OnePass || before.MergeMethod != after.MergeMethod {
+			if before.OnePass != after.OnePass {
 				progress = st.ClearOnePassRepo(repo)
 			}
 			if !cleared && !progress {
@@ -232,7 +238,7 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			cleared := st.ClearSolver(repo)
 			after := st.EffectiveSolver(repo)
 			progress := false
-			if before.OnePass != after.OnePass || before.MergeMethod != after.MergeMethod {
+			if before.OnePass != after.OnePass {
 				progress = st.ClearOnePassRepo(repo)
 			}
 			if !cleared && !progress {
@@ -245,7 +251,7 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			return errors.New("post-fix merge requires one-pass review mode")
 		}
 		before := st.EffectiveSolver(repo)
-		if before.OnePass != effective.OnePass || before.MergeMethod != effective.MergeMethod {
+		if before.OnePass != effective.OnePass {
 			st.ClearOnePassRepo(repo)
 		}
 		st.SetSolver(repo, next, s.cfg.Host, now)

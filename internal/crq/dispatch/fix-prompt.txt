@@ -74,6 +74,8 @@ correctness, and run the documented checks. Commit and push only if the branch
 changed. Do not run steps 5-7 for that synthetic item: it has no review thread
 to account for, and no second review round will be requested.
 
-Hard limits: do not open pull requests, do not merge anything, do not force-push,
-do not touch code unrelated to the findings, do not change another repository.
+Hard limits: do not open pull requests; do not merge or close the pull request on
+GitHub (the base-branch integration described above is allowed); do not
+force-push; do not touch code unrelated to the findings; do not change another
+repository.
 If the findings are already fixed, resolve their threads and stop.

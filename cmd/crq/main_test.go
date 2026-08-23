@@ -57,6 +57,27 @@ func TestCheckServerDistinguishesAnUnhealthyServer(t *testing.T) {
 	}
 }
 
+func TestCheckServerRejectsRedirects(t *testing.T) {
+	targetReached := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetReached = true
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	got := checkServer(t.Context(), redirect.URL, "", true)
+	if got.Reachable || got.Healthy || got.Error == "" {
+		t.Fatalf("server health = %+v, want rejected redirect", got)
+	}
+	if targetReached {
+		t.Fatal("server health probe followed the redirect")
+	}
+}
+
 func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
 	if got := watchDispatchOption(true, false); got != nil {
 		t.Errorf("default dispatch = %v, want the configured default", *got)

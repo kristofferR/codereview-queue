@@ -2348,12 +2348,17 @@ func checkServer(ctx context.Context, serverURL, token string, requireWrite bool
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("refusing redirect from crq serve")
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	result.Reachable = true
 	var health struct {
 		OK    bool   `json:"ok"`

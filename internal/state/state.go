@@ -590,6 +590,11 @@ type State struct {
 	// reopened after its historical rounds have been evicted, and a silent
 	// check-only reviewer still needs to be eligible for self-heal then.
 	CoActivity map[string]map[string]time.Time `json:"co_activity,omitempty"`
+	// CoAnswers keeps durable proof that each co-reviewer completed a review on
+	// the pull request. Generic activity is deliberately not enough for the
+	// one-pass review cap: an in-progress, auxiliary, or failed check did not
+	// deliver a review.
+	CoAnswers map[string]map[string]time.Time `json:"co_answers,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -665,7 +670,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 13
+const WriterCaps = 14
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -703,7 +708,7 @@ const CapsSolver = 8
 
 // CapsOnePass is the capability required by both autoreview and autofix hosts
 // to honour the one-review cap and the fixer-to-merge hand-off.
-const CapsOnePass = 13
+const CapsOnePass = 14
 
 // CapsPreflightSkipBlocked is the capability that makes the shared
 // CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local
@@ -1232,6 +1237,10 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 func (s *State) rememberCoActivity(r Round) {
 	key := Key(r.Repo, r.PR)
 	for login, co := range r.CoBots {
+		login = coBotKey(login)
+		if co.AnsweredAt != nil {
+			s.rememberCoAnswer(key, login, *co.AnsweredAt)
+		}
 		seenAt := co.SeenActiveAt
 		if co.AnsweredAt != nil && (seenAt == nil || seenAt.Before(*co.AnsweredAt)) {
 			seenAt = co.AnsweredAt
@@ -1247,12 +1256,53 @@ func (s *State) rememberCoActivity(r Round) {
 			activity = map[string]time.Time{}
 			s.CoActivity[key] = activity
 		}
-		login = coBotKey(login)
 		seen := seenAt.UTC()
 		if previous, ok := activity[login]; !ok || previous.Before(seen) {
 			activity[login] = seen
 		}
 	}
+}
+
+func (s *State) rememberCoAnswer(key, login string, at time.Time) {
+	if s.CoAnswers == nil {
+		s.CoAnswers = map[string]map[string]time.Time{}
+	}
+	answers := s.CoAnswers[key]
+	if answers == nil {
+		answers = map[string]time.Time{}
+		s.CoAnswers[key] = answers
+	}
+	answered := at.UTC()
+	login = coBotKey(login)
+	if previous, ok := answers[login]; !ok || previous.Before(answered) {
+		answers[login] = answered
+	}
+}
+
+// RememberCoAnswer records completed-review evidence when its source round was
+// superseded before the observation could be written back to that round.
+func (s *State) RememberCoAnswer(repo string, pr int, login string, at time.Time) {
+	s.rememberCoAnswer(Key(repo, pr), login, at)
+}
+
+// CoReviewerAnswered reports durable completed-review evidence for login on
+// this pull request. The round scans retain compatibility with state written
+// before the unbounded answer index existed.
+func (s *State) CoReviewerAnswered(repo string, pr int, login string) bool {
+	key, login := Key(repo, pr), coBotKey(login)
+	if answers := s.CoAnswers[key]; !answers[login].IsZero() {
+		return true
+	}
+	if round := s.Round(repo, pr); round != nil && round.Co(login).AnsweredAt != nil {
+		return true
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Co(login).AnsweredAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // RememberCoActivity folds a round's reviewer activity into the durable per-PR
@@ -1469,6 +1519,9 @@ type DispatchClaim struct {
 	// repository setting can change while the process runs; completion must not
 	// reinterpret an older ordinary session as the campaign's merge hand-off.
 	OnePass bool `json:"one_pass,omitempty"`
+	// OnePassCampaign prevents a fixer finishing after one-pass was disabled
+	// from recreating a hand-off in a later campaign.
+	OnePassCampaign string `json:"one_pass_campaign,omitempty"`
 	// Token distinguishes two claims from the same host, so a restarted watcher
 	// cannot heartbeat or release the claim of the process it replaced.
 	Token     string    `json:"token"`
@@ -1678,20 +1731,27 @@ func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 // The independent claim map survives the session pushing and archiving its
 // round, while the round scans preserve compatibility with older state shapes.
 func (s *State) OnePassDispatch(repo string, pr int, token string) bool {
+	onePass, _ := s.OnePassDispatchCampaign(repo, pr, token)
+	return onePass
+}
+
+// OnePassDispatchCampaign returns the campaign identity recorded when token's
+// one-pass claim was granted.
+func (s *State) OnePassDispatchCampaign(repo string, pr int, token string) (bool, string) {
 	key := Key(repo, pr)
 	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
-		return claim.OnePass
+		return claim.OnePass, claim.OnePassCampaign
 	}
 	if round := s.Round(repo, pr); round != nil && round.Dispatch != nil && round.Dispatch.Token == token {
-		return round.Dispatch.OnePass
+		return round.Dispatch.OnePass, round.Dispatch.OnePassCampaign
 	}
 	for i := range s.Archive {
 		round := &s.Archive[i]
 		if Key(round.Repo, round.PR) == key && round.Dispatch != nil && round.Dispatch.Token == token {
-			return round.Dispatch.OnePass
+			return round.Dispatch.OnePass, round.Dispatch.OnePassCampaign
 		}
 	}
-	return false
+	return false, ""
 }
 
 // Live reports whether a session is still behind this claim: a heartbeat within

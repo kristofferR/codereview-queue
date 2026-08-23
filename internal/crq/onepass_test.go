@@ -270,6 +270,7 @@ func TestSuccessfulOnePassDispatchIsReadyForImmediateMerge(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 57, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr, head, token := "owner/security", 851, "afafafaf12345678", "one-pass-session"
+	enableOnePass(t, f, repo, "squash")
 	if _, err := f.store.Update(f.ctx, func(st *State) error {
 		round, err := st.NewRound(repo, pr, head[:9], base)
 		if err != nil {
@@ -279,6 +280,7 @@ func TestSuccessfulOnePassDispatchIsReadyForImmediateMerge(t *testing.T) {
 			return errors.New(why)
 		}
 		round.Dispatch.OnePass = true
+		round.Dispatch.OnePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
 		st.RememberDispatch(repo, pr, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
@@ -299,6 +301,64 @@ func TestSuccessfulOnePassDispatchIsReadyForImmediateMerge(t *testing.T) {
 	}
 	if progress, ok := st.OnePassProgressFor(repo, pr); !ok || progress.ReadyHead != head {
 		t.Fatalf("ready handoff = %+v, ok=%t", progress, ok)
+	}
+}
+
+func TestOnePassCompletionFromReplacedCampaignIsDiscarded(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 58, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, head := "owner/security", "bfbfbfbf12345678"
+	enableOnePass(t, f, repo, "squash")
+	seedClaim := func(pr int, token string) {
+		t.Helper()
+		if _, err := f.store.Update(f.ctx, func(st *State) error {
+			round, err := st.NewRound(repo, pr, head[:9], base)
+			if err != nil {
+				return err
+			}
+			if ok, why := round.ClaimDispatchModels("test", token, base, 1, []string{"gpt-5.6-sol"}); !ok {
+				return errors.New(why)
+			}
+			round.Dispatch.OnePass = true
+			round.Dispatch.OnePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+			st.RememberDispatch(repo, pr, *round.Dispatch)
+			st.PutRound(*round)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedClaim(852, "successful-old-campaign")
+	seedClaim(853, "failed-old-campaign")
+
+	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{UnsetOnePass: true, UnsetMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	on, one, method := true, 1, "squash"
+	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{OnePass: &on, MergeMethod: &method, MaxAttempts: &one}); err != nil {
+		t.Fatal(err)
+	}
+
+	marked, err := f.svc.completeSuccessfulDispatch(f.ctx,
+		NextReport{Repo: repo, PR: 852, Head: head}, "successful-old-campaign", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked {
+		t.Fatal("a successful fixer from the previous campaign recreated a ready hand-off")
+	}
+	if err := f.svc.completeUnsuccessfulDispatch(f.ctx,
+		NextReport{Repo: repo, PR: 853, Head: head}, "failed-old-campaign"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range []int{852, 853} {
+		if progress, ok := st.OnePassProgressFor(repo, pr); ok {
+			t.Fatalf("PR %d recreated stale one-pass progress: %+v", pr, progress)
+		}
 	}
 }
 
@@ -622,7 +682,7 @@ func TestOnePassReviewCapRecognizesCompletedBugbotCheck(t *testing.T) {
 	}
 }
 
-func TestOnePassReviewCapRecognizesPriorHeadBugbotActivity(t *testing.T) {
+func TestOnePassReviewCapRejectsPriorHeadBugbotActivityWithoutAnswer(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.Reviewers = []Reviewer{
@@ -654,8 +714,45 @@ func TestOnePassReviewCapRecognizesPriorHeadBugbotActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !need {
+		t.Fatal("prior-head Bugbot activity consumed the one-pass review cap without a completed answer")
+	}
+}
+
+func TestOnePassReviewCapRecognizesPriorHeadBugbotAnswer(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = []Reviewer{
+		{Login: cfg.Bot, Required: true, Budget: dialect.BudgetAccount},
+		{Login: dialect.BugbotLogin, Name: "Bugbot", Budget: dialect.BudgetNone},
+	}
+	cfg.CoBots = []CoBotConfig{{Name: "bugbot", Login: dialect.BugbotLogin}}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	repo, pr, head := "owner/bugbot", 41, "cccccccc12345678"
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	answered := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoAnswers = map[string]map[string]time.Time{
+			QueueKey(repo, pr): {dialect.NormalizeBotName(dialect.BugbotLogin): answered},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need, _, err := svc.reviewNeeded(ctx, st, repo, pr, false, true, noAnnounce)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if need {
-		t.Fatal("prior-head Bugbot activity did not consume the one-pass review cap")
+		t.Fatal("prior-head Bugbot answer did not consume the one-pass review cap")
 	}
 }
 

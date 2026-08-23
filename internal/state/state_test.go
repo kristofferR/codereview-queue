@@ -458,6 +458,23 @@ func TestCoActivityTracksCrossHeadProvenance(t *testing.T) {
 	}
 }
 
+func TestCoAnswerIndexDistinguishesCompletionFromParticipation(t *testing.T) {
+	s := State{}
+	participating := Round{Repo: "owner/repo", PR: 12}
+	participating.NoteCoParticipation("cursor[bot]", t0)
+	s.PutRound(participating)
+	if s.CoReviewerAnswered(participating.Repo, participating.PR, "cursor[bot]") {
+		t.Fatal("generic participation was indexed as a completed answer")
+	}
+
+	answered := Round{Repo: "owner/repo", PR: 13}
+	answered.NoteCoAnswer("cursor[bot]", t0.Add(time.Minute))
+	s.PutRound(answered)
+	if !s.CoReviewerAnswered(answered.Repo, answered.PR, "cursor[bot]") {
+		t.Fatal("completed answer was not indexed durably")
+	}
+}
+
 func TestCoParticipationReplacesCarriedProvenance(t *testing.T) {
 	var r Round
 	r.NoteCoActivity("cursor[bot]", t0)

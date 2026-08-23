@@ -226,9 +226,10 @@ crq repos add "$REPO"
 
 One-pass counts any configured review already present on the PR, so enabling it mid-campaign does
 not buy another round. The watcher always runs one fixer/finalizer, including after a clean review,
-then merges only the exact head that session released and only when GitHub reports it clean. A moved
-head, failed fixer, draft, conflict, or failing check blocks without a second fixer or an unverified
-merge. If `crq solver` reports `lagging_hosts`, upgrade and reinstall those autoreview/autofix
+then merges only the exact head that session released once GitHub reports it conflict-free. Review
+and check status are deliberately ignored because the fixer push makes the one allowed review stale.
+A moved head, failed fixer, draft, or conflict blocks without a second fixer or an unverified merge.
+If `crq solver` reports `lagging_hosts`, upgrade and reinstall those autoreview/autofix
 daemons before enrollment. Restore ordinary behavior afterwards with `crq solver clear "$REPO"`.
 Use `crq solver set "$REPO" --inherit one-pass,merge` instead when unrelated repository solver
 overrides must be preserved; `clear` is appropriate when the command above created the whole

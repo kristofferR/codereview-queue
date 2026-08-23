@@ -62,6 +62,9 @@ type SolverSettings struct {
 	// should keep the normal incremental review loop.
 	OnePass    bool `json:"one_pass,omitempty"`
 	SetOnePass bool `json:"set_one_pass,omitempty"`
+	// OnePassCampaign identifies the particular off-to-on transition. A fixer
+	// claim must still belong to this campaign when it completes.
+	OnePassCampaign string `json:"one_pass_campaign,omitempty"`
 	// MergeMethod is empty/off, merge, squash, or rebase. SetMerge distinguishes
 	// an explicit off from inheritance. A merge is attempted only after the
 	// one-pass fixer completed successfully for the exact current head.
@@ -88,7 +91,7 @@ func (s SolverSettings) Empty() bool {
 		!s.SetEffort && s.Effort == "" && !s.SetPrompt && s.Prompt == "" &&
 		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 &&
 		!s.SetAskMode && s.AskMode == "" &&
-		s.Forks == nil && !s.SetSkipAuthors && !s.SetOnePass && !s.SetMerge &&
+		s.Forks == nil && !s.SetSkipAuthors && !s.SetOnePass && s.OnePassCampaign == "" && !s.SetMerge &&
 		len(s.unknown) == 0
 }
 
@@ -135,6 +138,7 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 	}
 	if over.SetOnePass {
 		out.OnePass, out.SetOnePass = over.OnePass, true
+		out.OnePassCampaign = over.OnePassCampaign
 	}
 	if over.SetMerge {
 		out.MergeMethod, out.SetMerge = over.MergeMethod, true

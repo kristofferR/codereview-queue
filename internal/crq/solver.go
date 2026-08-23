@@ -211,6 +211,7 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 		return SolverView{}, err
 	}
 	now := s.clock().UTC()
+	campaign := randomToken()
 	st, err := s.store.Update(ctx, func(st *State) error {
 		if change.Clear {
 			before := st.EffectiveSolver(repo)
@@ -253,6 +254,11 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 		before := st.EffectiveSolver(repo)
 		if before.OnePass != effective.OnePass {
 			st.ClearOnePassRepo(repo)
+		}
+		if !before.OnePass && effective.OnePass {
+			next.OnePassCampaign = campaign
+		} else if !effective.OnePass {
+			next.OnePassCampaign = ""
 		}
 		st.SetSolver(repo, next, s.cfg.Host, now)
 		return nil
@@ -440,9 +446,12 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		sv.SkipAuthors, sv.SetSkipAuthors = authors, true
 	}
 	if change.UnsetOnePass {
-		sv.OnePass, sv.SetOnePass = false, false
+		sv.OnePass, sv.SetOnePass, sv.OnePassCampaign = false, false, ""
 	} else if change.OnePass != nil {
 		sv.OnePass, sv.SetOnePass = *change.OnePass, true
+		if !sv.OnePass {
+			sv.OnePassCampaign = ""
+		}
 	}
 	if change.UnsetMerge {
 		sv.MergeMethod, sv.SetMerge = "", false

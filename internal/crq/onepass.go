@@ -193,7 +193,9 @@ func (s *Service) completeUnsuccessfulDispatch(
 	token string,
 ) error {
 	st, err := s.store.Update(ctx, func(st *State) error {
-		onePass := st.OnePassDispatch(report.Repo, report.PR, token)
+		onePass, campaign := st.OnePassDispatchCampaign(report.Repo, report.PR, token)
+		solver := st.EffectiveSolver(report.Repo)
+		onePass = onePass && solver.OnePass && solver.OnePassCampaign == campaign
 		released := st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
 		if round := st.Round(report.Repo, report.PR); round != nil && round.ReleaseDispatch(token) {
 			st.PutRound(*round)
@@ -224,7 +226,9 @@ func (s *Service) completeSuccessfulDispatch(
 ) (bool, error) {
 	var marked bool
 	st, err := s.store.Update(ctx, func(st *State) error {
-		onePass := st.OnePassDispatch(report.Repo, report.PR, token)
+		onePass, campaign := st.OnePassDispatchCampaign(report.Repo, report.PR, token)
+		solver := st.EffectiveSolver(report.Repo)
+		onePass = onePass && solver.OnePass && solver.OnePassCampaign == campaign
 		released := st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
 		if round := st.Round(report.Repo, report.PR); round != nil && round.ReleaseDispatch(token) {
 			st.PutRound(*round)

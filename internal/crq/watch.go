@@ -1319,6 +1319,7 @@ func (s *Service) claimDispatchModels(
 			return ErrNoChange
 		}
 		round.Dispatch.OnePass = claimCfg.OnePass
+		round.Dispatch.OnePassCampaign = solver.OnePassCampaign
 		selectedModel = round.Dispatch.Model
 		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)

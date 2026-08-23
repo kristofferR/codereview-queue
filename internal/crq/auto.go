@@ -496,12 +496,12 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		}
 		// Review objects span the whole PR, but check runs do not: GitHub lists
 		// them by ref. The state index is the durable PR-scoped record that a
-		// check-bearing reviewer acted on an older head, so one-pass mode does
-		// not buy that reviewer a second run after the head moves.
-		activity := state.PreviewRound(repo, pr, head, s.clock())
+		// check-bearing reviewer completed a review on an older head. Generic bot
+		// activity cannot consume the cap because it may be an in-progress,
+		// auxiliary, or failed check that delivered no review.
 		for _, reviewer := range cfg.Reviewers {
 			login := dialect.NormalizeBotName(reviewer.Login)
-			if reviewedEver[login] || activity.Co(login).SeenActiveAt != nil {
+			if reviewedEver[login] || state.CoReviewerAnswered(repo, pr, login) {
 				return false, head, nil
 			}
 		}

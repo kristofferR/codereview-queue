@@ -3245,6 +3245,15 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		return nil, nil
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
+		noteHistorical := func(r *Round) {
+			for _, login := range active {
+				if answered[dialect.NormalizeBotName(login)] {
+					r.NoteCoAnswer(login, now)
+				} else {
+					r.NoteCoActivity(login, now)
+				}
+			}
+		}
 		r := st.Round(round.Repo, round.PR)
 		if r == nil {
 			for i := len(st.Archive) - 1; i >= 0; i-- {
@@ -3253,10 +3262,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 					continue
 				}
 				before := archived.CoBots
-				for _, login := range active {
-					archived.NoteCoActivity(login, now)
-				}
-				if sameCoActivity(before, archived.CoBots) {
+				noteHistorical(archived)
+				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) {
 					return ErrNoChange
 				}
 				st.RememberCoActivity(*archived)
@@ -3266,10 +3273,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// bounded archive before this callback runs. Preserve the activity
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
-			for _, login := range active {
-				round.NoteCoActivity(login, now)
-			}
-			if sameCoActivity(before, round.CoBots) {
+			noteHistorical(&round)
+			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) {
 				return ErrNoChange
 			}
 			st.RememberCoActivity(round)
@@ -3281,10 +3286,16 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// essential for a silent check-only reviewer to be eligible for
 			// self-heal on the new head.
 			before := r.CoBots
+			answerChanged := false
 			for _, login := range active {
 				r.NoteCoActivity(login, now)
+				if answered[dialect.NormalizeBotName(login)] &&
+					!st.CoReviewerAnswered(round.Repo, round.PR, login) {
+					st.RememberCoAnswer(round.Repo, round.PR, login, now)
+					answerChanged = true
+				}
 			}
-			if sameCoActivity(before, r.CoBots) {
+			if sameCoActivity(before, r.CoBots) && !answerChanged {
 				return ErrNoChange
 			}
 			if r.Phase == PhaseCompleted {

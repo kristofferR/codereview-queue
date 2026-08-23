@@ -17,9 +17,14 @@ type OnePassProgress struct {
 	// ReadyBase is the base revision the finalizer demonstrably integrated.
 	// ReadyHead alone is insufficient: GitHub can later report the same head
 	// conflict-free against a different base the agent never inspected.
-	ReadyBase string     `json:"ready_base,omitempty"`
-	ReadyAt   *time.Time `json:"ready_at,omitempty"`
-	By        string     `json:"by,omitempty"`
+	ReadyBase string `json:"ready_base,omitempty"`
+	// VerificationPending means ReadyBase was the last base proven from the
+	// checkout after the fixer succeeded, but GitHub's post-session pull read
+	// failed. The exact-head hand-off remains retryable without launching a
+	// second fixer; merging waits until GitHub reports this same base again.
+	VerificationPending bool       `json:"verification_pending,omitempty"`
+	ReadyAt             *time.Time `json:"ready_at,omitempty"`
+	By                  string     `json:"by,omitempty"`
 
 	unknown unknownFields
 }
@@ -50,6 +55,17 @@ func (s *State) OnePassProgressFor(repo string, pr int) (OnePassProgress, bool) 
 
 // MarkOnePassReady records the head a successful fixer actually left on the PR.
 func (s *State) MarkOnePassReady(repo string, pr int, head, base, by string, now time.Time) {
+	s.markOnePassReady(repo, pr, head, base, by, now, false)
+}
+
+// MarkOnePassVerificationPending preserves a successful fixer hand-off when
+// the post-session GitHub read is temporarily unavailable. It spends the sole
+// fixer attempt while allowing the merge gate, not another agent, to retry.
+func (s *State) MarkOnePassVerificationPending(repo string, pr int, head, base, by string, now time.Time) {
+	s.markOnePassReady(repo, pr, head, base, by, now, true)
+}
+
+func (s *State) markOnePassReady(repo string, pr int, head, base, by string, now time.Time, verificationPending bool) {
 	if s.OnePass == nil {
 		s.OnePass = map[string]OnePassProgress{}
 	}
@@ -57,7 +73,8 @@ func (s *State) MarkOnePassReady(repo string, pr int, head, base, by string, now
 	at := now.UTC()
 	next := OnePassProgress{
 		AttemptHead: head, AttemptedAt: &at,
-		ReadyHead: head, ReadyBase: base, ReadyAt: &at, By: by,
+		ReadyHead: head, ReadyBase: base, VerificationPending: verificationPending,
+		ReadyAt: &at, By: by,
 	}
 	if prev, ok := s.OnePass[key]; ok {
 		if prev.AttemptHead != "" {

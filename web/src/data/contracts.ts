@@ -201,6 +201,7 @@ export const RepoSolverSchema = Schema.Struct({
   sources: StringRecord,
   by: Optional(Schema.String),
   lagging_hosts: Optional(MutableArray(Schema.String)),
+  one_pass_lagging_hosts: Optional(MutableArray(Schema.String)),
   agent_on: Optional(
     MutableArray(
       Schema.Struct({

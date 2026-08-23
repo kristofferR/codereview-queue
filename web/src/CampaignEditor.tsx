@@ -26,6 +26,7 @@ export function CampaignEditor({
   const currentMerge = (solver.merge_method ?? "") as MergeMethod;
   const currentModel = solver.model ?? "";
   const currentEffort = solver.effort ?? "";
+  const laggingHosts = solver.one_pass_lagging_hosts ?? solver.lagging_hosts ?? [];
   const [model, setModel] = useState(currentModel);
   const [effort, setEffort] = useState(active ? currentEffort : currentEffort || "medium");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>(active ? currentMerge : "squash");
@@ -158,10 +159,10 @@ export function CampaignEditor({
             refuses drafts, holds, closed PRs, moved revisions, and merge conflicts.
           </div>
         )}
-        {solver.lagging_hosts && solver.lagging_hosts.length > 0 && (
+        {laggingHosts.length > 0 && (
           <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
             Do not start this campaign yet. These review/autofix hosts cannot honor one-pass mode:{" "}
-            {solver.lagging_hosts.join(", ")}.
+            {laggingHosts.join(", ")}.
           </div>
         )}
         {warning && (
@@ -178,7 +179,7 @@ export function CampaignEditor({
         <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            disabled={busy || (active && !dirty) || (solver.lagging_hosts?.length ?? 0) > 0}
+            disabled={busy || (active && !dirty) || laggingHosts.length > 0}
             onClick={() => setConfirmation("save")}
             className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
           >

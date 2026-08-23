@@ -42,6 +42,9 @@ type SolverView struct {
 	By        string            `json:"by,omitempty"`
 	UpdatedAt string            `json:"updated_at,omitempty"`
 	Lagging   []string          `json:"lagging_hosts,omitempty"`
+	// OnePassLagging is reported even before a campaign is active so clients
+	// cannot offer an activation that some live review/fix host will ignore.
+	OnePassLagging []string `json:"one_pass_lagging_hosts,omitempty"`
 }
 
 // Solver reports how repo's fix sessions will run.
@@ -117,6 +120,9 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		view.Agent = st.FixAgent(s.clock().UTC())
 	}
 	view.ModelChoices = modelChoicesFor(view.Agent, view.Models)
+	view.OnePassLagging = st.LaggingRoleWriters(
+		CapsOnePass, s.clock().UTC(), "autoreview", "autofix",
+	)
 	if has && own.UpdatedAt != nil {
 		view.By = own.By
 		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -252,6 +258,17 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			return errors.New("post-fix merge requires one-pass review mode")
 		}
 		before := st.EffectiveSolver(repo)
+		if !before.OnePass && effective.OnePass {
+			lagging := st.LaggingRoleWriters(
+				CapsOnePass, now, "autoreview", "autofix",
+			)
+			if len(lagging) > 0 {
+				return fmt.Errorf(
+					"cannot start one-pass campaign while incompatible review/autofix hosts are active: %s",
+					strings.Join(lagging, ", "),
+				)
+			}
+		}
 		if before.OnePass != effective.OnePass {
 			st.ClearOnePassRepo(repo)
 		}

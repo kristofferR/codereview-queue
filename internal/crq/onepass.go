@@ -262,6 +262,16 @@ func (s *Service) completeSuccessfulDispatch(
 	token string,
 	readyHead, readyBase string,
 ) (bool, error) {
+	return s.completeSuccessfulDispatchWithVerification(ctx, report, token, readyHead, readyBase, false)
+}
+
+func (s *Service) completeSuccessfulDispatchWithVerification(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	readyHead, readyBase string,
+	verificationPending bool,
+) (bool, error) {
 	var marked bool
 	st, err := s.store.Update(ctx, func(st *State) error {
 		onePass, campaign := st.OnePassDispatchCampaign(report.Repo, report.PR, token)
@@ -279,7 +289,11 @@ func (s *Service) completeSuccessfulDispatch(
 			if strings.TrimSpace(readyHead) == "" || strings.TrimSpace(readyBase) == "" {
 				return errors.New("the successful one-pass fixer did not prove an exact head and base")
 			}
-			st.MarkOnePassReady(report.Repo, report.PR, readyHead, readyBase, s.cfg.Host, s.clock())
+			if verificationPending {
+				st.MarkOnePassVerificationPending(report.Repo, report.PR, readyHead, readyBase, s.cfg.Host, s.clock())
+			} else {
+				st.MarkOnePassReady(report.Repo, report.PR, readyHead, readyBase, s.cfg.Host, s.clock())
+			}
 			marked = true
 		}
 		if !released && !marked {
@@ -333,6 +347,9 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	}
 	if !st.OnePassReady(repo, pr, pull.Head.SHA) {
 		return true, false, fmt.Sprintf("head moved after the one-pass fixer (%s); refusing an unverified merge", progress.ReadyHead), nil
+	}
+	if progress.VerificationPending && !st.OnePassReadyOn(repo, pr, pull.Head.SHA, pull.Base.SHA) {
+		return true, false, "waiting: post-fix base verification is pending; the current base differs from the last proven revision", nil
 	}
 	if !st.OnePassReadyOn(repo, pr, pull.Head.SHA, pull.Base.SHA) {
 		reason := "the finalized base is unknown; refusing an unverified merge"

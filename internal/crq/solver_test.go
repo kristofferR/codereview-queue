@@ -318,6 +318,43 @@ func TestSolverNamesLaggingHostsForAFleetRecordToo(t *testing.T) {
 	}
 }
 
+func TestOnePassCampaignRefusesLaggingReviewOrAutofixHosts(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "old-review", Caps: CapsOnePass - 1, Roles: []string{"autoreview"},
+		}, svc.clock().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := svc.Solver(ctx, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.OnePassLagging) != 1 || view.OnePassLagging[0] != "old-review" {
+		t.Fatalf("one-pass lagging hosts = %v, want old-review before activation", view.OnePassLagging)
+	}
+
+	on := true
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on}); err == nil ||
+		!strings.Contains(err.Error(), "old-review") {
+		t.Fatalf("campaign activation error = %v, want the incompatible host named", err)
+	}
+	view, err = svc.Solver(ctx, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.OnePass {
+		t.Fatal("rejected campaign activation was persisted")
+	}
+}
+
 // Which agent the fleet fixes with is a per-machine install answer, exported to
 // the autofix unit alone. A dashboard process has none of its own, and guessing
 // one made a codex fleet check every host for claude and report the setup that

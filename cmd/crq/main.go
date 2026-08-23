@@ -713,7 +713,8 @@ func run(ctx context.Context, args []string) int {
 				Severities: v.Severities, AskMode: v.AskMode,
 				SkipAuthors: v.SkipAuthors, OnePass: v.OnePass, MergeMethod: v.MergeMethod,
 				Sources: v.Sources, By: v.By,
-				Lagging: hostsOfWriters(v.Lagging),
+				Lagging:        hostsOfWriters(v.Lagging),
+				OnePassLagging: hostsOfWriters(v.OnePassLagging),
 			}
 			// Which hosts can actually run the agent — capability, beside the
 			// policy, so a repository is never quietly set to something no

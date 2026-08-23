@@ -31,4 +31,26 @@ describe("CampaignEditor", () => {
     const update = screen.getByRole("button", { name: "Update campaign" }) as HTMLButtonElement;
     expect(update.disabled).toBe(true);
   });
+
+  it("blocks campaign activation on one-pass-incompatible hosts", () => {
+    const solver: RepoSolver = {
+      overridden: false,
+      models: ["gpt-5.6-sol"],
+      model_choices: ["gpt-5.6-sol"],
+      max_attempts: 3,
+      severities: ["critical", "major"],
+      ask_mode: "blocked",
+      forks: false,
+      skip_authors: [],
+      one_pass: false,
+      sources: {},
+      one_pass_lagging_hosts: ["old-review"],
+    };
+
+    render(<CampaignEditor repo="owner/repo" solver={solver} />);
+
+    expect(screen.getByText(/old-review/)).toBeDefined();
+    const start = screen.getByRole("button", { name: "Start campaign" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+  });
 });

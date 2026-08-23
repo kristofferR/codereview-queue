@@ -987,28 +987,29 @@ func (s *Service) dispatchWithStart(
 		return false, "the successful session's exact HEAD could not be read"
 	}
 	readyHead = strings.TrimSpace(readyHead)
+	verificationPending := false
 	if finalizingOnePass {
 		// The base can advance while the agent is running. Bind merge authority
 		// to the revision current after the finalizer, not the stale pre-launch
 		// snapshot. The ancestry check proves the resulting head actually
 		// integrated that refreshed base before it is persisted.
 		refreshed, refreshErr := s.gh.GetPull(context.WithoutCancel(ctx), report.Repo, report.PR)
-		if refreshErr != nil {
-			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
-			return false, "could not refresh the pull request after its one-pass finalizer: " + refreshErr.Error()
-		}
-		readyBase = strings.TrimSpace(refreshed.Base.SHA)
-		if readyBase == "" {
-			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
-			return false, "GitHub did not report the campaign's base revision after its finalizer"
+		if refreshErr == nil && strings.TrimSpace(refreshed.Base.SHA) != "" {
+			readyBase = strings.TrimSpace(refreshed.Base.SHA)
+		} else {
+			// The fixer succeeded. A transient REST failure must not turn that
+			// sole allowed session into a terminal failed attempt or launch a
+			// second fixer. Preserve the pre-launch base after proving ancestry;
+			// the merge gate retries GitHub and accepts it only if still current.
+			verificationPending = true
 		}
 		if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", readyBase, readyHead); err != nil {
 			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
 			return false, "the one-pass finalizer did not integrate the exact base " + shortSHA(readyBase)
 		}
 	}
-	onePass, err := s.completeSuccessfulDispatch(
-		context.WithoutCancel(ctx), report, token, readyHead, readyBase,
+	onePass, err := s.completeSuccessfulDispatchWithVerification(
+		context.WithoutCancel(ctx), report, token, readyHead, readyBase, verificationPending,
 	)
 	if err != nil {
 		// Keep the checkout as an audit trail. The branch already holds the fix,
@@ -1346,6 +1347,9 @@ func (s *Service) claimDispatchModels(
 			models = []string{claimCfg.FixModel}
 		}
 		maxAttempts := recordedMaxAttemptsIn(*st, report.Repo, fallbackMaxAttempts)
+		if hasOnePassFinalizer(report.Findings) && claimCfg.OnePass {
+			maxAttempts = 1
+		}
 		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
 		if !ok {
 			reason, byDesign = why, true

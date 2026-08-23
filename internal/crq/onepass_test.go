@@ -146,6 +146,40 @@ func TestDispatchRejectsFinalizerFromEndedCampaign(t *testing.T) {
 	}
 }
 
+func TestOnePassFinalizerClaimAlwaysHasOneAttempt(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 42, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 907, "bfbfbfbf12345678"
+	on := true
+	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseCompleted, base, 0)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := NextReport{
+		Repo: repo, PR: pr, Head: head, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{
+			ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: head, Severity: "major",
+		}},
+		onePassCampaign: st.EffectiveSolver(repo).OnePassCampaign,
+	}
+
+	if ok, why, _ := f.svc.claimDispatch(f.ctx, report, "first", 3); !ok {
+		t.Fatalf("first finalizer claim refused: %s", why)
+	}
+	// Simulate a started session whose completion bookkeeping did not create a
+	// hand-off. Even with a caller fallback of three, one-pass itself owns the
+	// one-attempt invariant and must not launch a replacement agent.
+	f.svc.releaseDispatch(f.ctx, report, "first", true)
+	if ok, why, byDesign := f.svc.claimDispatch(f.ctx, report, "second", 3); ok ||
+		!byDesign || !strings.Contains(why, "attempt") {
+		t.Fatalf("second finalizer claim = ok %t byDesign %t reason %q", ok, byDesign, why)
+	}
+}
+
 func TestOnePassRetiresQueuedRoundWhenAnOlderReviewConsumesTheCap(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 45, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

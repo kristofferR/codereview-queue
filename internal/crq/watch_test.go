@@ -815,6 +815,61 @@ func TestOnePassFinalizerBindsTheBaseRefreshedAfterItsSession(t *testing.T) {
 	}
 }
 
+func TestOnePassFinalizerKeepsSuccessfulHandoffWhenPostSessionPullReadFails(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 133
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
+	key := fakeKey(repo, pr)
+	gh.pulls[key] = pull
+	gh.pullErrOnRead[key] = 2
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, sha, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{
+			ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: sha, Severity: "major",
+		}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "post-session-read-failure"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 3); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{
+		Command: []string{"/usr/bin/true"},
+	}, report, token)
+	if !ok {
+		t.Fatalf("successful finalizer was terminalized after a transient pull read: %s", why)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, present := st.OnePassProgressFor(repo, pr)
+	if !present || progress.ReadyHead != sha || progress.ReadyBase != sha || !progress.VerificationPending {
+		t.Fatalf("retryable hand-off = %+v, present=%t; want exact head/base pending verification", progress, present)
+	}
+}
+
 func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
 	base := t.TempDir()
 	repo, pr := "owner/thing", 13

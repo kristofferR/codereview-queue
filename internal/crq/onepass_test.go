@@ -71,7 +71,7 @@ func TestOnePassStillFiresTheFirstQueuedReview(t *testing.T) {
 	}
 }
 
-func TestOnePassReadyHeadMergesOnceWithExactSHA(t *testing.T) {
+func TestOnePassReadyHeadMergesOnceWithExactSHAWhenChecksAreUnstable(t *testing.T) {
 	base := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr, head := "owner/security", 91, "cccccccc12345678"
@@ -84,7 +84,10 @@ func TestOnePassReadyHeadMergesOnceWithExactSHA(t *testing.T) {
 	f.gh.mu.Lock()
 	pull := f.gh.pulls[fakeKey(repo, pr)]
 	pull.Mergeable = &mergeable
-	pull.MergeableState = "clean"
+	// The fixer push invalidates the PR's one allowed review, so GitHub reports
+	// the head as unstable until another review arrives. One-pass mode must not
+	// recreate that review loop through its merge gate.
+	pull.MergeableState = "unstable"
 	f.gh.pulls[fakeKey(repo, pr)] = pull
 	f.gh.mu.Unlock()
 	if _, err := f.store.Update(f.ctx, func(st *State) error {

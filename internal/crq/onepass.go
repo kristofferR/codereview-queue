@@ -8,7 +8,6 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 const onePassFinalizeSource = "one_pass_finalize"
@@ -238,17 +237,8 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	if pull.Mergeable == nil || strings.EqualFold(pull.MergeableState, "unknown") || pull.MergeableState == "" {
 		return true, false, "waiting for GitHub to compute mergeability", nil
 	}
-	if !*pull.Mergeable || !strings.EqualFold(pull.MergeableState, "clean") {
-		runs, checkErr := s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
-		if checkErr != nil {
-			return true, false, "", checkErr
-		}
-		if pending, failed := summarizeChecks(runs); pending != "" {
-			return true, false, "waiting for check: " + pending, nil
-		} else if failed != "" {
-			return true, false, "check failed after the one-pass fixer: " + failed, nil
-		}
-		return true, false, "GitHub reports the fixed head as " + pull.MergeableState, nil
+	if !*pull.Mergeable || strings.EqualFold(pull.MergeableState, "dirty") {
+		return true, false, "merge conflict after the one-pass fixer", nil
 	}
 
 	result, err := s.gh.MergePull(ctx, repo, pr, pull.Head.SHA, cfg.MergeMethod)
@@ -264,28 +254,6 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	}
 	s.clearOnePassProgress(ctx, repo, pr)
 	return true, true, "merged the fixed head with " + cfg.MergeMethod, nil
-}
-
-func summarizeChecks(runs []ghapi.CheckRun) (pending, failed string) {
-	for _, run := range runs {
-		if !strings.EqualFold(run.Status, "completed") {
-			if pending == "" {
-				pending = run.Name
-			}
-			continue
-		}
-		switch strings.ToLower(run.Conclusion) {
-		case "success", "neutral", "skipped":
-		default:
-			if failed == "" {
-				failed = run.Name
-				if run.Conclusion != "" {
-					failed += " (" + run.Conclusion + ")"
-				}
-			}
-		}
-	}
-	return pending, failed
 }
 
 func (s *Service) clearOnePassProgress(ctx context.Context, repo string, pr int) {

@@ -1225,6 +1225,21 @@ func (s *Service) claimDispatchModels(
 		// limit after this pass's initial read. Resolve all three from the state
 		// revision this CAS will write.
 		claimCfg := s.cfgFor(*st, report.Repo)
+		// A one-pass campaign can be enabled while an ordinary fixer is still
+		// running. Installing the campaign binary stops that old process, but its
+		// stale attempt counter remains on the round. With the campaign limit set
+		// to one, counting that pre-campaign attempt would prevent the campaign's
+		// one actual finalizer from ever starting. Once the old lease is no
+		// longer live, discard only attempts older than the repository setting
+		// that enabled this campaign. A real one-pass attempt has progress state
+		// and is never reset here.
+		solver := st.EffectiveSolver(report.Repo)
+		_, onePassStarted := st.OnePassProgressFor(report.Repo, report.PR)
+		if claimCfg.OnePass && !onePassStarted && round.Dispatch != nil &&
+			!round.DispatchHeld(s.clock()) && solver.UpdatedAt != nil &&
+			round.Dispatch.At.Before(solver.UpdatedAt.UTC()) {
+			round.Dispatch = nil
+		}
 		selectedFindings = autofixFindings(report.Findings, claimCfg.FixSeverities)
 		if len(report.Findings) > 0 && len(selectedFindings) == 0 {
 			reason, byDesign = "current autofix policy excludes every open finding", true

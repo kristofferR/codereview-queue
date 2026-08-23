@@ -615,8 +615,11 @@ func (s *GitStateStore) gitRemote(
 
 func runGit(ctx context.Context, env []string, stdin []byte, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	cmd.Env = append(cmd.Env, env...)
+	cmd.Env = append(os.Environ(), env...)
+	// Several fallback decisions intentionally classify Git diagnostics. Force
+	// the stable C locale after caller-provided variables so missing refs and
+	// non-fast-forward lease failures cannot be localized past those parsers.
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

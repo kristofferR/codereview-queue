@@ -27,6 +27,27 @@ func mustGit(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(stdout))
 }
 
+func TestRunGitForcesStableDiagnosticLocale(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	git := filepath.Join(dir, "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nprintf '%s|%s' \"$LC_ALL\" \"$LANG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LC_ALL", "nb_NO.UTF-8")
+	t.Setenv("LANG", "nb_NO.UTF-8")
+	stdout, stderr, err := runGit(context.Background(), []string{"LC_ALL=de_DE.UTF-8"}, nil, "status")
+	if err != nil {
+		t.Fatalf("run fake git: %v (%s)", err, stderr)
+	}
+	if got := string(stdout); got != "C|C" {
+		t.Fatalf("git locale = %q, want C|C", got)
+	}
+}
+
 func seedGitStateRemote(t *testing.T) (string, State) {
 	t.Helper()
 	root := t.TempDir()

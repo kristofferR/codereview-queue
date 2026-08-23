@@ -817,6 +817,45 @@ func TestOnePassReadyHeadMergesOnceWithExactSHAWhenChecksAreUnstable(t *testing.
 	}
 }
 
+func TestDisablingCampaignDuringPullReadRevokesMerge(t *testing.T) {
+	base := time.Date(2026, 8, 23, 11, 5, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 907, "cececece12345678"
+	f.openPull(repo, pr, head)
+	enableOnePass(t, f, repo, "squash")
+	mergeable := true
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Mergeable, pull.MergeableState = &mergeable, "clean"
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, pr, head, head, "test", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var disableErr error
+	f.svc.gh = &pullMutatingGitHub{
+		GitHubAPI: f.gh,
+		mutateAt:  1,
+		mutate: func() {
+			_, disableErr = f.svc.SetSolver(f.ctx, repo, SolverChange{UnsetOnePass: true, UnsetMerge: true})
+		},
+	}
+	eligible, merged, reason, err := f.svc.mergeOnePassReady(f.ctx, repo, pr)
+	if disableErr != nil {
+		t.Fatalf("disable campaign: %v", disableErr)
+	}
+	if err != nil || !eligible || merged || !strings.Contains(reason, "disabled") {
+		t.Fatalf("revoked merge = eligible %t merged %t reason %q err %v", eligible, merged, reason, err)
+	}
+	if len(f.gh.merged) != 0 {
+		t.Fatalf("disabled campaign reached merge endpoint: %v", f.gh.merged)
+	}
+}
+
 func TestOnePassReadyHeadCannotOutliveItsFinalizedBase(t *testing.T) {
 	base := time.Date(2026, 8, 23, 11, 10, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

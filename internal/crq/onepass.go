@@ -411,6 +411,7 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 		return false, false, "", err
 	}
 	cfg := s.cfgFor(st, repo)
+	campaign := st.EffectiveSolver(repo).OnePassCampaign
 	progress, ready := st.OnePassProgressFor(repo, pr)
 	if !cfg.OnePass || cfg.MergeMethod == "" || !ready || progress.ReadyHead == "" {
 		return false, false, "", nil
@@ -469,6 +470,30 @@ func (s *Service) mergeOnePassReady(ctx context.Context, repo string, pr int) (e
 	if !*pull.Mergeable || strings.EqualFold(pull.MergeableState, "dirty") {
 		return true, false, "merge conflict after the one-pass fixer", nil
 	}
+
+	// The GitHub read above can be slow or retried. Re-read shared policy at the
+	// irreversible boundary so ending the campaign, disabling merge/autofix, or
+	// placing a hold while that request was in flight revokes this hand-off.
+	current, _, err := s.store.Load(ctx)
+	if err != nil {
+		return true, false, "", err
+	}
+	currentCfg := s.cfgFor(current, repo)
+	currentSolver := current.EffectiveSolver(repo)
+	if !currentCfg.OnePass || currentCfg.MergeMethod == "" ||
+		currentSolver.OnePassCampaign != campaign {
+		return true, false, "post-fix merge was disabled or the one-pass campaign changed", nil
+	}
+	if hold, held := current.HeldPR(repo, pr); held {
+		return true, false, "held: " + hold.Reason, nil
+	}
+	if !current.AutofixEnabled(repo) {
+		return true, false, "post-fix merge is paused because autofix is off for this repository", nil
+	}
+	if !current.OnePassReadyOn(repo, pr, pull.Head.SHA, pull.Base.SHA) {
+		return true, false, "the one-pass merge hand-off changed while GitHub was computing mergeability", nil
+	}
+	cfg = currentCfg
 
 	result, err := s.gh.MergePull(ctx, repo, pr, pull.Head.SHA, cfg.MergeMethod)
 	if err != nil {

@@ -27,7 +27,7 @@ export function CampaignEditor({
   const currentModel = solver.model ?? "";
   const currentEffort = solver.effort ?? "";
   const [model, setModel] = useState(currentModel);
-  const [effort, setEffort] = useState(currentEffort || "medium");
+  const [effort, setEffort] = useState(active ? currentEffort : currentEffort || "medium");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>(active ? currentMerge : "squash");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -35,7 +35,7 @@ export function CampaignEditor({
 
   useEffect(() => {
     setModel(currentModel);
-    setEffort(currentEffort || "medium");
+    setEffort(active ? currentEffort : currentEffort || "medium");
     setMergeMethod(active ? currentMerge : "squash");
     setConfirmation(null);
   }, [active, currentEffort, currentMerge, currentModel]);
@@ -125,6 +125,7 @@ export function CampaignEditor({
                   onChange={(event) => setEffort(event.target.value)}
                   className="mt-1 w-full rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5 text-[12.5px]"
                 >
+                  <option value="">agent default</option>
                   {["low", "medium", "high", "xhigh", "max"].map((choice) => (
                     <option key={choice} value={choice}>
                       {choice}

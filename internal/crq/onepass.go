@@ -29,6 +29,7 @@ func (s *Service) onePassNext(
 	if !cfg.OnePass {
 		return report, false, nil
 	}
+	campaign := st.EffectiveSolver(report.Repo).OnePassCampaign
 	if hold, held := st.HeldPR(report.Repo, report.PR); held {
 		report.Action = string(engine.ActionBlocked)
 		report.Reason = "held: " + hold.Reason
@@ -110,7 +111,7 @@ func (s *Service) onePassNext(
 			// Persist the one-pass decision before handing work to the fixer. A
 			// queued marker left fire-eligible can otherwise be restored after
 			// the session and spend a second review round.
-			result, err := s.dedupeRound(ctx, cfg, *round, s.clock(), "one-pass review already consumed")
+			result, err := s.dedupeRound(ctx, cfg, *round, s.clock(), "one-pass review already consumed", &campaign)
 			if err != nil {
 				return report, true, err
 			}

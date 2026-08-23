@@ -1,0 +1,34 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import type { RepoSolver } from "./api";
+import { CampaignEditor } from "./CampaignEditor";
+
+describe("CampaignEditor", () => {
+  it("preserves agent-default effort for an active campaign", () => {
+    const solver: RepoSolver = {
+      overridden: true,
+      models: ["gpt-5.6-sol"],
+      model_choices: ["gpt-5.6-sol"],
+      model: "gpt-5.6-sol",
+      effort: "",
+      max_attempts: 1,
+      severities: ["critical", "major"],
+      ask_mode: "blocked",
+      forks: false,
+      skip_authors: [],
+      one_pass: true,
+      merge_method: "squash",
+      sources: {},
+    };
+
+    render(<CampaignEditor repo="owner/repo" solver={solver} />);
+
+    const effort = screen.getByRole("combobox", {
+      name: "Campaign reasoning effort",
+    }) as HTMLSelectElement;
+    expect(effort.value).toBe("");
+    expect(effort.selectedOptions[0]?.textContent).toBe("agent default");
+    const update = screen.getByRole("button", { name: "Update campaign" }) as HTMLButtonElement;
+    expect(update.disabled).toBe(true);
+  });
+});

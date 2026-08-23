@@ -174,6 +174,37 @@ func TestOnePassRetiresQueuedRoundWhenAnOlderReviewConsumesTheCap(t *testing.T) 
 	}
 }
 
+func TestOnePassQueuedDedupeIsVoidedWhenTheCampaignEndsInsideItsWrite(t *testing.T) {
+	base := time.Date(2026, 8, 23, 10, 47, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/security", 906, "afafafaf12345678"
+	f.openPull(repo, pr, head)
+	f.botReview(repo, pr, 1, "edededed12345678", base.Add(-time.Hour))
+	enableOnePass(t, f, repo, "squash")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		_, err := st.NewRound(repo, pr, head, base)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := &hookedStore{StateStore: f.store}
+	f.svc.store = hooked
+	hooked.hook = func() {
+		if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{UnsetOnePass: true, UnsetMerge: true}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: string(engine.ActionWait)}
+	got, handled, err := f.svc.onePassNext(f.ctx, report, engine.Action{Kind: engine.ActionWait}, true)
+	if err != nil || !handled {
+		t.Fatalf("onePassNext = handled %t report %+v err %v", handled, got, err)
+	}
+	if round := f.round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want queued after the campaign-ending race", round)
+	}
+}
+
 func TestOnePassPreservesTheReviewSettleWait(t *testing.T) {
 	base := time.Date(2026, 8, 23, 10, 50, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

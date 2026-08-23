@@ -1456,7 +1456,7 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
-		return s.dedupeRound(ctx, cfg, round, now, d.Reason)
+		return s.dedupeRound(ctx, cfg, round, now, d.Reason, nil)
 	case engine.FireCoOnly:
 		return s.fireCoOnly(ctx, cfg, round, d.PostCo, d.Reason, now)
 	case engine.FireCoDeferred:
@@ -1519,7 +1519,14 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 
 // dedupeRound completes a not-yet-fired round because the bot already reviewed
 // its head, leaving the completed round as the dedupe marker (v2's Fired[key]).
-func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now time.Time, reason string) (PumpResult, error) {
+func (s *Service) dedupeRound(
+	ctx context.Context,
+	cfg Config,
+	round Round,
+	now time.Time,
+	reason string,
+	expectedOnePassCampaign *string,
+) (PumpResult, error) {
 	result := PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
 		return result, nil
@@ -1534,7 +1541,13 @@ func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now 
 		// SetReviewers cannot see it coming, the round is still queued when the
 		// override lands (requeuing a queued round is a no-op), yet the marker is
 		// exactly what stops the newly required reviewer from ever being asked.
-		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
+		campaignChanged := false
+		if expectedOnePassCampaign != nil {
+			current := st.EffectiveSolver(round.Repo)
+			campaignChanged = !s.cfgFor(*st, round.Repo).OnePass ||
+				current.OnePassCampaign != *expectedOnePassCampaign
+		}
+		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) || campaignChanged {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {

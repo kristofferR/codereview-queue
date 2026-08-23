@@ -891,8 +891,9 @@ func (s *Service) dispatchWithStart(
 		return false, fmt.Sprintf("pull request head moved from %s to %s; stale fix session skipped",
 			shortSHA(claimedHead), shortSHA(liveHead))
 	}
+	finalizingOnePass := hasOnePassFinalizer(report.Findings)
 	readyBase := strings.TrimSpace(pull.Base.SHA)
-	if hasOnePassFinalizer(report.Findings) && readyBase == "" {
+	if finalizingOnePass && readyBase == "" {
 		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 		_ = co.Remove(context.WithoutCancel(ctx))
 		return false, "GitHub did not report the campaign's base revision; fix session skipped"
@@ -986,7 +987,21 @@ func (s *Service) dispatchWithStart(
 		return false, "the successful session's exact HEAD could not be read"
 	}
 	readyHead = strings.TrimSpace(readyHead)
-	if hasOnePassFinalizer(report.Findings) {
+	if finalizingOnePass {
+		// The base can advance while the agent is running. Bind merge authority
+		// to the revision current after the finalizer, not the stale pre-launch
+		// snapshot. The ancestry check proves the resulting head actually
+		// integrated that refreshed base before it is persisted.
+		refreshed, refreshErr := s.gh.GetPull(context.WithoutCancel(ctx), report.Repo, report.PR)
+		if refreshErr != nil {
+			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+			return false, "could not refresh the pull request after its one-pass finalizer: " + refreshErr.Error()
+		}
+		readyBase = strings.TrimSpace(refreshed.Base.SHA)
+		if readyBase == "" {
+			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+			return false, "GitHub did not report the campaign's base revision after its finalizer"
+		}
 		if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", readyBase, readyHead); err != nil {
 			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
 			return false, "the one-pass finalizer did not integrate the exact base " + shortSHA(readyBase)

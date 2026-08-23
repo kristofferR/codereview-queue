@@ -741,6 +741,80 @@ func TestOneShotDispatchReportsImmediateOnePassMergeFailure(t *testing.T) {
 	}
 }
 
+func TestOnePassFinalizerBindsTheBaseRefreshedAfterItsSession(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 132
+	repoDir := filepath.Join(base, repo)
+	initial := originRepo(t, repoDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "BASE.md"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "add", "BASE.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "commit", "-m", "advance base"); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := gitDir(context.Background(), repoDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var before, after ghapi.Pull
+	before.State, before.Number, before.Head.SHA = "open", pr, initial
+	before.Base.SHA, before.Base.Ref = initial, "main"
+	after = before
+	after.Head.SHA, after.Base.SHA = advanced, advanced
+	key := fakeKey(repo, pr)
+	gh.pulls[key] = after
+	gh.pullResults = map[string]map[int]ghapi.Pull{key: {1: before}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on, one := true, 1
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on, MaxAttempts: &one}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, initial, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: initial, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: initial, Severity: "major"}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "moving-base-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 1); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+	script := filepath.Join(t.TempDir(), "finalize.sh")
+	body := fmt.Sprintf("#!/bin/sh\nset -eu\ngit merge --ff-only %s\ngit push origin HEAD:refs/pull/%d/head\n", advanced, pr)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{
+		Command: []string{script},
+	}, report, token)
+	if !ok {
+		t.Fatalf("one-pass dispatch failed: %s", why)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, ok := st.OnePassProgressFor(repo, pr)
+	if !ok || progress.ReadyHead != advanced || progress.ReadyBase != advanced {
+		t.Fatalf("ready hand-off = %+v, ok=%t; want refreshed base %s", progress, ok, advanced)
+	}
+}
+
 func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
 	base := t.TempDir()
 	repo, pr := "owner/thing", 13

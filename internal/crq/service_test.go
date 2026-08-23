@@ -22,6 +22,7 @@ type fakeGitHub struct {
 	mu              sync.Mutex
 	pulls           map[string]ghapi.Pull
 	pullReads       map[string]int
+	pullResults     map[string]map[int]ghapi.Pull
 	pullErrOnRead   map[string]int
 	pullErrs        map[string]error
 	mergeErrs       map[string]error
@@ -182,6 +183,11 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull
 	}
 	if err := f.pullErrs[key]; err != nil {
 		return ghapi.Pull{}, err
+	}
+	if byRead := f.pullResults[key]; byRead != nil {
+		if pull, ok := byRead[f.pullReads[key]]; ok {
+			return pull, nil
+		}
 	}
 	pull, ok := f.pulls[key]
 	if !ok {

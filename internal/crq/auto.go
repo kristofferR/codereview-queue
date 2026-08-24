@@ -84,7 +84,12 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if ghapi.IsServerUnreachable(passErr) {
 				// Not a warning to log and poll past: without the control plane
 				// nothing below can run, and looping keeps the service "healthy"
-				// while it does nothing. Exit and let the service manager retry.
+				// while it does nothing. Exit and let the service manager retry —
+				// through the one-shot cleanup, so a cron run does not leave the
+				// leader lease held until its TTL and make the next run stand by.
+				if opts.Once {
+					return s.finishAutoReviewOnce(ctx, token, passErr)
+				}
 				return passErr
 			}
 			if passErr != nil && s.log != nil {
@@ -109,6 +114,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 					continue
 				}
 				if ghapi.IsServerUnreachable(err) {
+					if opts.Once {
+						return s.finishAutoReviewOnce(ctx, token, err)
+					}
 					return err
 				}
 				if s.log != nil {
@@ -390,8 +398,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
-				// throttle (and skipping them until a later poll).
-				if ghapi.IsThrottled(nerr) {
+				// throttle (and skipping them until a later poll). An unreachable
+				// control plane is the same shape: skipping candidate by candidate
+				// spends the offline cap once per PR while the pass still reports
+				// success, so the outage surfaces minutes late, if at all.
+				if abortsPass(nerr) {
 					return false, nerr
 				}
 				if s.log != nil {

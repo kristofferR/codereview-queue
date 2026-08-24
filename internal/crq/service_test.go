@@ -3885,3 +3885,34 @@ func TestAutoReviewScanAppliesTheRepositorysOwnSkipAuthors(t *testing.T) {
 		t.Errorf("the unaffected pull request must still be reviewed, got rounds=%#v", st.Rounds)
 	}
 }
+
+// A control plane that dies mid-scan must end the pass, not be logged once per
+// candidate: skipping PR by PR spends the offline cap on each one while the
+// pass still reports success, so the daemon looks healthy through the outage.
+func TestAutoReviewPropagatesAnUnreachableControlPlane(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	repo, pr := "o/app", 4
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
+	gh.pullErrs[fakeKey(repo, pr)] = fmt.Errorf("%w for 5s: dial tcp: connect: connection refused", ghapi.ErrServerUnreachable)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true})
+	if !ghapi.IsServerUnreachable(err) {
+		t.Fatalf("AutoReview error = %v, want the unreachable control plane surfaced", err)
+	}
+	// One-shot exits still run the cleanup: a lease held to its TTL makes the
+	// next cron run stand by behind a leader that is gone.
+	st, _, lerr := store.Load(ctx)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Leader != nil {
+		t.Fatalf("one-shot autoreview kept its leader lease after an outage: %#v", st.Leader)
+	}
+}

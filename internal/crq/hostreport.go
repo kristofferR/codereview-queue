@@ -194,11 +194,13 @@ func (s *Service) ForgetHost(ctx context.Context, host string) (ForgetHostResult
 		if err != nil {
 			return result, err
 		}
+		result.Forgot, err = st.ForgetHostReport(host)
+		if err != nil {
+			return result, err
+		}
 		result.Hosts = hostNames(st)
-		for _, name := range result.Hosts {
-			if strings.EqualFold(name, host) {
-				result.Forgot = true
-			}
+		if !result.Forgot {
+			result.Reason = "no report recorded under that name"
 		}
 		return result, nil
 	}
@@ -206,7 +208,11 @@ func (s *Service) ForgetHost(ctx context.Context, host string) (ForgetHostResult
 	// there is the closure's to report, not the error's.
 	forgot := false
 	st, err := s.store.Update(ctx, func(st *State) error {
-		forgot = st.ForgetHostReport(host)
+		var err error
+		forgot, err = st.ForgetHostReport(host)
+		if err != nil {
+			return err
+		}
 		if !forgot {
 			return ErrNoChange
 		}

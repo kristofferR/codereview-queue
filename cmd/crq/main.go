@@ -981,7 +981,7 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 		printJSON(result)
 		return 0
 	case "forget-host":
-		if len(args) < 2 {
+		if len(args) != 2 {
 			fatal(errors.New("usage: crq debug forget-host <host>"))
 			return 1
 		}
@@ -1137,7 +1137,7 @@ USAGE
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
-  crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
+  crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
                                    maintenance tools; not for normal review loops
 
 EXIT CODES

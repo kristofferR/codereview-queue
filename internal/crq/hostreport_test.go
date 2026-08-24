@@ -73,3 +73,33 @@ func TestForgetHostRemovesOneRecord(t *testing.T) {
 		t.Fatal("a blank host name should be refused, not matched against records")
 	}
 }
+
+func TestForgetHostDryRunListsOnlySurvivors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{GateRepo: "o/gate", Host: "omarchy", DryRun: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{Host: "MacBookAir"}, now)
+		st.SetHostReport(HostReport{Host: "omarchy"}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.ForgetHost(ctx, "MacBookAir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Forgot || len(result.Hosts) != 1 || result.Hosts[0] != "omarchy" {
+		t.Fatalf("dry-run ForgetHost = %+v, want the simulated survivors", result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.HostReports) != 2 {
+		t.Fatalf("dry run persisted the simulated deletion: %v", hostNames(st))
+	}
+}

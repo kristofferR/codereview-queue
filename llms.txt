@@ -513,6 +513,7 @@ Diagnostics only:
 ```bash
 crq doctor
 crq status
+crq debug forget-host <host>
 crq debug state
 crq debug refresh
 ```

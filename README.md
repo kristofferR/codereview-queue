@@ -463,7 +463,8 @@ crq doctor                # JSON readiness report (gh/auth/config/CLI) — never
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
 crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
 crq init                  # first-time setup of the gate repo
-crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq next
+crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
+                                        # diagnosis only — review loops should use crq next
 crq version               # print the version
 crq help [command]        # help, optionally for one command
 ```

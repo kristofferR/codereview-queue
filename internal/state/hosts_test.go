@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -208,7 +209,11 @@ func TestForgetHostReport(t *testing.T) {
 
 	// A name reads off the dashboard as the machine spells it; matching it back
 	// should not depend on reproducing that spelling exactly.
-	if !st.ForgetHostReport("k-mac.LOCAL") {
+	forgot, err := st.ForgetHostReport("k-mac.LOCAL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !forgot {
 		t.Fatal("forgetting a recorded host reported no record")
 	}
 	if _, ok := st.HostReports["K-Mac.local"]; ok {
@@ -217,10 +222,33 @@ func TestForgetHostReport(t *testing.T) {
 	if _, ok := st.HostReports["omarchy"]; !ok {
 		t.Fatal("forgetting one host dropped another")
 	}
-	if st.ForgetHostReport("K-Mac.local") {
+	if forgot, err := st.ForgetHostReport("K-Mac.local"); err != nil || forgot {
 		t.Fatal("forgetting an absent host claimed it removed one")
 	}
-	if st.ForgetHostReport("  ") {
+	if forgot, err := st.ForgetHostReport("  "); err != nil || forgot {
 		t.Fatal("a blank name matched a record")
+	}
+}
+
+func TestForgetHostReportRejectsAmbiguousFoldedMatch(t *testing.T) {
+	st := &State{HostReports: map[string]HostReport{
+		"MacBookAir": {Host: "MacBookAir"},
+		"macbookair": {Host: "macbookair"},
+	}}
+
+	forgot, err := st.ForgetHostReport("MACBOOKAIR")
+	if err == nil || forgot {
+		t.Fatalf("ambiguous folded match = (%t, %v), want a refusal", forgot, err)
+	}
+	if !strings.Contains(err.Error(), "MacBookAir") || !strings.Contains(err.Error(), "macbookair") {
+		t.Fatalf("ambiguous error %q does not list the exact spellings", err)
+	}
+	if len(st.HostReports) != 2 {
+		t.Fatalf("ambiguous match removed a record: %v", st.HostReports)
+	}
+
+	forgot, err = st.ForgetHostReport("MacBookAir")
+	if err != nil || !forgot {
+		t.Fatalf("exact match = (%t, %v), want it removed", forgot, err)
 	}
 }

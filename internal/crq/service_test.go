@@ -821,6 +821,25 @@ func TestAutoReviewOnceReleasesLeader(t *testing.T) {
 	}
 }
 
+func TestAutoReviewDaemonCancelReleasesLeader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h", LeaderTTL: time.Minute}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled daemon run should surface ctx.Err, got %v", err)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Leader != nil {
+		t.Fatalf("cancelled daemon should hand back its leader lease, got %#v", st.Leader)
+	}
+}
+
 func TestAutoReviewAppliesOnePassConfiguredReviewerScope(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

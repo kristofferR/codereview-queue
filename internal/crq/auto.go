@@ -74,10 +74,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// which would just hammer the quota. Skip Pump entirely in that case.
 			if _, ok := ghapi.ThrottleWait(passErr); ok {
 				if cont, serr := s.sleepThrottle(ctx, opts, poll, "pass", passErr); serr != nil || !cont {
-					if opts.Once {
-						return s.finishAutoReview(ctx, token, serr)
-					}
-					return serr
+					return s.finishAutoReview(ctx, token, serr)
 				}
 				continue
 			}
@@ -109,10 +106,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					if cont, serr := s.sleepThrottle(ctx, opts, poll, "pump", err); serr != nil || !cont {
-						if opts.Once {
-							return s.finishAutoReview(ctx, token, serr)
-						}
-						return serr
+						return s.finishAutoReview(ctx, token, serr)
 					}
 					continue
 				}
@@ -135,7 +129,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return s.finishAutoReview(ctx, token, ctx.Err())
 		case <-time.After(poll):
 		}
 	}

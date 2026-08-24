@@ -81,6 +81,12 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				}
 				continue
 			}
+			if ghapi.IsServerUnreachable(passErr) {
+				// Not a warning to log and poll past: without the control plane
+				// nothing below can run, and looping keeps the service "healthy"
+				// while it does nothing. Exit and let the service manager retry.
+				return passErr
+			}
 			if passErr != nil && s.log != nil {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
 			}
@@ -101,6 +107,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 						return serr
 					}
 					continue
+				}
+				if ghapi.IsServerUnreachable(err) {
+					return err
 				}
 				if s.log != nil {
 					s.log.Printf("warning: autoreview pump failed: %v", err)

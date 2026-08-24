@@ -171,14 +171,39 @@ crq serve install
 crq doctor
 ```
 
-By default every command uses `http://127.0.0.1:7777`. For one server shared across machines, set
-`CRQ_SERVER_URL` on the clients and the same `CRQ_SERVER_TOKEN` on the server and clients, then bind
-the server on the private network with `crq serve install --addr 0.0.0.0:7777 --allow-host <name>`.
-Every non-loopback endpoint must use HTTPS through a reverse proxy; plain HTTP is accepted only for
+By default every command uses `http://127.0.0.1:7777`. A fleet runs ONE control plane on its
+always-on host; every other machine is a worker that points at it and runs no `serve` of its own.
+The control plane holds nothing durable — coordination (`FireSlot`, dispatch claims, host reports)
+lives in the state ref on GitHub — so a second `serve` per host is safe, but it duplicates the
+polling, ETag cache and backoff against the one account-wide REST quota that `serve` exists to share.
+
+Worker setup, with Tailscale supplying the certificate:
+
+```bash
+# on the control-plane host: TLS in front of the loopback listener,
+# with CRQ_SERVER_TOKEN set in ~/.config/crq/env
+tailscale serve --bg 7777
+crq serve install --allow-host <host>.<tailnet>.ts.net
+# on each worker, in ~/.config/crq/env (the service does not inherit your shell)
+CRQ_SERVER_URL=https://<host>.<tailnet>.ts.net
+CRQ_SERVER_TOKEN=<same value>
+# then
+crq autofix install
+```
+
+`--allow-host` is needed for the gateway too, not only for dashboard actions: a request must be
+addressed to a name the server recognises as its own. Without a Tailnet, bind directly with
+`crq serve install --addr 0.0.0.0:7777 --allow-host <name>` behind an HTTPS reverse proxy that
+authenticates its users — dashboard actions carry no authentication of their own, so TLS alone only
+protects the gateway. Every non-loopback endpoint must use HTTPS; plain HTTP is accepted only for
 `localhost` and loopback IP addresses. The token is optional only on loopback.
 
-Every GitHub-backed command fails closed when the server is unavailable. `crq --direct <command>`
-is the explicit recovery path for an operator; agents and daemons should never use it.
+Every GitHub-backed command fails closed when the server is unavailable. `crq autofix install` and
+`crq autoreview install` probe the gateway and refuse to install a service that cannot reach it; a
+running daemon that loses its control plane exits non-zero rather than retrying silently, so the
+service manager's restart policy is the retry and the failure is visible from outside its log.
+`crq --direct <command>` is the explicit recovery path for an operator; agents and daemons should
+never use it, and nothing falls back to it automatically — that would recreate one poller per host.
 
 **4. Use it.** In any review loop, replace this:
 
@@ -732,7 +757,7 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | Symptom | Fix |
 |---------|-----|
 | `crq doctor` not ready | Finish `crq init`, start `crq serve`, and inspect its health error. The server host needs `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth login`. |
-| `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub. Use `crq --direct doctor` only for operator recovery. |
+| `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; it also auto-clears after `CRQ_INFLIGHT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
 | `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |

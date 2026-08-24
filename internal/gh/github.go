@@ -23,6 +23,15 @@ import (
 
 var ErrNotFound = errors.New("github resource not found")
 
+// ErrServerUnreachable marks a failure to reach the configured crq serve at
+// all. It is the transport's fault, not one resource's: a daemon that treats it
+// as a per-repository read error logs it and spins forever while its service
+// manager reports it healthy. IsServerUnreachable is how a caller tells them apart.
+var ErrServerUnreachable = errors.New("crq serve unreachable")
+
+// IsServerUnreachable reports whether err is a failure to reach crq serve.
+func IsServerUnreachable(err error) bool { return errors.Is(err, ErrServerUnreachable) }
+
 type APIError struct {
 	Method string
 	URL    string
@@ -597,6 +606,10 @@ func IsThrottled(err error) bool {
 // multi-PR preview can count as unexamined while continuing. Authentication,
 // permission, validation and state errors are deliberately excluded.
 func IsRecoverableRead(err error) bool {
+	// Wraps a net.Error, but it is not local to one resource: nothing can be read.
+	if IsServerUnreachable(err) {
+		return false
+	}
 	if errors.Is(err, ErrNotFound) {
 		return true
 	}
@@ -731,6 +744,9 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				// networkMaxWait <= 0 means no cap: keep retrying until the
 				// network is back (only caller cancellation, handled above, stops us).
 				if g.networkMaxWait > 0 && down > g.networkMaxWait {
+					if g.gatewayURL != "" {
+						return nil, fmt.Errorf("%w for %s (%s %s): %w", ErrServerUnreachable, down.Round(time.Second), method, shortURL(fullURL), err)
+					}
 					return nil, fmt.Errorf("%s unreachable for %s (%s %s): %w", g.networkTarget(), down.Round(time.Second), method, shortURL(fullURL), err)
 				}
 				wait := networkRetryWait(g.backoffBase, netAttempt)

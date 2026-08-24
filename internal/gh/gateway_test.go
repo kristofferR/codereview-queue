@@ -428,3 +428,22 @@ func TestServerClientAllowsPlainHTTPOnlyOnLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestServerClientNamesAnUnreachableServer(t *testing.T) {
+	client, err := NewGitHubViaServer("http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.networkMaxWait = time.Millisecond
+	client.backoffBase = time.Millisecond
+	_, err = client.GetPull(t.Context(), "o/r", 7)
+	if !IsServerUnreachable(err) {
+		t.Fatalf("a dead crq serve must surface as ErrServerUnreachable, got %v", err)
+	}
+	// Caller cancellation is the caller's fact, not the transport's.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := client.GetPull(ctx, "o/r", 7); !errors.Is(err, context.Canceled) || IsServerUnreachable(err) {
+		t.Fatalf("a cancelled call must surface the cancellation, not an unreachable server: %v", err)
+	}
+}

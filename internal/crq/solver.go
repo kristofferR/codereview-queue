@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // SolverView is how one repository's fix sessions will actually be run.

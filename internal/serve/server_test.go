@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // stubLoader hands back one state, counting how many times it was asked.

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/kristofferR/coderabbit-queue/internal/gh"
+	gh "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // ErrCASConflict is returned when the state ref moved between load and write.

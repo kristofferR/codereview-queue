@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // OpenThread is one unresolved review thread, enough to decide about it and to

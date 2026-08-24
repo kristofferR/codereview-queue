@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	"github.com/kristofferR/codereview-queue/internal/engine"
 )
 
 // Setup people get wrong is setup that silently does nothing, which is the exact

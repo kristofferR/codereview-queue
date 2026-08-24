@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
 )
 
 const onePassFinalizeSource = "one_pass_finalize"

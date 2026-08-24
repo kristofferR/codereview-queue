@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 func TestAutofixLogRequiresDashboardRequestAndResolvesTheLiveSession(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
-	crqstate "github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/engine"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
+	crqstate "github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // The persisted schema and its store live in internal/state (v3). These

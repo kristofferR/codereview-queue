@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/kristofferR/coderabbit-queue/internal/gh"
+	gh "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 func mustGit(t *testing.T, args ...string) string {

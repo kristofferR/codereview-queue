@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/engine"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // maxStaleFactor bounds how long the waiter will trust the state ref alone.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	gh "github.com/kristofferR/coderabbit-queue/internal/gh"
+	gh "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // refServer serves the four git-data reads Load makes, over one state payload.

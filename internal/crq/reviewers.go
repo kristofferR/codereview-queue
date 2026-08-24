@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
 )
 
 // Reviewer is one configured reviewer, and the single description of it.

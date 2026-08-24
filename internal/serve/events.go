@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Event is one thing that happened, derived by comparing consecutive state

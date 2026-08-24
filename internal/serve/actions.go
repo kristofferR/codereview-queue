@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Actor performs the mutations the dashboard offers. Every one is a thin mirror

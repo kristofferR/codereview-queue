@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 var t0 = time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)

@@ -1,9 +1,9 @@
 ---
-name: coderabbit-queue
+name: codereview-queue
 description: Drive autonomous CodeRabbit/Codex PR-review loops through crq without competing for the shared account-wide CodeRabbit rate limit. Use whenever you need to trigger CodeRabbit, fetch actionable bot feedback, resolve addressed review threads, run local pre-push review preflight, or keep PRs reviewed automatically.
 ---
 
-# coderabbit-queue (`crq`)
+# codereview-queue (`crq`)
 
 Every GitHub API operation from an ordinary command goes through the persistent `crq serve` control
 plane. It owns the shared ETag cache, retries, and rate-limit backoff. GitHub-backed commands fail

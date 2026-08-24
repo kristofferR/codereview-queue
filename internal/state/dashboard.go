@@ -14,7 +14,7 @@ import (
 const (
 	stateBegin    = "<!-- crq:state"
 	stateEnd      = "-->"
-	crqProjectURL = "https://github.com/kristofferR/coderabbit-queue"
+	crqProjectURL = "https://github.com/kristofferR/codereview-queue"
 )
 
 // firstStranded finds an in-flight round that reserved the slot but no longer
@@ -310,7 +310,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# 🐰 crq — CodeRabbit review queue\n\n")
+	fmt.Fprintf(&b, "# 🐰 crq — Code Review Queue\n\n")
 
 	stranded := firstStranded(st, inFlight)
 	switch {

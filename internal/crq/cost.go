@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
 )
 
 // CostEstimate is one reviewer's price for one head, as JSON the dashboard and

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 func TestCostSummaryDoesNotCallAnEntirelyUnpricedRoundFree(t *testing.T) {

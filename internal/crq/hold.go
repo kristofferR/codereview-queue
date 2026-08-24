@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // HoldResult reports a PR's hold state after a change.

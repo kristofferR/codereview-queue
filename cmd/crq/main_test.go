@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	crqcore "github.com/kristofferR/coderabbit-queue/internal/crq"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	crqcore "github.com/kristofferR/codereview-queue/internal/crq"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 func TestCheckServerReportsHealth(t *testing.T) {

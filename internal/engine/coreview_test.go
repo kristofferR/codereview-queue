@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 const (

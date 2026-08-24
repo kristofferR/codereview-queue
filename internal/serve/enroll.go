@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Enrollment is one repository's answer to "does crq review this project", as

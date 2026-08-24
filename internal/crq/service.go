@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 type Logger interface {

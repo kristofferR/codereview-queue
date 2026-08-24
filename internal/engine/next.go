@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // ActionKind is the single instruction a caller of `crq next` executes. It is a

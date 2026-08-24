@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // EnvKey describes one setting: what it means, what shape its value has, and —

@@ -182,7 +182,7 @@ Exit codes (`crq loop` only — `crq next` always exits 0 and answers in `.actio
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
 instead of waiting the window out, and the pump posts the co-reviewer triggers for blocked rounds
-while keeping the CodeRabbit review queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
+while keeping the Code Review Queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
 
 `.primary_review_unavailable` (with `.primary_review_unavailable_reason`) means the configured
 reviewer will NOT review this head at all — its plan only summarizes, or it skipped the head. When

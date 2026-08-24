@@ -9,7 +9,7 @@ package engine
 import (
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // TriggerMode is how crq may post a co-reviewer's trigger command.

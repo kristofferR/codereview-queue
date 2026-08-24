@@ -3,8 +3,8 @@ package crq
 import (
 	"context"
 
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
-	"github.com/kristofferR/coderabbit-queue/internal/workspace"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/workspace"
 )
 
 // workspace wires crq's configured cache root and GitHub credential resolution

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // CLIQuotaResult reports what RecordCLIQuota did, so the caller can say so

@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
-	"github.com/kristofferR/coderabbit-queue/internal/workspace"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/workspace"
 )
 
 // WatchOptions configures `crq watch`.
@@ -239,7 +239,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
 	// repository names straight over the fix command, and every dispatch in the
-	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
+	// fleet died with "fork/exec kristofferr/codereview-queue: no such file or
 	// directory". A caller's slice is the caller's.
 	repos := make([]string, 0, len(opts.Repos)+len(fleetCfg.AllowRepos))
 	repos = append(repos, opts.Repos...)

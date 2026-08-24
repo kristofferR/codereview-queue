@@ -21,11 +21,11 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/kristofferR/coderabbit-queue/internal/crq"
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
-	"github.com/kristofferR/coderabbit-queue/internal/serve"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/crq"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/serve"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 type stderrLogger struct{}
@@ -1067,7 +1067,7 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 }
 
 func usage() {
-	fmt.Print(`crq - CodeRabbit review queue for humans and automation
+	fmt.Print(`crq - Code Review Queue for humans and automation
 
 QUEUE WORKFLOWS
   crq next [<repo> <pr>]           ask what to do next about a PR (the agent loop)

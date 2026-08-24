@@ -33,16 +33,16 @@ fi
 install_log="$(
   CRQ_INSTALL_SOURCE_DIR="$DIR" \
   CRQ_BIN_DIR="$install_tmp/bin" \
-  CRQ_SKILL_DIR="$install_tmp/skills/coderabbit-queue" \
+  CRQ_SKILL_DIR="$install_tmp/skills/codereview-queue" \
   ./install.sh
 )"
 printf '%s' "$install_log" | grep -q 'installed Codex skill'
 [ -x "$install_tmp/bin/crq" ]
-[ -f "$install_tmp/skills/coderabbit-queue/SKILL.md" ]
-grep -q 'crq preflight --type uncommitted' "$install_tmp/skills/coderabbit-queue/SKILL.md"
+[ -f "$install_tmp/skills/codereview-queue/SKILL.md" ]
+grep -q 'crq preflight --type uncommitted' "$install_tmp/skills/codereview-queue/SKILL.md"
 
 mkdir -p "$install_tmp/shared-skills"
-ln -s "$install_tmp/shared-skills/coderabbit-queue" "$install_tmp/codex-skill-link"
+ln -s "$install_tmp/shared-skills/codereview-queue" "$install_tmp/codex-skill-link"
 symlink_install_log="$(
   CRQ_INSTALL_SOURCE_DIR="$DIR" \
   CRQ_BIN_DIR="$install_tmp/bin" \
@@ -51,8 +51,8 @@ symlink_install_log="$(
 )"
 printf '%s' "$symlink_install_log" | grep -q 'via'
 [ -L "$install_tmp/codex-skill-link" ]
-[ -f "$install_tmp/shared-skills/coderabbit-queue/SKILL.md" ]
-grep -q 'crq preflight --type uncommitted' "$install_tmp/shared-skills/coderabbit-queue/SKILL.md"
+[ -f "$install_tmp/shared-skills/codereview-queue/SKILL.md" ]
+grep -q 'crq preflight --type uncommitted' "$install_tmp/shared-skills/codereview-queue/SKILL.md"
 # doctor exits 0 when ready and 1 when not (the documented path on a bare CI
 # host). Capture both the JSON and the exit code, and assert it is exactly 0 or 1
 # — a bare "|| true" would hide a regression that changed the exit contract.

@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // fixPrompt is what a dispatched session is told. It is embedded so there is one

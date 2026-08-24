@@ -3,7 +3,7 @@ package engine
 import (
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // BlockingFindings identifies feedback that can still be acted on or resolved

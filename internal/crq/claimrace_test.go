@@ -3,8 +3,8 @@ package crq
 import (
 	"context"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 	"testing"
 	"time"
 )

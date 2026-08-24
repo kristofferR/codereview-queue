@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // EnrollmentView is one repository's enrollment as it will actually be applied.

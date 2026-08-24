@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Observer is the expensive half of a PR view: everything that needs a round

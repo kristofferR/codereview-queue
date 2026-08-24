@@ -3,7 +3,7 @@ package crq
 import (
 	"testing"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 )
 
 // Only a finding that intrinsically cannot have a thread may be dismissed.

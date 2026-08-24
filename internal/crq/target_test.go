@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // Inference must ask for THIS branch's pull request, not take whatever the

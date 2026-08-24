@@ -3,11 +3,11 @@
 # Installs the Go crq binary into ~/.local/bin by default.
 set -euo pipefail
 
-REPO="${CRQ_INSTALL_REPO:-kristofferR/coderabbit-queue}"
+REPO="${CRQ_INSTALL_REPO:-kristofferR/codereview-queue}"
 REF="${CRQ_INSTALL_REF:-main}"
 BIN_DIR="${CRQ_BIN_DIR:-$HOME/.local/bin}"
 NAME="crq"
-SKILL_NAME="coderabbit-queue"
+SKILL_NAME="codereview-queue"
 SKILL_DEST="${CRQ_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/$SKILL_NAME}"
 
 say() { printf 'crq-install: %s\n' "$*"; }

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
-	"github.com/kristofferR/coderabbit-queue/internal/workspace"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
+	"github.com/kristofferR/codereview-queue/internal/workspace"
 )
 
 // Dispatch is the one place crq starts something that writes code, so what it
@@ -1773,7 +1773,7 @@ func TestForkPolicyIsRecheckedInsideTheClaim(t *testing.T) {
 // command half is args[i+1:], so the flag half keeps CAPACITY reaching into the
 // command. fs.Args() is a sub-slice of it, and filling an empty repo list with
 // append then overwrote the fix command in place — every dispatch tried to exec
-// a repository slug ("fork/exec kristofferr/coderabbit-queue: no such file or
+// a repository slug ("fork/exec kristofferr/codereview-queue: no such file or
 // directory") and no pull request in the fleet was fixed.
 func TestWatchDoesNotOverwriteTheCommandItWasGiven(t *testing.T) {
 	argv := []string{"--dispatch", "--", "/bin/true", "exec"}

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Loader is the read side of the state store. Taking the interface rather than

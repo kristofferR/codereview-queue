@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	gh "github.com/kristofferR/coderabbit-queue/internal/gh"
+	gh "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // issueServer is a minimal gate-issue endpoint that records how it was used.

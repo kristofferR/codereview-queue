@@ -12,8 +12,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // Overview is everything the main screen paints, already reduced. It is a view

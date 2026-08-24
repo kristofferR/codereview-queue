@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
 
 // This suite re-enacts the 2026-07-16 spam incident (ha-adjustable-bed#448: crq

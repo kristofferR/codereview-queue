@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/state"
+	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
 // splitKey undoes state.Key. A malformed key keeps its whole text as the repo

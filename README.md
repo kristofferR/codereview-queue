@@ -1,4 +1,4 @@
-<h1 align="center">🐰 crq — CodeRabbit review queue</h1>
+<h1 align="center">🐰 crq — Code Review Queue</h1>
 
 <p align="center"><b>Stop your AI agents from fighting over one CodeRabbit rate limit.</b></p>
 
@@ -105,20 +105,20 @@ Durable queue state lives in one small **gate repo** (private is fine), with one
 `GITHUB_TOKEN`/`GH_TOKEN` set:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kristofferR/codereview-queue/main/install.sh | bash
 ```
 
 The installer drops a prebuilt binary into `~/.local/bin` when a release asset exists, otherwise
 builds from source (needs [Go](https://go.dev/dl/)), and installs the Codex skill into
-`${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue`. Set `CRQ_INSTALL_SKILL=0` to skip the skill,
-or `CRQ_SKILL_DIR=/custom/path/coderabbit-queue` to install it elsewhere.
+`${CODEX_HOME:-$HOME/.codex}/skills/codereview-queue`. Set `CRQ_INSTALL_SKILL=0` to skip the skill,
+or `CRQ_SKILL_DIR=/custom/path/codereview-queue` to install it elsewhere.
 
 <details>
 <summary>Manual install (build from source)</summary>
 
 ```bash
-git clone https://github.com/kristofferR/coderabbit-queue.git
-cd coderabbit-queue
+git clone https://github.com/kristofferR/codereview-queue.git
+cd codereview-queue
 go test ./...
 # Build to a temp file and rename — never `go build -o` straight onto an existing
 # crq: overwriting an already-executed binary in place (same inode) leaves macOS's
@@ -126,8 +126,8 @@ go test ./...
 go build -trimpath -ldflags "-s -w" -o ~/.local/bin/crq.new ./cmd/crq   # ensure ~/.local/bin is on $PATH
 mv -f ~/.local/bin/crq.new ~/.local/bin/crq
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
-cp -R "skills/coderabbit-queue" "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
+rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/codereview-queue"
+cp -R "skills/codereview-queue" "${CODEX_HOME:-$HOME/.codex}/skills/codereview-queue"
 crq version
 ```
 
@@ -308,7 +308,7 @@ and `gh`'s auth from your login keychain.
 
 ```ini
 [Unit]
-Description=crq autoreview (CodeRabbit review queue)
+Description=crq autoreview (Code Review Queue)
 [Service]
 ExecStart=%h/.local/bin/crq autoreview
 Restart=always
@@ -750,7 +750,7 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   not elapsed time.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).
 
-The installer puts the **[Codex skill](skills/coderabbit-queue/SKILL.md)** on the local skill path
+The installer puts the **[Codex skill](skills/codereview-queue/SKILL.md)** on the local skill path
 by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 
 ---

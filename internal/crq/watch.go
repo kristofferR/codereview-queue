@@ -161,6 +161,9 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
+				// Includes an unreachable control plane: the service manager's
+				// restart policy is the retry, and a non-zero exit is what makes a
+				// worker with no gateway visible from outside its own log.
 				return err
 			}
 			// A one-shot run is somebody's cron or CI job, and it does not get to
@@ -188,6 +191,18 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 			return err
 		}
 	}
+}
+
+// abortsPass reports a failure that belongs to the whole pass, not to the
+// repository or pull request it surfaced on: an exhausted GitHub quota, or a
+// control plane this host cannot reach. Both are logged-and-skipped at the
+// per-target sites otherwise, and skipping a dead gateway target by target
+// leaves the daemon retrying "connection refused" forever.
+func abortsPass(err error) bool {
+	if _, throttled := ghapi.ThrottleWait(err); throttled {
+		return true
+	}
+	return ghapi.IsServerUnreachable(err)
 }
 
 // watchInterval is the pass cadence with the fleet's recorded default applied,
@@ -311,7 +326,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// repository after it gets no events and no fix sessions, on this pass
 			// and — since the service restarts into the same list — on every pass
 			// after it. Same treatment as an unreadable PR below.
-			if _, throttled := ghapi.ThrottleWait(err); throttled {
+			if abortsPass(err) {
 				return err
 			}
 			if s.log != nil {
@@ -337,8 +352,13 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// them all here rather than leaving them to a sweep that inspects one
 		// candidate per pass — a merged PR sat in the rendered queue for an
 		// afternoon that way, behind rounds the sweep reached first.
-		if err := s.retireClosedRounds(ctx, repo, open); err != nil && s.log != nil {
-			s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
+		if err := s.retireClosedRounds(ctx, repo, open); err != nil {
+			if abortsPass(err) {
+				return err
+			}
+			if s.log != nil {
+				s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
+			}
 		}
 	}
 	// Operator-prioritized PRs always lead the pass, ordered by their queue
@@ -424,7 +444,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				report, err = s.nextAutomated(ctx, repo, pull.Number)
 			}
 			if err != nil {
-				if _, ok := ghapi.ThrottleWait(err); ok {
+				if abortsPass(err) {
 					return err
 				}
 				if s.log != nil {
@@ -441,7 +461,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if opts.dispatching() && report.Action != string(engine.ActionFix) && report.Action != string(engine.ActionBlocked) {
 				eligible, merged, mergeReason, mergeErr := s.mergeOnePassReady(ctx, repo, pull.Number)
 				if mergeErr != nil {
-					if _, throttled := ghapi.ThrottleWait(mergeErr); throttled {
+					if abortsPass(mergeErr) {
 						return mergeErr
 					}
 					if s.log != nil {
@@ -485,7 +505,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// Next forever: Next knows it may enqueue and review the current
 				// head because FindingsOnHead is empty.
 				if _, advanceErr := s.nextAutomated(ctx, repo, pull.Number); advanceErr != nil {
-					if _, throttled := ghapi.ThrottleWait(advanceErr); throttled {
+					if abortsPass(advanceErr) {
 						return advanceErr
 					}
 					if s.log != nil {

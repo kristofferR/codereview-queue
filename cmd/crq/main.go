@@ -1320,7 +1320,9 @@ card rather than the page.
                send the shared CRQ_SERVER_TOKEN. Dashboard actions remain
                unauthenticated, so do not expose this directly to an untrusted
                network; use an authenticated HTTPS reverse proxy there.
-  --allow-host extra names an action may be addressed to, comma-separated.
+  --allow-host extra names a request may be addressed to, comma-separated.
+               Applies to the GitHub gateway as well as to actions, so a
+               worker using https://<name> needs <name> listed here.
                Actions are accepted on an IP literal, on localhost, on the bound
                address and on this machine's own name — a name that merely
                RESOLVES here is refused, because that is how a page on another

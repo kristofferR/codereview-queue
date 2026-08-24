@@ -3885,3 +3885,51 @@ func TestAutoReviewScanAppliesTheRepositorysOwnSkipAuthors(t *testing.T) {
 		t.Errorf("the unaffected pull request must still be reviewed, got rounds=%#v", st.Rounds)
 	}
 }
+
+// A control plane that dies mid-scan must end the pass, not be logged once per
+// candidate: skipping PR by PR spends the offline cap on each one while the
+// pass still reports success, so the daemon looks healthy through the outage.
+func TestAutoReviewPropagatesAnUnreachableControlPlane(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	repo, pr := "o/app", 4
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
+	gh.pullErrs[fakeKey(repo, pr)] = fmt.Errorf("%w for 5s: dial tcp: connect: connection refused", ghapi.ErrServerUnreachable)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true})
+	if !ghapi.IsServerUnreachable(err) {
+		t.Fatalf("AutoReview error = %v, want the unreachable control plane surfaced", err)
+	}
+	// The exit releases the lease. A lease is keyed by token and a restart draws
+	// a new one, so keeping it makes the recovered daemon stand by behind its
+	// own dead self until the TTL expires.
+	st, _, lerr := store.Load(ctx)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Leader != nil {
+		t.Fatalf("one-shot autoreview kept its leader lease after an outage: %#v", st.Leader)
+	}
+
+	// Same for the installed daemon, which is the case that actually recovers:
+	// it exits, the service manager restarts it with a NEW token, and a lease
+	// left behind would reject that token until it expired.
+	store2 := NewMemoryStore(cfg)
+	svc2 := NewService(cfg, gh, store2, nil)
+	if err := svc2.AutoReview(ctx, AutoOptions{Incremental: true}); !ghapi.IsServerUnreachable(err) {
+		t.Fatalf("daemon AutoReview error = %v, want the unreachable control plane surfaced", err)
+	}
+	st2, _, lerr2 := store2.Load(ctx)
+	if lerr2 != nil {
+		t.Fatal(lerr2)
+	}
+	if st2.Leader != nil {
+		t.Fatalf("daemon autoreview kept its leader lease after an outage: %#v", st2.Leader)
+	}
+}

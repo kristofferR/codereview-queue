@@ -42,8 +42,12 @@ export CRQ_STATE_REF=crq-state-v3
 # export CRQ_SERVER_TOKEN=shared-secret
 ```
 
-Shared/non-loopback `CRQ_SERVER_URL` values must use HTTPS through a reverse proxy. Plain HTTP is
-accepted only for localhost and loopback IP addresses.
+Shared/non-loopback `CRQ_SERVER_URL` values must use HTTPS (a `tailscale serve` cert, or an
+authenticating reverse proxy since dashboard actions are unauthenticated). Plain HTTP is accepted
+only for localhost and loopback IP addresses. One `crq serve` per fleet; workers run only
+`autofix`/`autoreview` against it, and the server must be started with `--allow-host <the name
+workers use>`. A daemon whose server is unreachable exits non-zero (ordinary per-target read
+failures are still logged and skipped).
 
 `crq serve` must be running, and CodeRabbit native auto-review must be off.
 

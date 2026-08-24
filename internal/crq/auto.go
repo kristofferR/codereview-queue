@@ -75,11 +75,25 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if _, ok := ghapi.ThrottleWait(passErr); ok {
 				if cont, serr := s.sleepThrottle(ctx, opts, poll, "pass", passErr); serr != nil || !cont {
 					if opts.Once {
-						return s.finishAutoReviewOnce(ctx, token, serr)
+						return s.finishAutoReview(ctx, token, serr)
 					}
 					return serr
 				}
 				continue
+			}
+			if ghapi.IsServerUnreachable(passErr) {
+				// Not a warning to log and poll past: without the control plane
+				// nothing below can run, and looping keeps the service "healthy"
+				// while it does nothing. Exit and let the service manager retry.
+				//
+				// Hand back the lease on the way out, daemon or one-shot. A lease
+				// is keyed by TOKEN, and a restart draws a new one, so an exit
+				// that keeps it makes the recovered process stand by behind its
+				// own dead self until the TTL runs out. The attempt is bounded
+				// and best-effort: it goes through the same server, so while that
+				// server is down it fails, and the TTL is the backstop it always
+				// was.
+				return s.finishAutoReview(ctx, token, passErr)
 			}
 			if passErr != nil && s.log != nil {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
@@ -96,11 +110,14 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					if cont, serr := s.sleepThrottle(ctx, opts, poll, "pump", err); serr != nil || !cont {
 						if opts.Once {
-							return s.finishAutoReviewOnce(ctx, token, serr)
+							return s.finishAutoReview(ctx, token, serr)
 						}
 						return serr
 					}
 					continue
+				}
+				if ghapi.IsServerUnreachable(err) {
+					return s.finishAutoReview(ctx, token, err)
 				}
 				if s.log != nil {
 					s.log.Printf("warning: autoreview pump failed: %v", err)
@@ -114,7 +131,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// A one-shot run must surface a real (non-throttle) scan/pump failure —
 			// e.g. a permission or owner-lookup error — so cron/CI doesn't see success
 			// when nothing was scanned or enqueued. The daemon keeps going (logged).
-			return s.finishAutoReviewOnce(ctx, token, passFailure)
+			return s.finishAutoReview(ctx, token, passFailure)
 		}
 		select {
 		case <-ctx.Done():
@@ -124,7 +141,11 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	}
 }
 
-func (s *Service) finishAutoReviewOnce(ctx context.Context, token string, err error) error {
+// finishAutoReview hands the leader lease back on the way out and returns the
+// error that ended the run. The release is best-effort — it writes through the
+// same server whose loss usually causes the exit — and bounded, on a context
+// detached from the caller's so a cancelled run still gets its attempt.
+func (s *Service) finishAutoReview(ctx context.Context, token string, err error) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if rerr := s.releaseLeader(ctx, token); err == nil && rerr != nil {
@@ -381,8 +402,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
-				// throttle (and skipping them until a later poll).
-				if ghapi.IsThrottled(nerr) {
+				// throttle (and skipping them until a later poll). An unreachable
+				// control plane is the same shape: skipping candidate by candidate
+				// spends the offline cap once per PR while the pass still reports
+				// success, so the outage surfaces minutes late, if at all.
+				if abortsPass(nerr) {
 					return false, nerr
 				}
 				if s.log != nil {

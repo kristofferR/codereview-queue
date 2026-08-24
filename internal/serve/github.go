@@ -33,6 +33,13 @@ type GitHubResponse struct {
 // owner without moving command semantics or local-work inspection to a remote
 // machine.
 func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
+	// Stamped on every answer this handler gives, forwarded or its own, so a
+	// client can tell a reply from crq serve apart from one invented in front of
+	// it. Under the documented reverse-proxy topology a dead backend still
+	// answers — the proxy returns 502/503 — and without this the client cannot
+	// distinguish "GitHub returned 502 and serve relayed it" from "serve is
+	// gone". The counterpart to the X-CRQ-Client header clients send.
+	w.Header().Set("X-CRQ-Gateway", "1")
 	if s.opts.Gateway == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the GitHub gateway is not configured"})
 		return

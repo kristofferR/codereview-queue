@@ -201,7 +201,9 @@ protects the gateway. Every non-loopback endpoint must use HTTPS; plain HTTP is 
 Every GitHub-backed command fails closed when the server is unavailable. `crq autofix install` and
 `crq autoreview install` probe the gateway and refuse to install a service that cannot reach it; a
 running daemon that loses its control plane exits non-zero rather than retrying silently, so the
-service manager's restart policy is the retry and the failure is visible from outside its log.
+service manager's restart policy is the retry and the failure is visible from outside its log. That
+covers a proxy that outlives its backend: `serve` stamps every gateway reply, so a 502 invented by
+the proxy in front of a stopped server is told apart from one GitHub actually returned.
 `crq --direct <command>` is the explicit recovery path for an operator; agents and daemons should
 never use it, and nothing falls back to it automatically — that would recreate one poller per host.
 

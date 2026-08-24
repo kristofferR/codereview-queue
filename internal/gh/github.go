@@ -765,6 +765,39 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			return nil, err
 		}
+		// A 5xx that crq serve did not stamp came from something in FRONT of it:
+		// a reverse proxy answering for a backend that is gone. The dial
+		// succeeded, so the network branch above never sees it, and a gateway
+		// client takes no retries of its own — it would surface as an ordinary
+		// APIError, get logged and skipped per target, and leave the daemon
+		// spinning through an outage. That is the exact silence this error exists
+		// to end, so it is tracked on the same offline clock: a serve restart is
+		// ridden out, a serve that stays down ends the process.
+		if g.gatewayURL != "" && resp.StatusCode >= 500 && resp.Header.Get("X-CRQ-Gateway") != "1" {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if offlineSince.IsZero() {
+				offlineSince = time.Now()
+			}
+			down := time.Since(offlineSince)
+			if g.networkMaxWait <= 0 || down > g.networkMaxWait {
+				return nil, fmt.Errorf("%w for %s (%s %s): HTTP %d from a proxy in front of it: %s",
+					ErrServerUnreachable, down.Round(time.Second), method, shortURL(fullURL), resp.StatusCode, snippet(b))
+			}
+			wait := networkRetryWait(g.backoffBase, netAttempt)
+			netAttempt++
+			if g.log != nil {
+				g.log.Printf("crq serve answered by a proxy on %s %s (HTTP %d); retrying in %s (offline %s / cap %s)",
+					method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), down.Round(time.Second), g.networkMaxWait)
+			}
+			if serr := SleepCtx(ctx, wait); serr != nil {
+				return nil, serr
+			}
+			continue
+		}
 		// A response came back: connectivity is fine, reset the offline tracker.
 		if !offlineSince.IsZero() && g.log != nil {
 			g.log.Printf("%s reachable again after %s offline; resuming", g.networkTarget(), time.Since(offlineSince).Round(time.Second))
@@ -1037,6 +1070,19 @@ func (g *GitHub) retryBackoff(attempt int) (time.Duration, bool) {
 
 func isHTMLResponse(resp *http.Response) bool {
 	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
+}
+
+// snippet trims a proxy's error page down to something an operator can read in
+// one log line.
+func snippet(b []byte) string {
+	text := strings.Join(strings.Fields(string(b)), " ")
+	if len(text) > 160 {
+		text = text[:160] + "…"
+	}
+	if text == "" {
+		return "(empty body)"
+	}
+	return text
 }
 
 func isRetryableStatus(code int) bool {

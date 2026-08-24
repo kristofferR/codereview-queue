@@ -447,3 +447,40 @@ func TestServerClientNamesAnUnreachableServer(t *testing.T) {
 		t.Fatalf("a cancelled call must surface the cancellation, not an unreachable server: %v", err)
 	}
 }
+
+// A reverse proxy in front of a dead crq serve answers where a dial would have
+// failed. Its 5xx carries no gateway stamp, and treating it as an ordinary API
+// error is what leaves a worker spinning through the outage.
+func TestGatewayReadsAProxyErrorAsAnUnreachableServer(t *testing.T) {
+	var stamp bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stamp {
+			w.Header().Set("X-CRQ-Gateway", "1")
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "<html><body>502 Bad Gateway</body></html>")
+	}))
+	defer srv.Close()
+	client, err := NewGitHubViaServer(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.networkMaxWait = time.Millisecond
+	client.backoffBase = time.Millisecond
+
+	if _, err := client.GetPull(t.Context(), "o/r", 7); !IsServerUnreachable(err) {
+		t.Fatalf("an unstamped proxy 502 must read as an unreachable server, got %v", err)
+	}
+
+	// Stamped: crq serve itself answered, relaying GitHub's own 502. That is one
+	// resource failing, not the control plane vanishing.
+	stamp = true
+	_, err = client.GetPull(t.Context(), "o/r", 7)
+	if IsServerUnreachable(err) {
+		t.Fatalf("a 502 that crq serve stamped must stay an ordinary API error, got %v", err)
+	}
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != http.StatusBadGateway {
+		t.Fatalf("stamped 502 error = %v, want an APIError carrying the status", err)
+	}
+}

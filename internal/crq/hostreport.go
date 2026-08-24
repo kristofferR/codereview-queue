@@ -166,3 +166,67 @@ func sameHostReport(prev, next HostReport) bool {
 	}
 	return true
 }
+
+// ForgetHostResult reports what a forget-host call removed.
+type ForgetHostResult struct {
+	Host   string   `json:"host"`
+	Forgot bool     `json:"forgot"`
+	Reason string   `json:"reason,omitempty"`
+	Hosts  []string `json:"hosts"`
+	DryRun bool     `json:"dry_run,omitempty"`
+}
+
+// ForgetHost removes one host's self-report from the fleet table.
+//
+// A live service rewrites its record on its next pass, so this is for a name
+// that is gone: a renamed machine, a retired one, a hostname that flapped. It
+// deliberately does not check whether the record is stale — a host still
+// reporting is one an operator can see, and refusing on that basis would only
+// send them to edit the state ref by hand.
+func (s *Service) ForgetHost(ctx context.Context, host string) (ForgetHostResult, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ForgetHostResult{}, errors.New("forget-host needs a host name (see the hosts in crq debug state)")
+	}
+	result := ForgetHostResult{Host: host, DryRun: s.cfg.DryRun}
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return result, err
+		}
+		result.Hosts = hostNames(st)
+		for _, name := range result.Hosts {
+			if strings.EqualFold(name, host) {
+				result.Forgot = true
+			}
+		}
+		return result, nil
+	}
+	// The stores answer ErrNoChange with (state, nil), so whether a record was
+	// there is the closure's to report, not the error's.
+	forgot := false
+	st, err := s.store.Update(ctx, func(st *State) error {
+		forgot = st.ForgetHostReport(host)
+		if !forgot {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	result.Forgot = forgot
+	if !forgot {
+		result.Reason = "no report recorded under that name"
+	}
+	result.Hosts = hostNames(st)
+	return result, nil
+}
+
+func hostNames(st State) []string {
+	names := make([]string, 0, len(st.HostReports))
+	for _, r := range st.HostReportList() {
+		names = append(names, r.Host)
+	}
+	return names
+}

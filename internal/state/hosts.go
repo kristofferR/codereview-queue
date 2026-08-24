@@ -488,6 +488,34 @@ func (r HostReport) lists(role string) bool {
 	return false
 }
 
+// ForgetHostReport drops a host's self-report entirely, returning whether there
+// was one. Records are otherwise kept for ever and marked stale, on purpose —
+// see HostReportTTL. That is the right default for a host that might come back,
+// and the wrong one for a name that never will: a machine renamed, retired, or
+// whose hostname flapped leaves a record no heartbeat will ever refresh, and a
+// fleet table reading five hosts where two exist is not a fleet table. Deciding
+// a name is gone is an operator's call, which is why nothing does this
+// automatically.
+func (s *State) ForgetHostReport(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || len(s.HostReports) == 0 {
+		return false
+	}
+	if _, ok := s.HostReports[host]; ok {
+		delete(s.HostReports, host)
+		return true
+	}
+	// Hosts report whatever their machine calls itself, so an operator reading a
+	// name off the dashboard should not have to reproduce its case exactly.
+	for name := range s.HostReports {
+		if strings.EqualFold(name, host) {
+			delete(s.HostReports, name)
+			return true
+		}
+	}
+	return false
+}
+
 // HostReportList is every host's self-report, most recently heard from first.
 func (s *State) HostReportList() []HostReport {
 	out := make([]HostReport, 0, len(s.HostReports))

@@ -199,3 +199,28 @@ func TestToolReportsStayWithTheRoleThatProbedThem(t *testing.T) {
 		t.Errorf("claude = %+v, want serve's answer once autofix has aged out", agent)
 	}
 }
+
+func TestForgetHostReport(t *testing.T) {
+	now := time.Now().UTC()
+	st := &State{}
+	st.SetHostReport(HostReport{Host: "K-Mac.local", Roles: []string{"autofix"}}, now)
+	st.SetHostReport(HostReport{Host: "omarchy", Roles: []string{"serve"}}, now)
+
+	// A name reads off the dashboard as the machine spells it; matching it back
+	// should not depend on reproducing that spelling exactly.
+	if !st.ForgetHostReport("k-mac.LOCAL") {
+		t.Fatal("forgetting a recorded host reported no record")
+	}
+	if _, ok := st.HostReports["K-Mac.local"]; ok {
+		t.Fatal("the record survived being forgotten")
+	}
+	if _, ok := st.HostReports["omarchy"]; !ok {
+		t.Fatal("forgetting one host dropped another")
+	}
+	if st.ForgetHostReport("K-Mac.local") {
+		t.Fatal("forgetting an absent host claimed it removed one")
+	}
+	if st.ForgetHostReport("  ") {
+		t.Fatal("a blank name matched a record")
+	}
+}

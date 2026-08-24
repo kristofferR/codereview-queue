@@ -56,6 +56,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   schema bump. Schema v4 deliberately fenced older v3 pumping clients that
   could not enforce administrative holds. Schema v5 similarly fences v4
   writers that would erase the dispatch scheduler's model and cooldown state.
+  `CoActivity` and `CoAnswers` are the unbounded per-PR indexes that preserve
+  generic reviewer activity and completed-review evidence separately after the
+  bounded round archive is evicted. They currently have no automatic pruning
+  rule, so their state footprint grows with the number of reviewed PRs.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

@@ -99,6 +99,31 @@ type refAdvancingStore struct {
 	updates int
 }
 
+type explicitRefStore struct {
+	StateStore
+	ref   string
+	calls int
+}
+
+func (s *explicitRefStore) StateRef(context.Context) (string, error) {
+	s.calls++
+	return s.ref, nil
+}
+
+func TestStateRefPrefersStoreTransport(t *testing.T) {
+	f := newReplayFixture(t, time.Now().UTC())
+	store := &explicitRefStore{StateStore: f.store, ref: "git-fallback-ref"}
+	f.svc.store = store
+
+	got, err := f.svc.stateRef(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != store.ref || store.calls != 1 {
+		t.Fatalf("state ref = %q after %d store calls, want %q after one", got, store.calls, store.ref)
+	}
+}
+
 type throttledLoadStore struct {
 	StateStore
 	err   error

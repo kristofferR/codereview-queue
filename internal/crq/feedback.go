@@ -73,6 +73,10 @@ type FeedbackReport struct {
 	// A completion write revalidates it under CAS so an override committed after
 	// observation cannot turn stale convergence into a permanent dedup marker.
 	config Config
+	// onePassReviewed is the campaign's PR-wide evidence predicate evaluated
+	// from this report's single GitHub observation. It is deliberately not part
+	// of the stable feedback JSON contract.
+	onePassReviewed bool
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -97,6 +101,53 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 // account-quota evidence. It is the dashboard's read-only path.
 func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
 	return s.feedback(ctx, repo, pr, false)
+}
+
+// onePassReviewEvidence answers the campaign's PR-wide "has any configured
+// reviewer genuinely completed a review?" question from Feedback's existing
+// observation. It deliberately mirrors reviewNeeded's anyConfigured branch,
+// but performs no GitHub reads: reviews and comments span the PR, completed
+// check runs cover the observed head, and campaign evidence is the durable
+// record for a check/comment answer or removed reviewer on an older head.
+func onePassReviewEvidence(st State, cfg Config, repo string, pr int, obs observation) bool {
+	campaign := st.EffectiveSolver(repo).OnePassCampaign
+	if st.OnePassReviewed(repo, pr, campaign) || st.OnePassReviewerAnswered(repo, pr, campaign) {
+		return true
+	}
+	configured := onePassReviewerScope(st, cfg, repo, campaign)
+
+	primary := dialect.NormalizeBotName(cfg.Bot)
+	for _, review := range obs.reviews {
+		login := dialect.NormalizeBotName(review.User.Login)
+		if review.CommitID == "" || strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
+		if cfg.isConfiguredBot(review.User.Login) &&
+			strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "" {
+			continue
+		}
+		if configured[login] {
+			return true
+		}
+	}
+
+	for _, check := range obs.eng.Checks {
+		if configured[dialect.NormalizeBotName(check.Bot)] &&
+			(check.Verdict == dialect.CheckDone || check.Verdict == dialect.CheckDoneClean) {
+			return true
+		}
+	}
+	for _, event := range obs.eng.Events {
+		login := dialect.NormalizeBotName(event.Bot)
+		if configured[login] && login == primary &&
+			event.Kind == dialect.EvNoAction && !event.SummaryOnly {
+			return true
+		}
+		if configured[login] && event.Kind == dialect.EvCoClean {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) feedback(ctx context.Context, repo string, pr int, persist bool) (FeedbackReport, error) {
@@ -158,18 +209,34 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 			round = st.Round(repo, pr)
 		}
 	}
+	onePassReviewed := onePassReviewEvidence(st, cfg, repo, pr, obs)
+	if persist && cfg.OnePass && onePassReviewed {
+		campaign := st.EffectiveSolver(repo).OnePassCampaign
+		updated, current, err := s.markOnePassReviewed(ctx, st, cfg, repo, pr, campaign, now)
+		if err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording one-pass review evidence for %s: %w", QueueKey(repo, pr), err)
+		}
+		if current {
+			st = updated
+		} else {
+			// A policy change raced this observation. The next pass will classify
+			// the same GitHub data against the new campaign scope.
+			onePassReviewed = false
+		}
+	}
 	report := FeedbackReport{
-		Status:     "feedback",
-		Repo:       repo,
-		PR:         pr,
-		Head:       head,
-		Open:       obs.eng.Open,
-		HeadRef:    pull.Head.Ref,
-		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
-		ReviewedBy: map[string]bool{},
-		config:     cfg,
-		Findings:   []dialect.Finding{},
-		CheckedAt:  now,
+		Status:          "feedback",
+		Repo:            repo,
+		PR:              pr,
+		Head:            head,
+		Open:            obs.eng.Open,
+		HeadRef:         pull.Head.Ref,
+		HeadRepo:        NormalizeRepo(pull.Head.Repo.FullName),
+		ReviewedBy:      map[string]bool{},
+		config:          cfg,
+		Findings:        []dialect.Finding{},
+		CheckedAt:       now,
+		onePassReviewed: onePassReviewed,
 	}
 
 	// The completion anchor is the current round only when it still tracks this

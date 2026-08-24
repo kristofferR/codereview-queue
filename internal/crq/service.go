@@ -23,6 +23,7 @@ type Logger interface {
 
 type GitHubAPI interface {
 	GetPull(context.Context, string, int) (ghapi.Pull, error)
+	MergePull(context.Context, string, int, string, string) (ghapi.MergeResult, error)
 	GetCommit(context.Context, string, string) (ghapi.Commit, error)
 	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
 	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
@@ -508,6 +509,12 @@ type queueCandidate struct {
 	// search result carries it, so recording it costs nothing and spares every
 	// later list a request per row.
 	Title string
+	// Autoreview candidates carry the one-pass policy they were evaluated
+	// against. enqueueBatch rejects them if an administrative change landed
+	// after the scan snapshot was loaded.
+	PolicyChecked   bool
+	OnePass         bool
+	OnePassCampaign string
 }
 
 // enqueueBatch appends several PRs in a single compare-and-swap write plus one
@@ -525,6 +532,13 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 			repo := NormalizeRepo(it.Repo)
 			if _, held := st.HeldPR(repo, it.PR); held {
 				continue
+			}
+			if it.PolicyChecked {
+				solver := st.EffectiveSolver(repo)
+				currentOnePass := s.cfg.withSolver(solver).OnePass
+				if currentOnePass != it.OnePass || solver.OnePassCampaign != it.OnePassCampaign {
+					continue
+				}
 			}
 			// Asked again here, against the state this write lands on, for the
 			// same reason reviewersChanged is: the scan decided from a snapshot,
@@ -740,6 +754,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	st = fresh
 	next = current
+	if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, *next, obs, now); err != nil {
+		return PumpResult{}, err
+	} else if handled {
+		return onePass, nil
+	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
 	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
@@ -805,6 +824,11 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if err != nil {
 			continue
 		}
+		if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, round, obs, now); err != nil {
+			return PumpResult{}, false, err
+		} else if handled {
+			return onePass, true, nil
+		}
 		d := engine.DecideFire(global, round, obs.eng, now, cfg.policy())
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
@@ -863,6 +887,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
+	}
+	if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, *round, obs, now); err != nil {
+		return PumpResult{}, false, err
+	} else if handled {
+		return onePass, true, nil
 	}
 	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
@@ -1442,7 +1471,7 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
-		return s.dedupeRound(ctx, cfg, round, now, d.Reason)
+		return s.dedupeRound(ctx, cfg, round, now, d.Reason, nil)
 	case engine.FireCoOnly:
 		return s.fireCoOnly(ctx, cfg, round, d.PostCo, d.Reason, now)
 	case engine.FireCoDeferred:
@@ -1505,7 +1534,14 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 
 // dedupeRound completes a not-yet-fired round because the bot already reviewed
 // its head, leaving the completed round as the dedupe marker (v2's Fired[key]).
-func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now time.Time, reason string) (PumpResult, error) {
+func (s *Service) dedupeRound(
+	ctx context.Context,
+	cfg Config,
+	round Round,
+	now time.Time,
+	reason string,
+	expectedOnePassCampaign *string,
+) (PumpResult, error) {
 	result := PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
 		return result, nil
@@ -1520,7 +1556,13 @@ func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now 
 		// SetReviewers cannot see it coming, the round is still queued when the
 		// override lands (requeuing a queued round is a no-op), yet the marker is
 		// exactly what stops the newly required reviewer from ever being asked.
-		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
+		campaignChanged := false
+		if expectedOnePassCampaign != nil {
+			current := st.EffectiveSolver(round.Repo)
+			campaignChanged = !s.cfgFor(*st, round.Repo).OnePass ||
+				current.OnePassCampaign != *expectedOnePassCampaign
+		}
+		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) || campaignChanged {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -3244,6 +3286,15 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		return nil, nil
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
+		noteHistorical := func(r *Round) {
+			for _, login := range active {
+				if answered[dialect.NormalizeBotName(login)] {
+					r.NoteCoAnswer(login, now)
+				} else {
+					r.NoteCoActivity(login, now)
+				}
+			}
+		}
 		r := st.Round(round.Repo, round.PR)
 		if r == nil {
 			for i := len(st.Archive) - 1; i >= 0; i-- {
@@ -3252,10 +3303,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 					continue
 				}
 				before := archived.CoBots
-				for _, login := range active {
-					archived.NoteCoActivity(login, now)
-				}
-				if sameCoActivity(before, archived.CoBots) {
+				noteHistorical(archived)
+				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) {
 					return ErrNoChange
 				}
 				st.RememberCoActivity(*archived)
@@ -3265,10 +3314,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// bounded archive before this callback runs. Preserve the activity
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
-			for _, login := range active {
-				round.NoteCoActivity(login, now)
-			}
-			if sameCoActivity(before, round.CoBots) {
+			noteHistorical(&round)
+			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) {
 				return ErrNoChange
 			}
 			st.RememberCoActivity(round)
@@ -3280,10 +3327,16 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// essential for a silent check-only reviewer to be eligible for
 			// self-heal on the new head.
 			before := r.CoBots
+			answerChanged := false
 			for _, login := range active {
 				r.NoteCoActivity(login, now)
+				if answered[dialect.NormalizeBotName(login)] &&
+					!st.CoReviewerAnswered(round.Repo, round.PR, login) {
+					st.RememberCoAnswer(round.Repo, round.PR, login, now)
+					answerChanged = true
+				}
 			}
-			if sameCoActivity(before, r.CoBots) {
+			if sameCoActivity(before, r.CoBots) && !answerChanged {
 				return ErrNoChange
 			}
 			if r.Phase == PhaseCompleted {

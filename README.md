@@ -174,7 +174,8 @@ crq doctor
 By default every command uses `http://127.0.0.1:7777`. For one server shared across machines, set
 `CRQ_SERVER_URL` on the clients and the same `CRQ_SERVER_TOKEN` on the server and clients, then bind
 the server on the private network with `crq serve install --addr 0.0.0.0:7777 --allow-host <name>`.
-Use HTTPS at a reverse proxy if that network is not trusted. The token is optional only on loopback.
+Every non-loopback endpoint must use HTTPS through a reverse proxy; plain HTTP is accepted only for
+`localhost` and loopback IP addresses. The token is optional only on loopback.
 
 Every GitHub-backed command fails closed when the server is unavailable. `crq --direct <command>`
 is the explicit recovery path for an operator; agents and daemons should never use it.
@@ -441,8 +442,10 @@ crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly
 crq solver <repo>         # models, scope, clarification policy, attempts, forks and prompt
 crq solver set <repo> [--models <first,next,...>] [--severities minor,potential] [--ask uncertain]
 crq solver set <repo> [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
-crq solver set <repo> --inherit models,effort,severities,ask,forks,skip-authors # follow the fleet
+crq solver set <repo> [--one-pass on|off] [--merge off|merge|squash|rebase]
+crq solver set <repo> --inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge
 crq solver set --fleet [...]                          # the default every repository inherits
+crq solver clear <repo> | crq solver clear --fleet
 
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
@@ -469,6 +472,18 @@ crq help [command]        # help, optionally for one command
 account block. It exits 0 with `status: "skipped"`, `.skip_reason`, and `.blocked_until`. If shared
 state cannot be read, it falls back to running the local CLI normally. Set
 `CRQ_PREFLIGHT_SKIP_BLOCKED=0` to force the CLI request instead.
+
+For a temporary bulk campaign, `--one-pass on` caps each PR at the first review recorded anywhere
+on the PR, including reviews recorded before one-pass was enabled, and then dispatches one
+fixer/finalizer even when that review was clean. `--merge squash` (or `merge` /
+`rebase`) makes the autofix watcher merge only the exact head that session released, as soon as
+GitHub reports no merge conflict. Review and check status are deliberately ignored: the fixer push
+makes the one allowed review stale, and waiting for a new one would turn this mode back into a
+review loop. A later push, a failed fixer, a draft, or a conflict is never
+silently merged and never starts a second fixer. Keep this repository-scoped and restore ordinary
+incremental behavior afterwards with `crq solver set <repo> --inherit one-pass,merge`, which
+preserves unrelated repository solver overrides. `crq solver clear <repo>` instead discards every
+solver override for that repository.
 
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
 the exit code. **`crq loop` exit codes:** `0` converged, no
@@ -541,13 +556,15 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
-| `CRQ_SERVER_URL` | `http://127.0.0.1:7777` | `crq serve` endpoint that owns every GitHub API request; GitHub-backed commands fail closed when it is unavailable |
+| `CRQ_SERVER_URL` | `http://127.0.0.1:7777` | `crq serve` endpoint that owns every GitHub API request; non-loopback endpoints require HTTPS, and GitHub-backed commands fail closed when it is unavailable |
 | `CRQ_SERVER_TOKEN` | _(none)_ | shared bearer token required for non-loopback clients; configure the same value on the server and clients |
 | `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the state ref, dashboard, calibration PR |
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
 | `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v6, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
+| `CRQ_STATE_GIT_AUTHOR_NAME` | `kristofferR` | optional author name for commits made by the Git state fallback |
+| `CRQ_STATE_GIT_AUTHOR_EMAIL` | public GitHub noreply address | optional author email for commits made by the Git state fallback; use a non-private address |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues, and the autofix watcher never touches (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |

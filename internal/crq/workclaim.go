@@ -325,7 +325,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	repo = NormalizeRepo(repo)
 	var claim workClaimOutcome
 	for {
-		lastRef, refErr := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+		lastRef, refErr := s.stateRef(ctx)
 		var err error
 		claim, err = s.claimInteractiveWork(ctx, repo, pr)
 		if err != nil {

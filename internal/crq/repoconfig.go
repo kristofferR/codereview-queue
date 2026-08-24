@@ -498,6 +498,15 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 	if sameReviewers(before, after) {
 		return
 	}
+	solver := st.EffectiveSolver(repo)
+	onePass := s.cfgFor(*st, repo).OnePass && solver.OnePassCampaign != ""
+	if onePass {
+		// The campaign's reviewer set is historical, not merely current. An
+		// answer delivered by the reviewer being removed still spends the sole
+		// round and must remain recognizable after this edit commits.
+		st.RememberOnePassReviewers(repo, solver.OnePassCampaign, campaignReviewerLogins(before))
+		st.RememberOnePassReviewers(repo, solver.OnePassCampaign, campaignReviewerLogins(after))
+	}
 	// Only ADDING a reviewer can invalidate a finished round. A round that
 	// converged did so with the reviewers it had; taking one away leaves it
 	// converged with MORE evidence than the new configuration asks for, and
@@ -512,6 +521,15 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
+		}
+		if onePass && (st.OnePassReviewed(repo, round.PR, solver.OnePassCampaign) ||
+			st.OnePassReviewerAnswered(repo, round.PR, solver.OnePassCampaign)) {
+			st.MarkOnePassReviewed(repo, round.PR, solver.OnePassCampaign, s.clock())
+			// A consumed campaign review is final even when an ordinary completed
+			// round would be reopened for a newly required reviewer.
+			if round.Phase == PhaseCompleted {
+				continue
+			}
 		}
 		forced := forcedCoReviewers(round.ForceCoReviewers, before, after)
 		switch round.Phase {

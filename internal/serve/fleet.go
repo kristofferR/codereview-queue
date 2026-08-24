@@ -126,21 +126,24 @@ type RepoRow struct {
 
 // RepoSolver mirrors crq.SolverView on the wire.
 type RepoSolver struct {
-	Overridden   bool              `json:"overridden"`
-	Agent        string            `json:"agent,omitempty"`
-	Models       []string          `json:"models"`
-	ModelChoices []string          `json:"model_choices"`
-	Model        string            `json:"model,omitempty"`
-	Effort       string            `json:"effort,omitempty"`
-	Prompt       string            `json:"prompt,omitempty"`
-	MaxAttempts  int               `json:"max_attempts"`
-	Severities   []string          `json:"severities"`
-	AskMode      string            `json:"ask_mode"`
-	Forks        bool              `json:"forks"`
-	SkipAuthors  []string          `json:"skip_authors"`
-	Sources      map[string]string `json:"sources"`
-	By           string            `json:"by,omitempty"`
-	Lagging      []string          `json:"lagging_hosts,omitempty"`
+	Overridden     bool              `json:"overridden"`
+	Agent          string            `json:"agent,omitempty"`
+	Models         []string          `json:"models"`
+	ModelChoices   []string          `json:"model_choices"`
+	Model          string            `json:"model,omitempty"`
+	Effort         string            `json:"effort,omitempty"`
+	Prompt         string            `json:"prompt,omitempty"`
+	MaxAttempts    int               `json:"max_attempts"`
+	Severities     []string          `json:"severities"`
+	AskMode        string            `json:"ask_mode"`
+	Forks          bool              `json:"forks"`
+	SkipAuthors    []string          `json:"skip_authors"`
+	OnePass        bool              `json:"one_pass"`
+	MergeMethod    string            `json:"merge_method,omitempty"`
+	Sources        map[string]string `json:"sources"`
+	By             string            `json:"by,omitempty"`
+	Lagging        []string          `json:"lagging_hosts,omitempty"`
+	OnePassLagging []string          `json:"one_pass_lagging_hosts,omitempty"`
 	// AgentOn says, per host, whether the configured fix agent is reachable
 	// there. Capability, not policy: a repository can be set to a model no
 	// host can run, and the settings alone would never say so.

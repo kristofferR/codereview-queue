@@ -5,7 +5,78 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestOnePassSolverIsTemporaryAndRepositoryScoped(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	merge := "squash"
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &merge}); err == nil {
+		t.Fatal("post-fix merge without one-pass was accepted")
+	}
+	on := true
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{OnePass: &on}); err == nil {
+		t.Fatal("one-pass was accepted as a fleet-wide default")
+	}
+	view, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on, MergeMethod: &merge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.OnePass || view.MergeMethod != "squash" || view.Sources["one_pass"] != "repo" {
+		t.Fatalf("one-pass solver view = %+v", view)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "basebase1", "test", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = svc.SetSolver(ctx, "o/r", SolverChange{Clear: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.OnePass || view.MergeMethod != "" || view.Overridden {
+		t.Fatalf("cleared solver view = %+v", view)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.OnePassProgressFor("o/r", 7); ok {
+		t.Fatal("clearing the repository solver kept campaign hand-offs")
+	}
+}
+
+func TestMergePolicyChangePreservesCompletedOnePassHandoff(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	on, squash := true, "squash"
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on, MergeMethod: &squash}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady("o/r", 7, "abcdef123", "basebase1", "test", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	off := ""
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &off}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, ok := st.OnePassProgressFor("o/r", 7); !ok || progress.ReadyHead != "abcdef123" {
+		t.Fatalf("merge-only change discarded handoff: %+v, present %t", progress, ok)
+	}
+}
 
 // Solver settings exist so two repositories the same watcher handles can be
 // fixed differently, so what this pins is the layering and — because these
@@ -26,6 +97,9 @@ func TestSolverLayering(t *testing.T) {
 	}
 	if view.Overridden || view.MaxAttempts != 3 || view.Model != "" {
 		t.Fatalf("view = %+v, want the env values with no record", view)
+	}
+	if view.Sources["one_pass"] != "default" || view.Sources["merge_method"] != "default" {
+		t.Fatalf("campaign defaults reported wrong sources: %+v", view.Sources)
 	}
 	if view.Agent != "/usr/bin/claude" {
 		t.Errorf("agent = %q, want the fleet's — it is baked into the session script", view.Agent)
@@ -241,6 +315,43 @@ func TestSolverNamesLaggingHostsForAFleetRecordToo(t *testing.T) {
 	}
 	if len(v.Lagging) != 1 || v.Lagging[0] != "atlas" {
 		t.Errorf("lagging = %v, want the autofix host that predates solver settings named", v.Lagging)
+	}
+}
+
+func TestOnePassCampaignRefusesLaggingReviewOrAutofixHosts(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "old-review", Caps: CapsOnePass - 1, Roles: []string{"autoreview"},
+		}, svc.clock().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := svc.Solver(ctx, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.OnePassLagging) != 1 || view.OnePassLagging[0] != "old-review" {
+		t.Fatalf("one-pass lagging hosts = %v, want old-review before activation", view.OnePassLagging)
+	}
+
+	on := true
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{OnePass: &on}); err == nil ||
+		!strings.Contains(err.Error(), "old-review") {
+		t.Fatalf("campaign activation error = %v, want the incompatible host named", err)
+	}
+	view, err = svc.Solver(ctx, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.OnePass {
+		t.Fatal("rejected campaign activation was persisted")
 	}
 }
 

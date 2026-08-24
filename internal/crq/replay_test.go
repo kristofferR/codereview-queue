@@ -123,6 +123,8 @@ func (f *replayFixture) openPull(repo string, pr int, sha string) {
 	var p ghapi.Pull
 	p.State = "open"
 	p.Head.SHA = sha
+	p.Base.SHA = sha
+	p.Base.Ref = "main"
 	f.gh.pulls[fakeKey(repo, pr)] = p
 }
 

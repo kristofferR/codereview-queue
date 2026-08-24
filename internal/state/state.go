@@ -590,6 +590,11 @@ type State struct {
 	// reopened after its historical rounds have been evicted, and a silent
 	// check-only reviewer still needs to be eligible for self-heal then.
 	CoActivity map[string]map[string]time.Time `json:"co_activity,omitempty"`
+	// CoAnswers keeps durable proof that each co-reviewer completed a review on
+	// the pull request. Generic activity is deliberately not enough for the
+	// one-pass review cap: an in-progress, auxiliary, or failed check did not
+	// deliver a review.
+	CoAnswers map[string]map[string]time.Time `json:"co_answers,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -617,6 +622,12 @@ type State struct {
 	HostReports map[string]HostReport `json:"host_reports,omitempty"`
 	// RepoSolver is how a fix session runs, per repository. See solver.go.
 	RepoSolver map[string]SolverSettings `json:"repo_solver,omitempty"`
+	// OnePass is the fixer-to-merger hand-off for repository-scoped one-pass
+	// campaigns. See onepass.go.
+	OnePass map[string]OnePassProgress `json:"one_pass,omitempty"`
+	// OnePassEvidence preserves the campaign's reviewer identities and consumed
+	// review marker across reviewer changes. See onepass.go.
+	OnePassEvidence map[string]OnePassEvidence `json:"one_pass_evidence,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,
 	// so the decision lives with the fleet rather than in one host's env file.
 	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
@@ -662,7 +673,7 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 12
+const WriterCaps = 15
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -697,6 +708,10 @@ const CapsFleetDefaults = 4
 // inheritance, so the dashboard must name it before claiming the saved answer
 // applies fleet-wide.
 const CapsSolver = 8
+
+// CapsOnePass is the capability required by both autoreview and autofix hosts
+// to honour the one-review cap and the fixer-to-merge hand-off.
+const CapsOnePass = 15
 
 // CapsPreflightSkipBlocked is the capability that makes the shared
 // CRQ_PREFLIGHT_SKIP_BLOCKED policy safe to act on. Older hosts run the local
@@ -1225,6 +1240,10 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 func (s *State) rememberCoActivity(r Round) {
 	key := Key(r.Repo, r.PR)
 	for login, co := range r.CoBots {
+		login = coBotKey(login)
+		if co.AnsweredAt != nil {
+			s.rememberCoAnswer(key, login, *co.AnsweredAt)
+		}
 		seenAt := co.SeenActiveAt
 		if co.AnsweredAt != nil && (seenAt == nil || seenAt.Before(*co.AnsweredAt)) {
 			seenAt = co.AnsweredAt
@@ -1240,12 +1259,53 @@ func (s *State) rememberCoActivity(r Round) {
 			activity = map[string]time.Time{}
 			s.CoActivity[key] = activity
 		}
-		login = coBotKey(login)
 		seen := seenAt.UTC()
 		if previous, ok := activity[login]; !ok || previous.Before(seen) {
 			activity[login] = seen
 		}
 	}
+}
+
+func (s *State) rememberCoAnswer(key, login string, at time.Time) {
+	if s.CoAnswers == nil {
+		s.CoAnswers = map[string]map[string]time.Time{}
+	}
+	answers := s.CoAnswers[key]
+	if answers == nil {
+		answers = map[string]time.Time{}
+		s.CoAnswers[key] = answers
+	}
+	answered := at.UTC()
+	login = coBotKey(login)
+	if previous, ok := answers[login]; !ok || previous.Before(answered) {
+		answers[login] = answered
+	}
+}
+
+// RememberCoAnswer records completed-review evidence when its source round was
+// superseded before the observation could be written back to that round.
+func (s *State) RememberCoAnswer(repo string, pr int, login string, at time.Time) {
+	s.rememberCoAnswer(Key(repo, pr), login, at)
+}
+
+// CoReviewerAnswered reports durable completed-review evidence for login on
+// this pull request. The round scans retain compatibility with state written
+// before the unbounded answer index existed.
+func (s *State) CoReviewerAnswered(repo string, pr int, login string) bool {
+	key, login := Key(repo, pr), coBotKey(login)
+	if answers := s.CoAnswers[key]; !answers[login].IsZero() {
+		return true
+	}
+	if round := s.Round(repo, pr); round != nil && round.Co(login).AnsweredAt != nil {
+		return true
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Co(login).AnsweredAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // RememberCoActivity folds a round's reviewer activity into the durable per-PR
@@ -1458,6 +1518,13 @@ const DispatchTTL = 10 * time.Minute
 // this head has had.
 type DispatchClaim struct {
 	Host string `json:"host"`
+	// OnePass binds this session to the campaign policy that granted it. A
+	// repository setting can change while the process runs; completion must not
+	// reinterpret an older ordinary session as the campaign's merge hand-off.
+	OnePass bool `json:"one_pass,omitempty"`
+	// OnePassCampaign prevents a fixer finishing after one-pass was disabled
+	// from recreating a hand-off in a later campaign.
+	OnePassCampaign string `json:"one_pass_campaign,omitempty"`
 	// Token distinguishes two claims from the same host, so a restarted watcher
 	// cannot heartbeat or release the claim of the process it replaced.
 	Token     string    `json:"token"`
@@ -1661,6 +1728,33 @@ func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 		s.Dispatches = map[string]DispatchClaim{}
 	}
 	s.Dispatches[Key(repo, pr)] = claim
+}
+
+// OnePassDispatch reports whether token owns a claim created by one-pass mode.
+// The independent claim map survives the session pushing and archiving its
+// round, while the round scans preserve compatibility with older state shapes.
+func (s *State) OnePassDispatch(repo string, pr int, token string) bool {
+	onePass, _ := s.OnePassDispatchCampaign(repo, pr, token)
+	return onePass
+}
+
+// OnePassDispatchCampaign returns the campaign identity recorded when token's
+// one-pass claim was granted.
+func (s *State) OnePassDispatchCampaign(repo string, pr int, token string) (bool, string) {
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		return claim.OnePass, claim.OnePassCampaign
+	}
+	if round := s.Round(repo, pr); round != nil && round.Dispatch != nil && round.Dispatch.Token == token {
+		return round.Dispatch.OnePass, round.Dispatch.OnePassCampaign
+	}
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && round.Dispatch != nil && round.Dispatch.Token == token {
+			return round.Dispatch.OnePass, round.Dispatch.OnePassCampaign
+		}
+	}
+	return false, ""
 }
 
 // Live reports whether a session is still behind this claim: a heartbeat within

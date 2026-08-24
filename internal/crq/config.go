@@ -44,12 +44,16 @@ type Config struct {
 	// SkipMarker suppresses fleet auto-review when present in a PR body.
 	// Manual `crq loop` remains unaffected so an explicit review can override it.
 	// Read it through SkipsReview, never with a plain substring test.
-	SkipMarker    string
-	StateRef      string
-	Bot           string
-	RequiredBots  []string
-	FeedbackBots  []string
-	ReviewCommand string
+	SkipMarker string
+	StateRef   string
+	// StateGitAuthorName/Email optionally attribute commits made by the git
+	// state fallback. Empty uses the stable public noreply identity.
+	StateGitAuthorName  string
+	StateGitAuthorEmail string
+	Bot                 string
+	RequiredBots        []string
+	FeedbackBots        []string
+	ReviewCommand       string
 	// CoBots are the enabled co-reviewer bots (CRQ_COBOTS + per-bot
 	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
 	// co-reviewer; required ones are already folded into RequiredBots.
@@ -94,6 +98,11 @@ type Config struct {
 	// FixAskMode controls when it should stop and surface a clarification.
 	FixSeverities map[string]bool
 	FixAskMode    string
+	// OnePass caps automated review at the first round for a pull request.
+	// MergeMethod optionally merges the exact head a successful fixer released.
+	// Both come from repository/fleet solver state, never the host environment.
+	OnePass     bool
+	MergeMethod string
 	// DispatchForks allows fix sessions on pull requests whose head branch lives
 	// in another repository. Off by default: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.
@@ -375,6 +384,8 @@ func BuildConfig(env map[string]string) (Config, error) {
 		RateLimitCoDegrade:   stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
 		PreflightSkipBlocked: boolEnv(env, "CRQ_PREFLIGHT_SKIP_BLOCKED", true),
 	}
+	cfg.StateGitAuthorName = strings.TrimSpace(env["CRQ_STATE_GIT_AUTHOR_NAME"])
+	cfg.StateGitAuthorEmail = strings.TrimSpace(env["CRQ_STATE_GIT_AUTHOR_EMAIL"])
 	// Kept so a fleet record can be layered over it and the whole thing
 	// re-parsed. Unexported: it is an input, not part of the configuration.
 	cfg.env = maps.Clone(env)

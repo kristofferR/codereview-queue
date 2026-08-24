@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -21,8 +22,12 @@ type fakeGitHub struct {
 	mu              sync.Mutex
 	pulls           map[string]ghapi.Pull
 	pullReads       map[string]int
+	pullResults     map[string]map[int]ghapi.Pull
 	pullErrOnRead   map[string]int
 	pullErrs        map[string]error
+	mergeErrs       map[string]error
+	mergeResults    map[string]ghapi.MergeResult
+	merged          []string
 	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
 	reviews         map[string][]ghapi.Review
@@ -108,6 +113,8 @@ func newFakeGitHub() *fakeGitHub {
 		pullReads:       map[string]int{},
 		pullErrOnRead:   map[string]int{},
 		pullErrs:        map[string]error{},
+		mergeErrs:       map[string]error{},
+		mergeResults:    map[string]ghapi.MergeResult{},
 		commits:         map[string]ghapi.Commit{},
 		commitErrs:      map[string]error{},
 		reviews:         map[string][]ghapi.Review{},
@@ -177,11 +184,30 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull
 	if err := f.pullErrs[key]; err != nil {
 		return ghapi.Pull{}, err
 	}
+	if byRead := f.pullResults[key]; byRead != nil {
+		if pull, ok := byRead[f.pullReads[key]]; ok {
+			return pull, nil
+		}
+	}
 	pull, ok := f.pulls[key]
 	if !ok {
 		return ghapi.Pull{}, errors.New("missing pull")
 	}
 	return pull, nil
+}
+
+func (f *fakeGitHub) MergePull(_ context.Context, repo string, pr int, sha, method string) (ghapi.MergeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeKey(repo, pr)
+	if err := f.mergeErrs[key]; err != nil {
+		return ghapi.MergeResult{}, err
+	}
+	f.merged = append(f.merged, fmt.Sprintf("%s@%s:%s", key, sha, method))
+	if result, ok := f.mergeResults[key]; ok {
+		return result, nil
+	}
+	return ghapi.MergeResult{SHA: sha, Merged: true, Message: "Pull Request successfully merged"}, nil
 }
 
 func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (ghapi.Commit, error) {
@@ -795,6 +821,45 @@ func TestAutoReviewOnceReleasesLeader(t *testing.T) {
 	}
 }
 
+func TestAutoReviewAppliesOnePassConfiguredReviewerScope(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	cfg.Reviewers = []Reviewer{
+		{Login: cfg.Bot, Required: true, Budget: dialect.BudgetAccount},
+		{Login: dialect.CodexBotLogin, Name: "Codex", Budget: dialect.BudgetNone},
+	}
+	cfg.CoBots = []CoBotConfig{{Name: "codex", Login: dialect.CodexBotLogin}}
+	repo, pr, head := "o/app", 4, "abcdef1234567890"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	review := ghapi.Review{CommitID: "1111111111111111", State: "COMMENTED", Body: "reviewed"}
+	review.User.Login = dialect.CodexBotLogin
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round != nil {
+		t.Fatalf("one-pass scan queued a second configured review: %+v", round)
+	}
+}
+
 func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -977,6 +1042,35 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 	}
 	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
 		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
+	}
+}
+
+func TestEnqueueBatchRejectsCandidateFromObsoleteOnePassPolicy(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetSolver("o/app", SolverSettings{
+			SetOnePass: true, OnePass: true, OnePassCampaign: "new-campaign",
+		}, "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{
+		Repo: "o/app", PR: 1, Head: "aaaaaaaa1", PolicyChecked: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/app", 1); round != nil {
+		t.Fatalf("candidate evaluated before one-pass was enabled was enqueued: %+v", round)
 	}
 }
 

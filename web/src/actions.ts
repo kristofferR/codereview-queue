@@ -65,6 +65,8 @@ export type ActionBody = {
     ask_mode?: string;
     forks?: boolean;
     skip_authors?: string[];
+    one_pass?: boolean;
+    merge_method?: "" | "merge" | "squash" | "rebase";
     unset_models?: boolean;
     unset_effort?: boolean;
     unset_prompt?: boolean;
@@ -72,6 +74,8 @@ export type ActionBody = {
     unset_ask_mode?: boolean;
     unset_forks?: boolean;
     unset_skip_authors?: boolean;
+    unset_one_pass?: boolean;
+    unset_merge?: boolean;
     clear?: boolean;
   };
 };

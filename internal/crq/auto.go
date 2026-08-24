@@ -372,7 +372,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if pr.Title != "" {
 				titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
 			}
-			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
+			// A one-pass campaign asks whether this PR has ever received its one
+			// review, regardless of later heads. The watcher owns the single fixer
+			// and exact-head merge after that boundary.
+			reviewCfg := repoSkips(repo)
+			incremental := opts.Incremental && !reviewCfg.OnePass
+			need, head, nerr := s.reviewNeeded(ctx, state, repo, pr.Number, incremental, reviewCfg.OnePass, s.logEnqueue)
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
@@ -386,7 +391,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return false, nil
 			}
 			if need {
-				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head, Title: pr.Title})
+				solver := state.EffectiveSolver(repo)
+				candidates = append(candidates, queueCandidate{
+					Repo: repo, PR: pr.Number, Head: head, Title: pr.Title,
+					PolicyChecked: true, OnePass: reviewCfg.OnePass, OnePassCampaign: solver.OnePassCampaign,
+				})
 			}
 			return false, nil
 		})
@@ -412,17 +421,34 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 // It announces each "yes" to the log, which is what makes an autoreview pass
 // explain the work it queued.
 func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, string, error) {
-	return s.reviewNeeded(ctx, state, repo, pr, incremental, s.logEnqueue)
+	return s.reviewNeeded(ctx, state, repo, pr, incremental, false, s.logEnqueue)
 }
 
 // reviewNeeded is the predicate itself, with the announcement injected. The
 // enrollment preview asks exactly this question about pull requests it is not
 // enqueueing, and an "enqueue …" line from a dialog that wrote nothing is how an
 // estimate reads as an action already taken.
-func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
+func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental, anyConfigured bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
+	}
+	cfg := s.cfgFor(state, repo)
+	campaign := state.EffectiveSolver(repo).OnePassCampaign
+	reviewScope := map[string]bool{}
+	if anyConfigured {
+		reviewScope = onePassReviewerScope(state, cfg, repo, campaign)
+		if state.OnePassReviewed(repo, pr, campaign) || state.OnePassReviewerAnswered(repo, pr, campaign) {
+			return false, head, nil
+		}
+		// Programmatic/legacy callers can opt into the broad one-pass predicate
+		// before a campaign identity has been persisted. Keep their durable
+		// co-reviewer evidence meaningful too.
+		for login := range reviewScope {
+			if state.CoReviewerAnswered(repo, pr, login) {
+				return false, head, nil
+			}
+		}
 	}
 	if r := state.Round(repo, pr); r != nil && r.Head == head {
 		// Unless the round is a marker for reviewers that changed while this PR
@@ -440,9 +466,9 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
-	cfg := s.cfgFor(state, repo)
 	bot := dialect.NormalizeBotName(cfg.Bot)
 	lastBotReview := ""
+	reviewedEver := map[string]bool{}
 	// Every reviewer this repository gates on, not just the primary. A repo that
 	// requires Codex or Bugbot and already has a CodeRabbit review at the head
 	// would otherwise never be enqueued, so the reviewer it chose is never asked.
@@ -452,10 +478,21 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		if review.CommitID == "" {
 			continue
 		}
+		// Match observe's carrier filter. CodeRabbit posts an empty COMMENTED
+		// review object before its real review body and inline comments finish;
+		// that transport shell cannot consume a campaign's only review round.
+		if cfg.isConfiguredBot(review.User.Login) &&
+			strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "" {
+			continue
+		}
+		if strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
 		if login == bot {
 			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
 		reviewedHere[login] = dialect.ShortOID(review.CommitID)
+		reviewedEver[login] = true
 	}
 	if incremental {
 		need := lastBotReview != head
@@ -473,15 +510,77 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 		}
 		return need, head, nil
 	}
-	if lastBotReview != "" {
+	// Ordinary --no-incremental retains its historical contract: it asks only
+	// whether the primary has ever reviewed this PR. A one-pass campaign opts
+	// into the broader PR-wide cap, where any configured reviewer consumes the
+	// single allowed review.
+	configuredScope := anyConfigured || cfg.PrimaryOff
+	if !configuredScope && lastBotReview != "" {
+		// Programmatic/legacy Config values predate the canonical reviewer list;
+		// Bot is their primary reviewer and remains a valid one-round marker.
 		return false, head, nil
+	}
+	if configuredScope {
+		if len(cfg.Reviewers) == 0 && lastBotReview != "" {
+			return false, head, nil
+		}
+		// Review objects span the whole PR, but check runs do not: GitHub lists
+		// them by ref. The state index is the durable PR-scoped record that a
+		// check-bearing reviewer completed a review on an older head. Generic bot
+		// activity cannot consume the cap because it may be an in-progress,
+		// auxiliary, or failed check that delivered no review.
+		for login := range reviewScope {
+			if reviewedEver[login] {
+				return false, head, nil
+			}
+		}
+		if !anyConfigured {
+			for _, reviewer := range cfg.Reviewers {
+				login := dialect.NormalizeBotName(reviewer.Login)
+				if reviewedEver[login] || state.CoReviewerAnswered(repo, pr, login) {
+					return false, head, nil
+				}
+			}
+		}
+		if cfg.coChecksRelevant() {
+			runs, err := s.gh.ListCheckRuns(ctx, repo, head)
+			if err != nil {
+				return false, "", err
+			}
+			for _, run := range runs {
+				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
+				if cfg.coBotEnabled(login) && (verdict == dialect.CheckDone || verdict == dialect.CheckDoneClean) {
+					return false, head, nil
+				}
+			}
+		}
 	}
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
 	}
+	marker := strings.TrimSpace(s.cfg.ReviewDoneMarker)
+	classifier := dialect.Classifier{
+		CodeRabbit: s.cr, Bot: cfg.Bot, ReviewCommand: cfg.ReviewCommand,
+		Primary: cfg.classifierPrimary(), CoReviewers: cfg.classifierCoReviewers(),
+	}
 	for _, comment := range comments {
-		if dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
+		event := classifier.Classify(comment.User.Login, comment.Body, comment.ID, comment.CreatedAt, comment.UpdatedAt)
+		if anyConfigured && dialect.NormalizeBotName(comment.User.Login) == bot &&
+			event.Kind == dialect.EvNoAction && !event.SummaryOnly {
+			return false, head, nil
+		}
+		if marker != "" && dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, marker) {
+			// The marker appears in CodeRabbit's summary-only, skipped,
+			// in-progress and failed comments too. Ordinary first-review mode
+			// retains its legacy marker behavior, but a one-pass campaign may
+			// merge after this decision and therefore requires a classified clean
+			// completion when no submitted review object exists.
+			if !anyConfigured {
+				return false, head, nil
+			}
+		}
+		if configuredScope && cfg.coBotEnabled(comment.User.Login) && event.Kind == dialect.EvCoClean {
 			return false, head, nil
 		}
 	}
@@ -489,7 +588,9 @@ func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr
 	if err != nil {
 		return false, "", err
 	}
-	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
+	// A pull-request author controls this body. It remains a compatibility
+	// marker for ordinary first-review enrollment, never campaign merge proof.
+	if !anyConfigured && marker != "" && strings.Contains(pull.Body, marker) {
 		return false, head, nil
 	}
 	announce(repo, pr, head, "never reviewed")

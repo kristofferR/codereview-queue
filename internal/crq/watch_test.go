@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/workspace"
 )
@@ -24,9 +25,17 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	repo := "owner/thing"
 	sha := originRepo(t, filepath.Join(base, repo))
 	t.Setenv("CRQ_REMOTE_BASE", base)
+	t.Setenv("GITHUB_TOKEN", "ghp_session_token")
+	t.Setenv("GH_TOKEN", "stale_higher_precedence_token")
+	t.Setenv(workspace.TokenEnv, "stale_git_token")
 
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
+	if realRoot, err := filepath.EvalSymlinks(cfg.WorkspaceRoot); err != nil {
+		t.Fatal(err)
+	} else {
+		cfg.WorkspaceRoot = realRoot
+	}
 	cfg.AllowRepos = map[string]bool{repo: true}
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
@@ -43,8 +52,8 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.json")
 	script := filepath.Join(t.TempDir(), "session.sh")
 	body := "#!/bin/sh\n" +
-		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\"}' " +
-		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" > " + record + "\n"
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\",\"token\":\"%s\",\"github_token\":\"%s\",\"gh_token\":\"%s\",\"git_token\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" \"$CRQ_DISPATCH_TOKEN\" \"$GITHUB_TOKEN\" \"$GH_TOKEN\" \"$CRQ_GIT_TOKEN\" > " + record + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +70,17 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	pool.wait()
 
-	var got struct{ Repo, PR, Head, Cwd, Findings, Token string }
+	var got struct {
+		Repo        string `json:"repo"`
+		PR          string `json:"pr"`
+		Head        string `json:"head"`
+		Cwd         string `json:"cwd"`
+		Findings    string `json:"findings"`
+		Token       string `json:"token"`
+		GitHubToken string `json:"github_token"`
+		GHToken     string `json:"gh_token"`
+		GitToken    string `json:"git_token"`
+	}
 	data, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatalf("the session did not run: %v", err)
@@ -82,6 +101,9 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	}
 	if got.Token == "" {
 		t.Fatal("the session was given no dispatch token for its crq next calls")
+	}
+	if got.GitHubToken != "ghp_session_token" || got.GHToken != "ghp_session_token" || got.GitToken != "ghp_session_token" {
+		t.Fatalf("session credentials = github:%q gh:%q git:%q, want the daemon's current token", got.GitHubToken, got.GHToken, got.GitToken)
 	}
 	// OUTSIDE the worktree: at the repository root it is an untracked file, and
 	// a session following the documented `git add -A` push would commit crq's
@@ -241,7 +263,11 @@ func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
 	cfg.WorkspaceRoot = t.TempDir()
 	cfg.AllowRepos = map[string]bool{repo: true}
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 5, sha
+	gh.pulls[fakeKey(repo, 5)] = pull
+	svc := NewService(cfg, gh, store, nil)
 	report := NextReport{Repo: repo, PR: 5, Head: sha, Action: "fix"}
 	seedRound(t, store, cfg, repo, 5, sha, PhaseQueued, time.Now().UTC(), 0)
 
@@ -286,6 +312,9 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{repo: true}
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 18, sha
+	gh.pulls[fakeKey(repo, 18)] = pull
 	store := NewMemoryStore(cfg)
 	switchable := &loadSwitchStore{StateStore: store}
 	svc := NewService(cfg, gh, switchable, nil)
@@ -587,6 +616,7 @@ func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
 	gh.pulls[fakeKey(repo, pr)] = pull
 	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	gh.graphQL = func(query string, _ map[string]any, out any) error {
@@ -666,6 +696,251 @@ func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
 	}
 }
 
+func TestOneShotDispatchReportsImmediateOnePassMergeFailure(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 131
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	mergeable := true
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
+	pull.Mergeable, pull.MergeableState = &mergeable, "clean"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	mergeErr := errors.New("merge endpoint unavailable")
+	gh.mergeErrs[fakeKey(repo, pr)] = mergeErr
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on, method, one := true, "squash", 1
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on, MergeMethod: &method, MaxAttempts: &one}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, sha, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: sha, Severity: "major"}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "one-pass-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 1); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Once: true, Command: []string{"/usr/bin/true"}}, report, token)
+	if ok || !strings.Contains(why, mergeErr.Error()) {
+		t.Fatalf("one-shot dispatch = (%t, %q), want immediate merge failure", ok, why)
+	}
+}
+
+func TestOnePassFinalizerBindsTheBaseRefreshedAfterItsSession(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 132
+	repoDir := filepath.Join(base, repo)
+	initial := originRepo(t, repoDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "BASE.md"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "add", "BASE.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "commit", "-m", "advance base"); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := gitDir(context.Background(), repoDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var before, after ghapi.Pull
+	before.State, before.Number, before.Head.SHA = "open", pr, initial
+	before.Base.SHA, before.Base.Ref = initial, "main"
+	after = before
+	after.Head.SHA, after.Base.SHA = advanced, advanced
+	key := fakeKey(repo, pr)
+	gh.pulls[key] = after
+	gh.pullResults = map[string]map[int]ghapi.Pull{key: {1: before}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on, one := true, 1
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on, MaxAttempts: &one}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, initial, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: initial, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: initial, Severity: "major"}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "moving-base-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 1); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+	script := filepath.Join(t.TempDir(), "finalize.sh")
+	body := fmt.Sprintf("#!/bin/sh\nset -eu\ngit merge --ff-only %s\ngit push origin HEAD:refs/pull/%d/head\n", advanced, pr)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{
+		Command: []string{script},
+	}, report, token)
+	if !ok {
+		t.Fatalf("one-pass dispatch failed: %s", why)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, ok := st.OnePassProgressFor(repo, pr)
+	if !ok || progress.ReadyHead != advanced || progress.ReadyBase != advanced {
+		t.Fatalf("ready hand-off = %+v, ok=%t; want refreshed base %s", progress, ok, advanced)
+	}
+}
+
+func TestOnePassFinalizerKeepsProvenBaseWhenBaseAdvancesAfterSession(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 134
+	repoDir := filepath.Join(base, repo)
+	initial := originRepo(t, repoDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "BASE.md"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "add", "BASE.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(context.Background(), repoDir, "commit", "-m", "advance base"); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := gitDir(context.Background(), repoDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var before, after ghapi.Pull
+	before.State, before.Number, before.Head.SHA = "open", pr, initial
+	before.Base.SHA, before.Base.Ref = initial, "main"
+	after = before
+	after.Base.SHA = advanced
+	key := fakeKey(repo, pr)
+	gh.pulls[key] = after
+	gh.pullResults = map[string]map[int]ghapi.Pull{key: {1: before}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, initial, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: initial, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{
+			ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: initial, Severity: "major",
+		}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "post-session-base-advance"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 3); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{
+		Command: []string{"/usr/bin/true"},
+	}, report, token)
+	if !ok {
+		t.Fatalf("successful finalizer was terminalized after the base advanced: %s", why)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, present := st.OnePassProgressFor(repo, pr)
+	if !present || progress.ReadyHead != initial || progress.ReadyBase != initial || !progress.VerificationPending {
+		t.Fatalf("base-moved hand-off = %+v, present=%t; want the session-proven base pending verification", progress, present)
+	}
+}
+
+func TestOnePassFinalizerKeepsSuccessfulHandoffWhenPostSessionPullReadFails(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 133
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	pull.Base.SHA, pull.Base.Ref = sha, "main"
+	key := fakeKey(repo, pr)
+	gh.pulls[key] = pull
+	gh.pullErrOnRead[key] = 2
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	on := true
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{OnePass: &on}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, sha, PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: string(engine.ActionFix),
+		Findings: []dialect.Finding{{
+			ID: onePassFinalizeSource, Source: onePassFinalizeSource, Commit: sha, Severity: "major",
+		}},
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.onePassCampaign = st.EffectiveSolver(repo).OnePassCampaign
+	token := "post-session-read-failure"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 3); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{
+		Command: []string{"/usr/bin/true"},
+	}, report, token)
+	if !ok {
+		t.Fatalf("successful finalizer was terminalized after a transient pull read: %s", why)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, present := st.OnePassProgressFor(repo, pr)
+	if !present || progress.ReadyHead != sha || progress.ReadyBase != sha || !progress.VerificationPending {
+		t.Fatalf("retryable hand-off = %+v, present=%t; want exact head/base pending verification", progress, present)
+	}
+}
+
 func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
 	base := t.TempDir()
 	repo, pr := "owner/thing", 13
@@ -674,7 +949,11 @@ func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
 
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	report := NextReport{
 		Repo: repo, PR: pr, Head: sha, Action: "fix",
 		Findings: []dialect.Finding{{ID: "f1", Commit: sha}},
@@ -964,6 +1243,56 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	}
 }
 
+// A watch pass lists open PRs once, but checkout preparation happens later and
+// can overlap another merge. Never spend CPU on an agent after that snapshot is
+// stale, and refund the claim because no fix attempt actually ran.
+func TestDispatchRechecksThePullBeforeStartingTheAgent(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "closed"
+	pull.Merged = true
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 7)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 7, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	marker := filepath.Join(t.TempDir(), "agent-started")
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := newDispatchPool(0)
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script, marker}, MaxAttempts: 3,
+	}, pool, NextReport{Repo: repo, PR: 7, Head: sha, Action: "fix"}); ok {
+		t.Fatal("a stale merged pull request started a fix session")
+	} else if !strings.Contains(why, "no longer open") {
+		t.Fatalf("dispatch refusal = %q, want the stale-open explanation", why)
+	}
+	pool.wait()
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("agent marker stat = %v, want the agent never started", err)
+	}
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 7)
+	if round == nil || round.Dispatch == nil || round.Dispatch.Attempts != 0 {
+		t.Fatalf("round after stale skip = %#v, want the unspent attempt refunded", round)
+	}
+}
+
 func TestWatchQueuesCheckoutWithoutBlockingThePass(t *testing.T) {
 	bin := t.TempDir()
 	git := filepath.Join(bin, "git")
@@ -1009,7 +1338,11 @@ func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = t.TempDir()
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 15, sha
+	gh.pulls[fakeKey(repo, 15)] = pull
+	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, 15, sha, PhaseQueued, time.Now().UTC(), 0)
 	script := filepath.Join(t.TempDir(), "agent.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {

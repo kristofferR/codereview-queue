@@ -25,21 +25,46 @@ import (
 type unknownFields map[string]json.RawMessage
 
 var (
-	fireSlotFields      = jsonFieldNames(reflect.TypeOf(FireSlot{}))
-	roundFields         = jsonFieldNames(reflect.TypeOf(Round{}))
-	stateFields         = jsonFieldNames(reflect.TypeOf(State{}))
-	fleetFields         = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
-	solverFields        = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
-	repoReviewersFields = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
-	repoAutofixFields   = jsonFieldNames(reflect.TypeOf(RepoAutofixSwitch{}))
-	enrollmentFields    = jsonFieldNames(reflect.TypeOf(RepoEnrollment{}))
-	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
-	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
-	dispatchFields      = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
-	workClaimFields     = jsonFieldNames(reflect.TypeOf(WorkClaim{}))
-	hostReportFields    = jsonFieldNames(reflect.TypeOf(HostReport{}))
-	toolReportFields    = jsonFieldNames(reflect.TypeOf(ToolReport{}))
+	fireSlotFields        = jsonFieldNames(reflect.TypeOf(FireSlot{}))
+	roundFields           = jsonFieldNames(reflect.TypeOf(Round{}))
+	stateFields           = jsonFieldNames(reflect.TypeOf(State{}))
+	fleetFields           = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
+	solverFields          = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
+	repoReviewersFields   = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
+	repoAutofixFields     = jsonFieldNames(reflect.TypeOf(RepoAutofixSwitch{}))
+	enrollmentFields      = jsonFieldNames(reflect.TypeOf(RepoEnrollment{}))
+	accountFields         = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
+	coBotFields           = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
+	dispatchFields        = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
+	workClaimFields       = jsonFieldNames(reflect.TypeOf(WorkClaim{}))
+	hostReportFields      = jsonFieldNames(reflect.TypeOf(HostReport{}))
+	toolReportFields      = jsonFieldNames(reflect.TypeOf(ToolReport{}))
+	onePassFields         = jsonFieldNames(reflect.TypeOf(OnePassProgress{}))
+	onePassEvidenceFields = jsonFieldNames(reflect.TypeOf(OnePassEvidence{}))
 )
+
+// UnmarshalJSON decodes campaign review evidence while preserving fields from
+// a newer rolling-deployment peer.
+func (e *OnePassEvidence) UnmarshalJSON(raw []byte) error {
+	type plain OnePassEvidence
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, onePassEvidenceFields)
+	if err != nil {
+		return err
+	}
+	*e = OnePassEvidence(decoded)
+	e.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes campaign review evidence with unknown members intact.
+func (e OnePassEvidence) MarshalJSON() ([]byte, error) {
+	type plain OnePassEvidence
+	return mergeUnknown(plain(e), e.unknown)
+}
 
 // UnmarshalJSON decodes an interactive work claim and preserves fields written
 // by a newer binary. State recognises the surrounding map, so the record needs
@@ -312,6 +337,30 @@ func (s *RepoAutofixSwitch) UnmarshalJSON(raw []byte) error {
 func (s RepoAutofixSwitch) MarshalJSON() ([]byte, error) {
 	type plain RepoAutofixSwitch
 	return mergeUnknown(plain(s), s.unknown)
+}
+
+// UnmarshalJSON decodes a one-pass hand-off and preserves fields written by a
+// newer binary. The containing map is known to this binary, so the record must
+// carry its own unknown members.
+func (p *OnePassProgress) UnmarshalJSON(raw []byte) error {
+	type plain OnePassProgress
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, onePassFields)
+	if err != nil {
+		return err
+	}
+	*p = OnePassProgress(decoded)
+	p.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a one-pass hand-off with unknown members intact.
+func (p OnePassProgress) MarshalJSON() ([]byte, error) {
+	type plain OnePassProgress
+	return mergeUnknown(plain(p), p.unknown)
 }
 
 // The same nesting argument applies to records that have been recognised for

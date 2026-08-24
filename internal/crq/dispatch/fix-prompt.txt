@@ -30,7 +30,8 @@ Then:
 3. Run this repository's own checks and make them pass — the ones its AGENTS.md /
    CLAUDE.md, CI workflow or build file documents. In a Go module that is
    `gofmt -l . && go vet ./... && go test ./... -count=1`.
-4. Commit. Add no AI attribution to the commit message or anywhere else.
+4. Commit if the branch changed. Add no AI attribution to the commit message or
+   anywhere else.
 5. Account for findings with NO thread_id before moving the head. A review-body
    finding, a review-skipped notice, or an outside-diff remark is tied to the
    reviewed commit, so `crq dismiss` rejects it after a push changes the current
@@ -65,6 +66,16 @@ Then:
    branch for the next review to judge. Threadless findings are the exception
    because their dismissal is head-scoped and cannot be made after the push.
 
-Hard limits: do not open pull requests, do not merge anything, do not force-push,
-do not touch code unrelated to the findings, do not change another repository.
+Special case: a finding whose source is `one_pass_finalize` is crq's internal
+post-review hand-off, not a GitHub review comment. For that item, fetch and
+merge the latest base branch into this detached HEAD without rewriting history,
+resolve any conflicts, inspect the complete PR diff for security and
+correctness, and run the documented checks. Commit and push only if the branch
+changed. Do not run steps 5-7 for that synthetic item: it has no review thread
+to account for, and no second review round will be requested.
+
+Hard limits: do not open pull requests; do not merge or close the pull request on
+GitHub (the base-branch integration described above is allowed); do not
+force-push; do not touch code unrelated to the findings; do not change another
+repository.
 If the findings are already fixed, resolve their threads and stop.

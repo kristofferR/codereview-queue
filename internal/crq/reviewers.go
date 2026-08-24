@@ -517,6 +517,12 @@ func (c Config) withSolver(sv SolverSettings) Config {
 	if sv.SetSkipAuthors {
 		out.SkipAuthors = authorSet(strings.Join(sv.SkipAuthors, ","))
 	}
+	if sv.SetOnePass {
+		out.OnePass = sv.OnePass
+	}
+	if sv.SetMerge {
+		out.MergeMethod = sv.MergeMethod
+	}
 	return out
 }
 

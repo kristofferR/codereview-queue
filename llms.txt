@@ -42,6 +42,9 @@ export CRQ_STATE_REF=crq-state-v3
 # export CRQ_SERVER_TOKEN=shared-secret
 ```
 
+Shared/non-loopback `CRQ_SERVER_URL` values must use HTTPS through a reverse proxy. Plain HTTP is
+accepted only for localhost and loopback IP addresses.
+
 `crq serve` must be running, and CodeRabbit native auto-review must be off.
 
 ## Agent Loop
@@ -330,10 +333,23 @@ crq solver REPO                                       # effective settings + whe
 crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
 crq solver set REPO --severities minor,potential --ask uncertain
 crq solver set REPO --prompt "This project uses bun, never npm."
+crq solver set REPO --models gpt-5.6-sol --effort medium --one-pass on --merge squash
 crq solver set --fleet --effort medium                # the default every repository inherits
-crq solver set REPO --inherit models,effort,severities,ask,forks,skip-authors
+crq solver set REPO --inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge
 crq solver clear REPO | crq solver clear --fleet
 ```
+
+`--one-pass on` is a repository-scoped campaign mode: the first review anywhere on a PR consumes
+its only review round, then one isolated fixer/finalizer runs even if the review was clean.
+`--merge merge|squash|rebase` requires one-pass and lets the autofix watcher merge only the exact
+head that successful session released after GitHub reports it conflict-free. Review and check
+status are deliberately ignored because the fixer push makes the one allowed review stale. The
+finalizer must integrate the base crq observed, and crq verifies that base immediately before the
+merge request. GitHub's merge API atomically guards the head SHA but has no expected-base field, so
+a base update racing that final request is included by GitHub's merge transaction. A later push,
+failed session, draft, or conflict blocks instead of launching another fixer or merging unverified
+code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while preserving
+unrelated repository solver overrides; `crq solver clear REPO` discards every repo solver override.
 
 `--models` is an ordered ranking. A provider/model outage parks that entry until its reported reset
 time and immediately tries the next one. These outages do not consume the attempt budget; ordinary
@@ -346,7 +362,7 @@ stops instead of guessing: only when blocked, when confidence is low, or at the 
 ambiguity. A clarification preserves the attempt and holds the PR with the agent's concrete question.
 
 `--inherit` hands a setting back to the layer beneath. It is required for models, effort, severity
-scope, clarification policy, forks and
+scope, clarification policy, forks, one-pass/merge and
 skipped authors because an empty model ranking or effort means "use the agent default", `off` is a
 real fork policy, and an empty author list means "skip nobody". `--attempts 0` inherits directly.
 

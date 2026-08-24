@@ -283,6 +283,9 @@ func TestFeedbackPersistsCoReviewerActivityBeforeRoundExists(t *testing.T) {
 	if seen := st.CoActivity[QueueKey(repo, pr)][dialect.NormalizeBotName(bugbotLogin)]; !seen.Equal(base) {
 		t.Fatalf("pre-round reviewer activity = %v, want %v", seen, base)
 	}
+	if answered := st.CoAnswers[QueueKey(repo, pr)][dialect.NormalizeBotName(bugbotLogin)]; !answered.Equal(base) {
+		t.Fatalf("pre-round completed review = %v, want %v", answered, base)
+	}
 }
 
 func TestNoteCoAnswersKeepsCurrentParticipationOnCurrentHead(t *testing.T) {

@@ -68,6 +68,9 @@ const (
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
 	// CapsSolver is the capability a host needs to honour solver settings.
 	CapsSolver = crqstate.CapsSolver
+	// CapsOnePass is the capability autoreview/autofix hosts need for one-pass
+	// review capping and post-fix merge hand-offs.
+	CapsOnePass = crqstate.CapsOnePass
 	// CapsPreflightSkipBlocked is the capability a host needs to honour the
 	// shared blocked-preflight policy.
 	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked
@@ -91,6 +94,9 @@ func (c Config) storeConfig() StoreConfig {
 		DashboardIssue: c.DashboardIssue,
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
+		GitAuthorName:  c.StateGitAuthorName,
+		GitAuthorEmail: c.StateGitAuthorEmail,
+		TokenSource:    ghapi.LookupToken,
 		CoReviewers:    c.coReviewerSummary(),
 		ResolveCoReviewers: func(fleet FleetDefaults) string {
 			return c.WithFleet(fleet).coReviewerSummary()

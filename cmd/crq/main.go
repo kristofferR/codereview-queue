@@ -139,6 +139,7 @@ func run(ctx context.Context, args []string) int {
 	}
 	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 
 	switch args[0] {
@@ -710,8 +711,10 @@ func run(ctx context.Context, args []string) int {
 				Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
 				Severities: v.Severities, AskMode: v.AskMode,
-				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
-				Lagging: hostsOfWriters(v.Lagging),
+				SkipAuthors: v.SkipAuthors, OnePass: v.OnePass, MergeMethod: v.MergeMethod,
+				Sources: v.Sources, By: v.By,
+				Lagging:        hostsOfWriters(v.Lagging),
+				OnePassLagging: hostsOfWriters(v.OnePassLagging),
 			}
 			// Which hosts can actually run the agent — capability, beside the
 			// policy, so a repository is never quietly set to something no
@@ -956,7 +959,7 @@ func watchDispatchOption(dispatch, noDispatch bool) *bool {
 
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {
 	if len(args) == 0 {
-		fatal(errors.New("usage: crq debug <enqueue|pump|refresh|state>"))
+		fatal(errors.New("usage: crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>"))
 		return 1
 	}
 	if err := cfg.RequireState(); err != nil {
@@ -992,6 +995,50 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			return 1
 		}
 		printJSON(state.Account)
+		return 0
+	case "retire-merged":
+		assumeMerged := len(args) > 1 && args[1] == "--assume-merged"
+		targetArgs := args[1:]
+		if assumeMerged {
+			targetArgs = args[2:]
+		}
+		repo, pr, err := target(ctx, service, targetArgs, "crq debug retire-merged [--assume-merged] [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		if assumeMerged {
+			err = service.RetireMergedVerified(ctx, repo, pr)
+		} else {
+			err = service.RetireMerged(ctx, repo, pr)
+		}
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(map[string]any{"status": "merged", "repo": crq.NormalizeRepo(repo), "pr": pr})
+		return 0
+	case "merge-ready":
+		repo, pr, err := target(ctx, service, args[1:], "crq debug merge-ready [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		eligible, merged, reason, err := service.MergeOnePassReady(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		status := "not_ready"
+		if eligible {
+			status = "waiting"
+		}
+		if merged {
+			status = "merged"
+		}
+		printJSON(map[string]any{
+			"status": status, "repo": crq.NormalizeRepo(repo), "pr": pr, "reason": reason,
+		})
 		return 0
 	case "state":
 		state, _, err := store.Load(ctx)
@@ -1078,7 +1125,7 @@ USAGE
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
-  crq debug <enqueue|pump|refresh|state>
+  crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
@@ -1315,7 +1362,8 @@ crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text
                       [--severities <critical,major,potential,minor,unknown>]
                       [--ask blocked|uncertain|ambiguous]
                       [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-                      [--inherit models,effort,severities,ask,forks,skip-authors]
+                      [--one-pass on|off] [--merge off|merge|squash|rebase]
+                      [--inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1338,7 +1386,15 @@ this repository. .sources says which layer answered for each setting.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
-  --inherit       hand models, effort, forks or skip-authors to the layer beneath
+  --one-pass     one review round, then exactly one fixer/finalizer session
+  --merge        merge the exact fixed head once it is conflict-free (requires one-pass;
+                 review and check status are ignored)
+  --inherit      hand named settings to the layer beneath
+
+One-pass and merge are repository-scoped temporary campaign settings; they
+cannot be set as fleet defaults. 'crq solver set <repo> --inherit one-pass,merge'
+ends the campaign and removes its hand-offs while preserving unrelated solver
+overrides. 'crq solver clear <repo>' discards every repository solver override.
 
 Models are tried in order. A provider/model outage is parked until its reset
 time, the next model is tried, and no attempt is spent. Ordinary failed fixes
@@ -1719,7 +1775,7 @@ Move a tracked pull request to the top of both the review and autofix queues.
 Inside a pull request checkout, the target can be omitted.
 `)
 	case "debug":
-		fmt.Print(`crq debug <enqueue|pump|refresh|state>
+		fmt.Print(`crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
 
 Maintenance tools for diagnosis only. Human and agent review loops should use crq loop.
 `)
@@ -1798,6 +1854,7 @@ func skipBlockedPreflight(ctx context.Context, opts crq.PreflightOptions, direct
 		return nil
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 	report, err := service.SkipBlockedPreflight(readCtx, opts, func() string {
 		return codeRabbitOrg(readCtx, binary)
@@ -1834,6 +1891,7 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport, direct bool)
 		return &crq.CLIQuotaResult{Reason: "could not reach github to record the block: " + err.Error()}
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 	result, err := service.RecordCLIQuota(shareCtx, report, codeRabbitOrg(shareCtx, report.Tool))
 	if err != nil {
@@ -3149,6 +3207,25 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				return 1
 			}
 			change.Forks = &on
+		case "--one-pass":
+			hasMutation = true
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			on := strings.EqualFold(strings.TrimSpace(v), "on")
+			if !on && !strings.EqualFold(strings.TrimSpace(v), "off") {
+				fatal(errors.New("--one-pass takes on or off"))
+				return 1
+			}
+			change.OnePass = &on
+		case "--merge":
+			hasMutation = true
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.MergeMethod = &v
 		case "--skip-authors":
 			hasMutation = true
 			v, ok := value()
@@ -3181,8 +3258,12 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
+				case "one-pass", "one_pass":
+					change.UnsetOnePass = true
+				case "merge", "merge-method", "merge_method":
+					change.UnsetMerge = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors, one-pass, merge)", field))
 					return 1
 				}
 			}
@@ -3262,10 +3343,12 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
 		Severities: change.Severities, AskMode: change.AskMode,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
+		OnePass: change.OnePass, MergeMethod: change.MergeMethod,
 		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
 		UnsetPrompt: change.UnsetPrompt, UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
 		UnsetForks:       change.UnsetForks,
 		UnsetSkipAuthors: change.UnsetSkipAuthors,
+		UnsetOnePass:     change.UnsetOnePass, UnsetMerge: change.UnsetMerge,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's
 	// --fleet flag expresses.

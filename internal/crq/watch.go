@@ -409,8 +409,15 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// finding can make Next enqueue and Pump the current head before
 				// returning "fix"; claiming only afterwards spends a metered
 				// review on the code this session is about to replace.
-				report, _, _, err = s.nextFromState(ctx, repo, pull.Number)
-				if err == nil && report.Action != string(engine.ActionFix) {
+				var action engine.Action
+				report, action, _, err = s.nextFromState(ctx, repo, pull.Number)
+				if err == nil && report.Action == string(engine.ActionFix) {
+					if onePassReport, handled, onePassErr := s.onePassNext(ctx, report, action, true); onePassErr != nil {
+						err = onePassErr
+					} else if handled {
+						report = onePassReport
+					}
+				} else if err == nil {
 					report, err = s.nextAutomated(ctx, repo, pull.Number)
 				}
 			} else {
@@ -430,6 +437,29 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, err))
 				}
 				continue
+			}
+			if opts.dispatching() && report.Action != string(engine.ActionFix) && report.Action != string(engine.ActionBlocked) {
+				eligible, merged, mergeReason, mergeErr := s.mergeOnePassReady(ctx, repo, pull.Number)
+				if mergeErr != nil {
+					if _, throttled := ghapi.ThrottleWait(mergeErr); throttled {
+						return mergeErr
+					}
+					if s.log != nil {
+						s.log.Printf("watch: merging %s#%d: %v", repo, pull.Number, mergeErr)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s#%d merge: %v", repo, pull.Number, mergeErr))
+					}
+					report.Action = string(engine.ActionWait)
+					report.Reason = "post-fix merge check failed: " + mergeErr.Error()
+				} else if eligible {
+					report.Reason = mergeReason
+					if merged {
+						report.Action = "merged"
+					} else {
+						report.Action = string(engine.ActionWait)
+					}
+				}
 			}
 			event := WatchEvent{
 				Repo: repo, PR: pull.Number,
@@ -820,17 +850,53 @@ func (s *Service) dispatchWithStart(
 		"CRQ_FIX_EFFORT="+solver.FixEffort,
 		"CRQ_FIX_PROMPT="+sessionPrompt,
 	)
-	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
-	// its own. The mirror carries a credential helper that reads this variable
-	// (configureOrigin), so a daemon authenticated by a token alone can land its
-	// fixes instead of failing at the last step of every one of them. In the
-	// environment, never in the config: the snippet is on disk, the secret is not.
-	if ws.Token != "" {
-		cmd.Env = append(cmd.Env, workspace.TokenEnv+"="+ws.Token)
+	// The session's push is a plain `git push`, and its crq/gh commands also need
+	// the daemon's GitHub identity. Resolve the current token immediately before
+	// launch: a long-lived daemon must not retain the credential it started with,
+	// and the agent's login shell may put a broken gh shim first on PATH. The
+	// secret lives only in the child environment, never in argv or git config.
+	sessionToken := strings.TrimSpace(ws.Token)
+	if ws.TokenSource != nil {
+		sessionToken = strings.TrimSpace(ws.TokenSource(runCtx))
+	}
+	if sessionToken != "" {
+		cmd.Env = setCommandEnv(cmd.Env, workspace.TokenEnv, sessionToken)
+		cmd.Env = setCommandEnv(cmd.Env, "GITHUB_TOKEN", sessionToken)
+		cmd.Env = setCommandEnv(cmd.Env, "GH_TOKEN", sessionToken)
 	}
 	if s.log != nil {
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
+	}
+	// Checkout preparation can take long enough for another fixer to land and
+	// merge the pull request. The pass-level open-PR snapshot is no longer proof
+	// that this claimed head still needs an agent, so re-read it at the last safe
+	// point before starting a code-writing process.
+	pull, err := s.gh.GetPull(runCtx, report.Repo, report.PR)
+	if err != nil {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "could not refresh the pull request before starting its fix session: " + err.Error()
+	}
+	if pull.State != "open" || pull.Merged {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "pull request is no longer open; stale fix session skipped"
+	}
+	liveHead := strings.TrimSpace(pull.Head.SHA)
+	claimedHead := strings.TrimSpace(report.Head)
+	if liveHead == "" || claimedHead == "" || !strings.HasPrefix(liveHead, claimedHead) {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, fmt.Sprintf("pull request head moved from %s to %s; stale fix session skipped",
+			shortSHA(claimedHead), shortSHA(liveHead))
+	}
+	finalizingOnePass := hasOnePassFinalizer(report.Findings)
+	readyBase := strings.TrimSpace(pull.Base.SHA)
+	if finalizingOnePass && readyBase == "" {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "GitHub did not report the campaign's base revision; fix session skipped"
 	}
 	if err := cmd.Start(); err != nil {
 		// A command that never reached a process did not use up the per-head
@@ -884,15 +950,19 @@ func (s *Service) dispatchWithStart(
 				failure.Reason, failure.RetryAt.Format(time.RFC3339), logPath)
 		}
 	}
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 		return false, "another watcher took this round; the session was stopped"
 	}
 	if runErr != nil {
 		if !attempted {
+			s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 			// Say which kind of ending this was: "failed" reads as the fix being
 			// wrong, and the reader's next move is different when crq stopped it.
 			return false, fmt.Sprintf("fix session stopped with the watcher, and keeps its attempt (log: %s)", logPath)
+		}
+		if err := s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token); err != nil {
+			return false, fmt.Sprintf("fix session failed and its one-pass stop could not be recorded: %v (log: %s)", err, logPath)
 		}
 		// Keep the worktree AND name the log: a failed session is the one whose
 		// state somebody needs to look at.
@@ -903,13 +973,86 @@ func (s *Service) dispatchWithStart(
 	// were made but not pushed, which is the one outcome a fix session must
 	// never suffer.
 	if kept, why := sessionWork(context.WithoutCancel(ctx), co, report.Head); kept {
+		if err := s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token); err != nil {
+			why += "; its one-pass stop could not be recorded: " + err.Error()
+		}
 		if s.log != nil {
 			s.log.Printf("watch: keeping %s — %s", co.Dir, why)
 		}
 		return false, why
 	}
+	readyHead, err := co.Git(context.WithoutCancel(ctx), "rev-parse", "HEAD")
+	if err != nil {
+		_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+		return false, "the successful session's exact HEAD could not be read"
+	}
+	readyHead = strings.TrimSpace(readyHead)
+	verificationPending := false
+	if finalizingOnePass {
+		// Prefer the base current after the finalizer when the resulting head
+		// actually contains it. If GitHub advances again after the agent has
+		// finished, retain the pre-launch base this checkout can still prove and
+		// let the post-fix base verification gate wait rather than terminalizing the sole
+		// successful fixer.
+		refreshed, refreshErr := s.gh.GetPull(context.WithoutCancel(ctx), report.Repo, report.PR)
+		refreshedBase := strings.TrimSpace(refreshed.Base.SHA)
+		if refreshErr == nil && refreshedBase != "" {
+			if refreshedBase != readyBase {
+				if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", refreshedBase, readyHead); err == nil {
+					readyBase = refreshedBase
+				} else {
+					verificationPending = true
+				}
+			}
+		} else {
+			// The fixer succeeded. A transient REST failure must not turn that
+			// sole allowed session into a terminal failed attempt or launch a
+			// second fixer. Preserve the pre-launch base after proving ancestry;
+			// the merge gate retries GitHub and accepts it only if still current.
+			verificationPending = true
+		}
+		if _, err := co.Git(context.WithoutCancel(ctx), "merge-base", "--is-ancestor", readyBase, readyHead); err != nil {
+			_ = s.completeUnsuccessfulDispatch(context.WithoutCancel(ctx), report, token)
+			return false, "the one-pass finalizer did not integrate the exact base " + shortSHA(readyBase)
+		}
+	}
+	onePass, err := s.completeSuccessfulDispatchWithVerification(
+		context.WithoutCancel(ctx), report, token, readyHead, readyBase, verificationPending,
+	)
+	if err != nil {
+		// Keep the checkout as an audit trail. The branch already holds the fix,
+		// but without a durable exact-head hand-off crq must not merge it.
+		return false, "could not release the fixed head for merge: " + err.Error()
+	}
 	_ = co.Remove(context.WithoutCancel(ctx))
+	if onePass {
+		eligible, merged, reason, mergeErr := s.mergeOnePassReady(
+			context.WithoutCancel(ctx), report.Repo, report.PR,
+		)
+		switch {
+		case mergeErr != nil:
+			if s.log != nil {
+				s.log.Printf("watch: immediate merge check for %s#%d failed: %v", report.Repo, report.PR, mergeErr)
+			}
+			if opts.Once {
+				return false, "immediate one-pass merge failed: " + mergeErr.Error()
+			}
+		case eligible && s.log != nil:
+			s.log.Printf("watch: immediate merge check for %s#%d: merged=%t reason=%s", report.Repo, report.PR, merged, reason)
+		}
+	}
 	return true, ""
+}
+
+func setCommandEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dialect.Finding {
@@ -918,6 +1061,12 @@ func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dial
 	}
 	out := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
+		// This is workflow control, not reviewer feedback. Filtering it would
+		// leave a clean one-pass campaign with no finalizer and no merge.
+		if finding.Source == onePassFinalizeSource {
+			out = append(out, finding)
+			continue
+		}
 		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
 		if severity == "" {
 			severity = "unknown"
@@ -1175,6 +1324,32 @@ func (s *Service) claimDispatchModels(
 		// limit after this pass's initial read. Resolve all three from the state
 		// revision this CAS will write.
 		claimCfg := s.cfgFor(*st, report.Repo)
+		solver := st.EffectiveSolver(report.Repo)
+		finalizer := hasOnePassFinalizer(report.Findings)
+		if claimCfg.OnePass && !finalizer {
+			reason, byDesign = "a one-pass campaign became active after this ordinary fix report was observed; recompute the pull request", true
+			return ErrNoChange
+		}
+		if finalizer &&
+			(!claimCfg.OnePass || report.onePassCampaign == "" ||
+				solver.OnePassCampaign != report.onePassCampaign) {
+			reason, byDesign = "the campaign that produced this one-pass finalizer is no longer active", true
+			return ErrNoChange
+		}
+		// A one-pass campaign can be enabled while an ordinary fixer is still
+		// running. Installing the campaign binary stops that old process, but its
+		// stale attempt counter remains on the round. With the campaign limit set
+		// to one, counting that pre-campaign attempt would prevent the campaign's
+		// one actual finalizer from ever starting. Once the old lease is no
+		// longer live, discard only attempts older than the repository setting
+		// that enabled this campaign. A real one-pass attempt has progress state
+		// and is never reset here.
+		_, onePassStarted := st.OnePassProgressFor(report.Repo, report.PR)
+		if claimCfg.OnePass && !onePassStarted && round.Dispatch != nil &&
+			!round.DispatchHeld(s.clock()) && solver.UpdatedAt != nil &&
+			round.Dispatch.At.Before(solver.UpdatedAt.UTC()) {
+			round.Dispatch = nil
+		}
 		selectedFindings = autofixFindings(report.Findings, claimCfg.FixSeverities)
 		if len(report.Findings) > 0 && len(selectedFindings) == 0 {
 			reason, byDesign = "current autofix policy excludes every open finding", true
@@ -1185,10 +1360,17 @@ func (s *Service) claimDispatchModels(
 			models = []string{claimCfg.FixModel}
 		}
 		maxAttempts := recordedMaxAttemptsIn(*st, report.Repo, fallbackMaxAttempts)
+		if finalizer {
+			maxAttempts = 1
+		}
 		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
 		if !ok {
 			reason, byDesign = why, true
 			return ErrNoChange
+		}
+		round.Dispatch.OnePass = finalizer
+		if finalizer {
+			round.Dispatch.OnePassCampaign = report.onePassCampaign
 		}
 		selectedModel = round.Dispatch.Model
 		report.dispatchUntil = round.Dispatch.Heartbeat.Add(DispatchTTL)
@@ -1678,6 +1860,28 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 		if s.log != nil {
 			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+		}
+	}
+	if s.cfg.DryRun {
+		return nil
+	}
+	var invalidated []int
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		invalidated = st.InvalidateClosedOnePass(repo, open, s.cfg.Host, s.clock())
+		if len(invalidated) == 0 {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return err
+	}
+	if err == nil {
+		s.sync(ctx, updated)
+	}
+	for _, pr := range invalidated {
+		if s.log != nil {
+			s.log.Printf("watch: %s#%d retired its one-pass merge hand-off: pr closed", repo, pr)
 		}
 	}
 	return nil

@@ -959,7 +959,7 @@ func watchDispatchOption(dispatch, noDispatch bool) *bool {
 
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {
 	if len(args) == 0 {
-		fatal(errors.New("usage: crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>"))
+		fatal(errors.New("usage: crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>"))
 		return 1
 	}
 	if err := cfg.RequireState(); err != nil {
@@ -974,6 +974,18 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			return 1
 		}
 		result, err := service.Enqueue(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(result)
+		return 0
+	case "forget-host":
+		if len(args) != 2 {
+			fatal(errors.New("usage: crq debug forget-host <host>"))
+			return 1
+		}
+		result, err := service.ForgetHost(ctx, args[1])
 		if err != nil {
 			fatal(err)
 			return 1
@@ -1125,7 +1137,7 @@ USAGE
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
-  crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
+  crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
@@ -1775,9 +1787,16 @@ Move a tracked pull request to the top of both the review and autofix queues.
 Inside a pull request checkout, the target can be omitted.
 `)
 	case "debug":
-		fmt.Print(`crq debug <enqueue|merge-ready|pump|refresh|retire-merged|state>
+		fmt.Print(`crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
 
 Maintenance tools for diagnosis only. Human and agent review loops should use crq loop.
+
+  forget-host <host>  drop one host's self-report. Reports are otherwise kept
+                      for ever and shown stale, which is right for a host that
+                      may come back and wrong for a name that never will — a
+                      renamed or retired machine, or a hostname that flapped.
+                      A service still running rewrites its record on the next
+                      pass, so this only sticks for a name that is gone.
 `)
 	default:
 		fmt.Printf("unknown help topic: %s\n\n", command)

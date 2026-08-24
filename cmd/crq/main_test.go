@@ -101,6 +101,29 @@ func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
 	}
 }
 
+func TestDebugForgetHostRejectsExtraArguments(t *testing.T) {
+	cfg := crqcore.Config{GateRepo: "o/gate", Host: "test"}
+	store := crqcore.NewMemoryStore(cfg)
+	svc := crqcore.NewService(cfg, nil, store, nil)
+	if _, err := store.Update(t.Context(), func(st *crqcore.State) error {
+		st.SetHostReport(crqcore.HostReport{Host: "old-host"}, time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := debug(t.Context(), svc, store, cfg, []string{"forget-host", "old-host", "new-host"}); code == 0 {
+		t.Fatal("forget-host accepted an extra host argument")
+	}
+	st, _, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.HostReports["old-host"]; !ok {
+		t.Fatal("forget-host removed a record despite rejecting its arguments")
+	}
+}
+
 // The thread commands take IDs bare so a caller can clear a whole round in one
 // process. The transcripts that motivated this were full of shell loops running
 // one `crq resolve` subprocess per thread, every round.

@@ -1,6 +1,10 @@
 package crq
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 func TestSameHostReportComparesCapabilitiesForTheReportingRole(t *testing.T) {
 	prev := HostReport{
@@ -29,5 +33,82 @@ func TestSameHostReportLetsAutofixClearItsAgent(t *testing.T) {
 	}
 	if !sameHostReport(prev, HostReport{Roles: []string{"serve"}}) {
 		t.Fatal("a role that does not choose the fix agent must preserve it silently")
+	}
+}
+
+func TestForgetHostRemovesOneRecord(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{GateRepo: "o/gate", Host: "omarchy", DashboardIssue: 1}
+	store := &dashboardCountingStore{StateStore: NewMemoryStore(cfg)}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{Host: "MacBookAir", Roles: []string{"autoreview"}}, now)
+		st.SetHostReport(HostReport{Host: "omarchy", Roles: []string{"serve"}}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.ForgetHost(ctx, "MacBookAir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Forgot || result.Hosts == nil {
+		t.Fatalf("ForgetHost = %+v, want the record dropped and the survivors listed", result)
+	}
+	if len(result.Hosts) != 1 || result.Hosts[0] != "omarchy" {
+		t.Fatalf("remaining hosts = %v, want just omarchy", result.Hosts)
+	}
+	if len(store.syncs) != 1 {
+		t.Fatalf("dashboard syncs = %d, want the deletion synced once", len(store.syncs))
+	}
+	if _, ok := store.syncs[0].HostReports["MacBookAir"]; ok {
+		t.Fatal("dashboard sync still included the forgotten host")
+	}
+
+	// A name nobody reported is not an error: it is the answer to "is this gone".
+	again, err := svc.ForgetHost(ctx, "MacBookAir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Forgot || again.Reason == "" {
+		t.Fatalf("second ForgetHost = %+v, want forgot=false with a reason", again)
+	}
+	if len(store.syncs) != 1 {
+		t.Fatalf("dashboard syncs = %d after a no-op, want still one", len(store.syncs))
+	}
+	if _, err := svc.ForgetHost(ctx, "  "); err == nil {
+		t.Fatal("a blank host name should be refused, not matched against records")
+	}
+}
+
+func TestForgetHostDryRunListsOnlySurvivors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{GateRepo: "o/gate", Host: "omarchy", DryRun: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{Host: "MacBookAir"}, now)
+		st.SetHostReport(HostReport{Host: "omarchy"}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.ForgetHost(ctx, "MacBookAir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Forgot || len(result.Hosts) != 1 || result.Hosts[0] != "omarchy" {
+		t.Fatalf("dry-run ForgetHost = %+v, want the simulated survivors", result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.HostReports) != 2 {
+		t.Fatalf("dry run persisted the simulated deletion: %v", hostNames(st))
 	}
 }

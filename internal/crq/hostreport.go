@@ -224,6 +224,8 @@ func (s *Service) ForgetHost(ctx context.Context, host string) (ForgetHostResult
 	result.Forgot = forgot
 	if !forgot {
 		result.Reason = "no report recorded under that name"
+	} else {
+		s.sync(ctx, st)
 	}
 	result.Hosts = hostNames(st)
 	return result, nil

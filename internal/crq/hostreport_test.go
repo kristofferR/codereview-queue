@@ -38,9 +38,9 @@ func TestSameHostReportLetsAutofixClearItsAgent(t *testing.T) {
 
 func TestForgetHostRemovesOneRecord(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{GateRepo: "o/gate", Host: "omarchy"}
-	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	cfg := Config{GateRepo: "o/gate", Host: "omarchy", DashboardIssue: 1}
+	store := &dashboardCountingStore{StateStore: NewMemoryStore(cfg)}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
 	now := time.Now().UTC()
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.SetHostReport(HostReport{Host: "MacBookAir", Roles: []string{"autoreview"}}, now)
@@ -60,6 +60,12 @@ func TestForgetHostRemovesOneRecord(t *testing.T) {
 	if len(result.Hosts) != 1 || result.Hosts[0] != "omarchy" {
 		t.Fatalf("remaining hosts = %v, want just omarchy", result.Hosts)
 	}
+	if len(store.syncs) != 1 {
+		t.Fatalf("dashboard syncs = %d, want the deletion synced once", len(store.syncs))
+	}
+	if _, ok := store.syncs[0].HostReports["MacBookAir"]; ok {
+		t.Fatal("dashboard sync still included the forgotten host")
+	}
 
 	// A name nobody reported is not an error: it is the answer to "is this gone".
 	again, err := svc.ForgetHost(ctx, "MacBookAir")
@@ -68,6 +74,9 @@ func TestForgetHostRemovesOneRecord(t *testing.T) {
 	}
 	if again.Forgot || again.Reason == "" {
 		t.Fatalf("second ForgetHost = %+v, want forgot=false with a reason", again)
+	}
+	if len(store.syncs) != 1 {
+		t.Fatalf("dashboard syncs = %d after a no-op, want still one", len(store.syncs))
 	}
 	if _, err := svc.ForgetHost(ctx, "  "); err == nil {
 		t.Fatal("a blank host name should be refused, not matched against records")

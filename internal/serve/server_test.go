@@ -27,7 +27,7 @@ func (l *stubLoader) Load(context.Context) (state.State, state.Revision, error) 
 
 type countingObserver struct{ calls int }
 
-func (o *countingObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *countingObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	o.calls++
 	return Observation{}, nil
 }
@@ -37,7 +37,7 @@ type sequenceObserver struct {
 	calls        int
 }
 
-func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *sequenceObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	got := o.observations[o.calls]
 	o.calls++
 	return got, nil
@@ -45,14 +45,29 @@ func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, e
 
 type failingObserver struct{ calls int }
 
-func (o *failingObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *failingObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	o.calls++
 	return Observation{}, errors.New("observation unavailable")
 }
 
 type countingCoster struct {
-	cost  Cost
-	calls int
+	cost   Cost
+	calls  int
+	states []state.State
+}
+
+type stateRecordingObserver struct {
+	observation Observation
+	state       state.State
+	after       func()
+}
+
+func (o *stateRecordingObserver) Observe(_ context.Context, st state.State, _ string, _ int) (Observation, error) {
+	o.state = st
+	if o.after != nil {
+		o.after()
+	}
+	return o.observation, nil
 }
 
 type previewGuardActor struct {
@@ -84,8 +99,9 @@ func (a *previewGuardActor) SetEnrollment(
 	return nil, nil
 }
 
-func (c *countingCoster) Cost(context.Context, string, int) (Cost, error) {
+func (c *countingCoster) Cost(_ context.Context, st state.State, _ string, _ int, _ Observation) (Cost, error) {
 	c.calls++
+	c.states = append(c.states, st)
 	return c.cost, nil
 }
 
@@ -754,17 +770,68 @@ func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
 		{Login: "coderabbitai[bot]", Primary: true, Required: true},
 		{Login: "cursor[bot]", Required: true, Trigger: "always", Command: "bugbot run"},
 	}
-	if observationKey("o/r", 1, "abcdef123", 7, base) ==
-		observationKey("o/r", 1, "abcdef123", 7, changed) {
+	if observationKey("o/r", 1, "abcdef123", "state", base) ==
+		observationKey("o/r", 1, "abcdef123", "state", changed) {
 		t.Fatal("reviewer change reused the old observation cache key")
 	}
 }
 
-func TestObservationKeyIncludesStateRevision(t *testing.T) {
+func TestObservationStateKeyIgnoresUnrelatedFleetRevisions(t *testing.T) {
 	bots := []BotName{{Login: "coderabbitai[bot]", Primary: true, Required: true}}
-	if observationKey("o/r", 1, "abcdef123", 7, bots) ==
-		observationKey("o/r", 1, "abcdef123", 8, bots) {
+	before := state.New()
+	before.Rev = 7
+	after := state.New()
+	after.Rev = 8
+	if observationKey("o/r", 1, "abcdef123", observationStateKey(before, "o/r", 1), bots) !=
+		observationKey("o/r", 1, "abcdef123", observationStateKey(after, "o/r", 1), bots) {
+		t.Fatal("an unrelated fleet revision invalidated the PR observation cache")
+	}
+}
+
+func TestObservationStateKeyIncludesRoundState(t *testing.T) {
+	queued := state.New()
+	queued.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseQueued,
+	}
+	completed := state.New()
+	completed.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+	}
+	if observationStateKey(queued, "o/r", 1) == observationStateKey(completed, "o/r", 1) {
 		t.Fatal("round-state change reused the old observation cache key")
+	}
+}
+
+func TestPRObservationCacheSurvivesAnUnrelatedStateRevision(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{{
+		Head: "abcdef123", CheckedAt: now,
+	}}}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rev = 7
+	srv.lastState.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+	}
+
+	request := func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+		req.Header.Set("X-CRQ-Dashboard", "1")
+		req.SetPathValue("owner", "o")
+		req.SetPathValue("name", "r")
+		req.SetPathValue("pr", "1")
+		srv.handlePR(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	request()
+	srv.lastState.Rev++
+	request()
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want the unrelated revision to reuse the cached result", observer.calls)
 	}
 }
 
@@ -779,6 +846,59 @@ func TestCostKeyIncludesReviewerPricingPolicy(t *testing.T) {
 	if costKey("o/r", 1, "abcdef123", base, nil) ==
 		costKey("o/r", 1, "abcdef123", primary, nil) {
 		t.Fatal("reviewer role change reused the old cost cache key")
+	}
+}
+
+func TestWritablePRObservationReloadsStateBeforeObservationAndPricing(t *testing.T) {
+	now := time.Now().UTC()
+	remaining := 1
+	stale := state.New()
+	stale.Rev = 1
+	stale.Account.Remaining = &remaining
+	stale.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted,
+	}
+
+	current := state.New()
+	current.Rev = 2
+	current.Account.Remaining = &remaining
+	current.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "bbbbbbbbb", Phase: state.PhaseCompleted,
+	}
+	current.SetRepoOverride("o/r", state.RepoReviewers{PrimaryOff: true})
+	loader := &stubLoader{st: current}
+	observer := &stateRecordingObserver{observation: Observation{Head: "bbbbbbbbb", CheckedAt: now}}
+	observer.after = func() {
+		postObservation := current
+		zero := 0
+		postObservation.Account.Remaining = &zero
+		loader.st = postObservation
+	}
+	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
+	srv := New(loader, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, ObserverWrites: true, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = stale
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	}
+	if override, ok := observer.state.RepoOverride("o/r"); !ok || !override.PrimaryOff {
+		t.Fatalf("observer state override = %+v, %v; want the current reviewer policy", override, ok)
+	}
+	if loader.reads != 2 {
+		t.Fatalf("state reads = %d, want one before and one after the writable observation", loader.reads)
+	}
+	if len(coster.states) != 1 || coster.states[0].Account.Remaining == nil || *coster.states[0].Account.Remaining != 0 {
+		t.Fatalf("coster states = %+v, want the post-observation account allowance", coster.states)
 	}
 }
 
@@ -851,7 +971,7 @@ func TestPROmitsObservationThatRacedAheadOfState(t *testing.T) {
 	}
 }
 
-func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) {
+func TestPRDoesNotPriceWithoutAnObservedHead(t *testing.T) {
 	observer := &failingObserver{}
 	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
 	srv := New(&stubLoader{}, Options{
@@ -877,8 +997,8 @@ func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) 
 	}
 	request()
 	request()
-	if coster.calls != 2 {
-		t.Fatalf("cost calls = %d, want a fresh live-head price while observation is unavailable", coster.calls)
+	if coster.calls != 0 {
+		t.Fatalf("cost calls = %d, want pricing skipped when no observed head and diff are available", coster.calls)
 	}
 }
 

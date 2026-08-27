@@ -24,13 +24,37 @@ const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
 export function mergeLivePRState(current: PRView | null, next: PRView): PRView {
   if (!current) return next;
   if (next.rev < current.rev) return current;
-  const sameHead = !next.round?.head || next.round.head === current.observed?.head;
+  const matchingHead = !next.round?.head || sameHead(next.round.head, current.observed?.head);
   return {
     ...next,
-    observed: sameHead ? current.observed : undefined,
-    observe_error: sameHead ? current.observe_error : undefined,
-    cost: sameHead ? current.cost : undefined,
-    cost_error: sameHead ? current.cost_error : undefined,
+    observed: matchingHead ? current.observed : undefined,
+    observe_error: matchingHead ? current.observe_error : undefined,
+    cost: matchingHead ? current.cost : undefined,
+    cost_error: matchingHead ? current.cost_error : undefined,
+  };
+}
+
+function sameHead(a: string | undefined, b: string | undefined): boolean {
+  const left = a?.trim().toLowerCase();
+  const right = b?.trim().toLowerCase();
+  return Boolean(left && right && (left.startsWith(right) || right.startsWith(left)));
+}
+
+/** Attach a slow GitHub observation without rolling back newer persisted state. */
+export function mergePRDetails(current: PRView | null, next: PRView): PRView {
+  if (!current || next.rev > current.rev) return next;
+
+  const currentHead = current.round?.head ?? current.observed?.head;
+  const detailsHead = next.observed?.head ?? next.round?.head;
+  if (currentHead && detailsHead && !sameHead(currentHead, detailsHead)) return current;
+
+  return {
+    ...current,
+    title: current.title || next.title,
+    observed: next.observed,
+    observe_error: next.observe_error,
+    cost: next.cost,
+    cost_error: next.cost_error,
   };
 }
 
@@ -48,6 +72,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     kind: "resolve" | "decline" | "dismiss";
   } | null>(null);
   const { run: runLoad, error, clearError: clearLoadError } = useOperation();
+  const { run: runInitialState } = useOperation();
   const { run: runLiveState } = useOperation();
   const {
     run: runFinding,
@@ -98,19 +123,23 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     (refresh = false) => {
       setRefreshing(refresh);
       runLoad(pullRequest(repo, pr, refresh), {
-        onSuccess: (next) =>
-          setView((current) => (current && next.rev < current.rev ? current : next)),
+        onSuccess: (next) => setView((current) => mergePRDetails(current, next)),
         onFinally: () => setRefreshing(false),
       });
     },
     [pr, repo, runLoad],
   );
 
-  // The state layer is cheap, but the observation behind it costs several
-  // GitHub calls — so this loads once on open and only re-fetches on request.
+  // Paint persisted state immediately, then attach the slower GitHub-backed
+  // findings and pricing. The two requests deliberately use separate
+  // operations so the fast one cannot cancel the detailed one.
   useEffect(() => {
+    setView(null);
+    runInitialState(pullRequest(repo, pr, false, true), {
+      onSuccess: (next) => setView((current) => mergeLivePRState(current, next)),
+    });
     load();
-  }, [load]);
+  }, [load, pr, repo, runInitialState]);
 
   // SSE snapshots update only the cheap persisted-state layer. Findings and
   // pricing stay attached to their observed head until a refresh or head move.
@@ -373,8 +402,8 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
               </>
             ) : (
               <span>
-                {view.observe_error
-                  ? `Could not reach GitHub — ${view.observe_error}`
+                {view.observe_error || error
+                  ? `Could not read findings: ${view.observe_error ?? error}`
                   : "Reading findings from GitHub…"}
               </span>
             )}

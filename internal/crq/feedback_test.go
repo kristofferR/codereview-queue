@@ -125,6 +125,34 @@ func TestReadOnlyFeedbackDoesNotPersistObservedAccountBlocks(t *testing.T) {
 	}
 }
 
+func TestFeedbackReadOnlyInReusesLoadedStateAndPullFacts(t *testing.T) {
+	cfg := firingConfig()
+	github := newFakeGitHub()
+	sha := "abcdef1234567890"
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	pull.Additions = 12
+	pull.Deletions = 4
+	pull.ChangedFiles = 3
+	github.pulls[fakeKey("o/repo", 3)] = pull
+	github.commits[sha] = ghapi.Commit{SHA: sha}
+
+	// Any accidental state reload fails this call. The supplied state must be
+	// the only persisted snapshot the dashboard observation consumes.
+	service := NewService(cfg, github, unreadableStore{NewMemoryStore(cfg)}, nil)
+	report, err := service.FeedbackReadOnlyIn(t.Context(), DefaultState(cfg), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.HeadOID != sha {
+		t.Fatalf("full head = %q, want %q", report.HeadOID, sha)
+	}
+	if report.Diff != (dialect.DiffStat{Additions: 12, Deletions: 4, ChangedFiles: 3}) {
+		t.Fatalf("diff = %+v", report.Diff)
+	}
+}
+
 func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// A re-review with nothing new to say produces no review object: CodeRabbit
 	// only replies "Review finished" to the command. That reply must satisfy

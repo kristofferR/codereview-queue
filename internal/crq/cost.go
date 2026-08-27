@@ -79,11 +79,21 @@ func (s *Service) Cost(ctx context.Context, repo string, pr int) (RoundCost, err
 	if err != nil {
 		return RoundCost{}, err
 	}
-	return s.costFrom(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
+	return s.CostIn(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
 		Additions:    pull.Additions,
 		Deletions:    pull.Deletions,
 		ChangedFiles: pull.ChangedFiles,
-	}), nil
+	})
+}
+
+// CostIn prices an already-observed pull request against already-loaded state.
+// It is the pure counterpart to Cost for persistent callers that have both.
+func (s *Service) CostIn(st State, repo string, pr int, head string, d dialect.DiffStat) (RoundCost, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return RoundCost{}, err
+	}
+	return s.costFrom(st, repo, pr, head, d), nil
 }
 
 // costFrom is the pure half, so a caller that already holds the state and the

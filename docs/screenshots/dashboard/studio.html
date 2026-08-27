@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Review Queue Screenshot Studio</title>
+  <style>
+    :root {
+      --ink: #0e1824;
+      --text: #17212f;
+      --muted: #667386;
+      --faint: #8b96a7;
+      --edge: #dfe4ea;
+      --soft-edge: #edf0f3;
+      --card: #ffffff;
+      --page: #f6f7f9;
+      --accent: #2368d8;
+      --ok: #157347;
+      --ok-bg: #ecf8f1;
+      --ok-edge: #c6ead5;
+      --warn: #8c5a08;
+      --warn-bg: #fff8e6;
+      --warn-edge: #f2d99d;
+      --bad: #b42318;
+      --bad-bg: #fff1f0;
+      --bad-edge: #f3c5c1;
+      --shadow: 0 1px 2px rgb(14 24 36 / .05), 0 5px 16px rgb(14 24 36 / .04);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--page);
+      font-synthesis: none;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body { background: var(--page); font-size: 13px; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    .topbar {
+      position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 18px;
+      min-height: 51px; padding: 9px 24px; color: #fff; background: var(--ink);
+      box-shadow: 0 8px 24px rgb(14 24 36 / .16);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; min-width: max-content; }
+    .brandmark { padding: 3px 7px; border-radius: 5px; color: #10251a; background: #b9f4d2; font: 650 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .brandcopy { display: grid; gap: 3px; line-height: 1; }
+    .brandname { font-size: 14.5px; font-weight: 680; letter-spacing: -.015em; }
+    .brandsub { color: rgb(255 255 255 / .45); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; }
+    .nav { display: flex; align-items: center; gap: 4px; }
+    .nav button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px; border: 0; border-radius: 6px; color: rgb(255 255 255 / .66); background: transparent; font-size: 13px; font-weight: 570; }
+    .nav button:hover { color: #fff; background: rgb(255 255 255 / .08); }
+    .nav button.active { color: var(--ink); background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+    .nav svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .live { margin-left: auto; display: flex; align-items: center; gap: 8px; padding: 5px 9px; border: 1px solid rgb(104 217 155 / .3); border-radius: 99px; color: #a7edc5; background: rgb(104 217 155 / .1); font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #68d99b; box-shadow: 0 0 0 3px rgb(104 217 155 / .12); }
+    main { width: min(1400px, calc(100% - 48px)); margin: 0 auto; padding: 18px 0 56px; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, minmax(92px, 120px)); align-items: stretch; margin-bottom: 14px; overflow: hidden; border: 1px solid var(--edge); border-radius: 11px; background: #fff; box-shadow: var(--shadow); }
+    .hero-main { min-width: 0; padding: 18px 20px; }
+    .eyebrow { margin: 0 0 7px; color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
+    .headline { display: flex; align-items: baseline; gap: 10px; margin: 0; color: var(--ink); font-size: 22px; font-weight: 700; letter-spacing: -.025em; }
+    .headline .clock { color: var(--accent); font: 600 15px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .detail { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    .summary { margin: 10px 0 0; color: var(--faint); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .stat { display: grid; align-content: center; gap: 6px; padding: 14px 16px; border-left: 1px solid var(--soft-edge); }
+    .stat-label { color: var(--faint); font: 9.5px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .stat-value { color: var(--ink); font-size: 17px; font-weight: 690; }
+    .stat-meta { color: var(--faint); font-size: 10.5px; line-height: 1.35; }
+    .attention { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--bad-edge); border-left: 4px solid var(--bad); border-radius: 10px; background: var(--bad-bg); }
+    .attention strong { color: var(--bad); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+    .attention .more { margin-left: auto; color: var(--accent); font-weight: 650; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .search { width: 294px; padding: 8px 10px; border: 1px solid var(--edge); border-radius: 8px; color: var(--text); background: #fff; }
+    .chip { padding: 5px 11px; border: 1px solid var(--edge); border-radius: 99px; color: var(--muted); background: transparent; font-size: 12px; font-weight: 570; }
+    .chip.active { color: #fff; border-color: var(--ink); background: var(--ink); }
+    .overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
+    .stack { display: grid; gap: 14px; }
+    .card { overflow: hidden; border: 1px solid var(--edge); border-radius: 10px; background: var(--card); box-shadow: var(--shadow); }
+    .card-header { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 9px 14px; border-bottom: 1px solid var(--soft-edge); }
+    .card-title { color: var(--ink); font-size: 13px; font-weight: 680; }
+    .count { display: inline-grid; place-items: center; min-width: 21px; height: 19px; padding: 0 6px; border-radius: 99px; color: var(--muted); background: #eef1f4; font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .card-end { margin-left: auto; color: var(--faint); font-size: 10.5px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { padding: 8px 12px; color: var(--faint); background: #fafbfc; font: 9.5px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-align: left; text-transform: uppercase; }
+    td { padding: 10px 12px; border-top: 1px solid var(--soft-edge); vertical-align: top; }
+    thead + tbody tr:first-child td { border-top: 0; }
+    tbody tr:hover { background: #fbfcfd; }
+    .repo-cell { display: flex; align-items: flex-start; gap: 9px; min-width: 210px; }
+    .repo-icon { position: relative; display: grid; place-items: center; flex: 0 0 auto; width: 26px; height: 26px; overflow: hidden; border-radius: 7px; color: #fff; box-shadow: inset 0 0 0 1px rgb(255 255 255 / .22), 0 1px 2px rgb(14 24 36 / .12); }
+    .repo-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+    .repo-icon.mini { width: 22px; height: 22px; border-radius: 6px; }
+    .r-pay { background: linear-gradient(145deg, #7c3aed, #4f46e5); }
+    .r-ios { background: linear-gradient(145deg, #0ea5e9, #2563eb); }
+    .r-web { background: linear-gradient(145deg, #f97316, #db2777); }
+    .r-data { background: linear-gradient(145deg, #059669, #0f766e); }
+    .r-design { background: linear-gradient(145deg, #db2777, #9333ea); }
+    .r-infra { background: linear-gradient(145deg, #0891b2, #1d4ed8); }
+    .r-auth { background: linear-gradient(145deg, #475569, #111827); }
+    .r-mail { background: linear-gradient(145deg, #eab308, #ea580c); }
+    .r-edge { background: linear-gradient(145deg, #14b8a6, #0284c7); }
+    .r-tools { background: linear-gradient(145deg, #64748b, #334155); }
+    .repo-name { color: var(--ink); font-weight: 650; line-height: 1.25; }
+    .repo-title { max-width: 390px; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 11.5px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+    .sha { color: var(--accent); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .phase, .mark { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 5px; font-size: 10.5px; font-weight: 650; white-space: nowrap; }
+    .phase.ok, .mark.ok { color: var(--ok); background: var(--ok-bg); }
+    .phase.warn, .mark.warn { color: var(--warn); background: var(--warn-bg); }
+    .phase.mut, .mark.mut { color: var(--muted); background: #eef1f4; }
+    .phase.bad, .mark.bad { color: var(--bad); background: var(--bad-bg); }
+    .botmarks { display: flex; gap: 4px; align-items: center; }
+    .botmark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid var(--edge); border-radius: 50%; color: var(--ink); background: #fff; font: 650 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .botmark.done { color: #fff; border-color: var(--ok); background: var(--ok); }
+    .machine { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+    .machine::before { width: 7px; height: 7px; border-radius: 50%; background: #68d99b; content: ""; }
+    .queue-pos { width: 22px; color: var(--faint); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .why { color: var(--muted); font-size: 11px; }
+    .actions { white-space: nowrap; }
+    .small-button { padding: 5px 7px; border: 1px solid var(--edge); border-radius: 6px; color: var(--muted); background: #fff; font-size: 10.5px; font-weight: 620; }
+    .empty-pad { padding: 18px 14px; color: var(--faint); }
+    .activity { margin: 0; padding: 0; list-style: none; }
+    .activity li { display: grid; grid-template-columns: 46px 8px minmax(0, 1fr); gap: 8px; padding: 9px 12px; border-top: 1px solid var(--soft-edge); color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .activity li:first-child { border-top: 0; }
+    .activity time { color: var(--faint); font: 9.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .event-dot { width: 7px; height: 7px; margin-top: 3px; border-radius: 50%; background: var(--accent); }
+    .event-dot.ok { background: var(--ok); }
+    .event-dot.warn { background: #d49520; }
+    .event-title { color: var(--text); font-weight: 610; }
+    .progress { height: 5px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: #e9edf2; }
+    .progress > span { display: block; width: 48%; height: 100%; background: linear-gradient(90deg, #3b82f6, #16a34a); }
+    .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+    .page-head h1 { margin: 0; color: var(--ink); font-size: 19px; letter-spacing: -.02em; }
+    .page-head p { margin: 3px 0 0; color: var(--muted); }
+    .page-head .right { margin-left: auto; }
+    .primary { padding: 7px 11px; border: 1px solid var(--ink); border-radius: 7px; color: #fff; background: var(--ink); font-weight: 650; }
+    .repo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .repo-card { padding: 13px; border: 1px solid var(--edge); border-radius: 9px; background: #fff; box-shadow: var(--shadow); }
+    .repo-card-top { display: flex; gap: 9px; align-items: center; }
+    .repo-card-name { min-width: 0; color: var(--ink); font-weight: 670; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .repo-card .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 13px; }
+    .metric { padding: 8px; border-top: 1px solid var(--soft-edge); }
+    .metric b { display: block; color: var(--ink); font-size: 15px; }
+    .metric span { color: var(--faint); font-size: 9px; text-transform: uppercase; }
+    .repo-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .bot-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .bot-card { min-height: 210px; padding: 15px; border: 1px solid var(--edge); border-radius: 9px; background: #fff; box-shadow: var(--shadow); }
+    .bot-top { display: flex; align-items: center; gap: 10px; }
+    .bot-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; color: #fff; font: 750 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .b-rabbit { background: linear-gradient(145deg, #f97316, #ef4444); }
+    .b-codex { background: linear-gradient(145deg, #0f766e, #064e3b); }
+    .b-cursor { background: linear-gradient(145deg, #111827, #4b5563); }
+    .b-macro { background: linear-gradient(145deg, #7c3aed, #4338ca); }
+    .b-sentinel { background: linear-gradient(145deg, #0369a1, #0e7490); }
+    .b-local { background: linear-gradient(145deg, #64748b, #334155); }
+    .bot-title { color: var(--ink); font-size: 14px; font-weight: 700; }
+    .bot-handle { margin-top: 2px; color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .bot-copy { margin: 13px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.55; }
+    .bot-foot { display: flex; align-items: center; gap: 7px; margin-top: 14px; padding-top: 11px; border-top: 1px solid var(--soft-edge); }
+    .bot-foot .seen { margin-left: auto; color: var(--faint); font-size: 10px; }
+    .setup-grid { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 14px; align-items: start; }
+    .check-list, .host-list { margin: 0; padding: 0; list-style: none; }
+    .check-list li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; padding: 11px 13px; border-top: 1px solid var(--soft-edge); }
+    .check-list li:first-child { border-top: 0; }
+    .checkmark { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: #fff; background: var(--ok); font-size: 11px; }
+    .check-label { color: var(--ink); font-weight: 650; }
+    .check-detail { margin-top: 2px; color: var(--faint); font-size: 10.5px; }
+    .host-list { display: grid; gap: 9px; padding: 11px; }
+    .host-card { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--soft-edge); border-radius: 8px; background: #fbfcfd; }
+    .computer { position: relative; display: grid; place-items: center; width: 48px; height: 38px; border: 2px solid #94a3b8; border-radius: 6px; color: #526173; background: linear-gradient(#fff, #eef2f6); }
+    .computer::after { position: absolute; bottom: -7px; width: 24px; height: 5px; border-top: 2px solid #94a3b8; content: ""; }
+    .computer.laptop { border-radius: 5px 5px 2px 2px; }
+    .computer.server { border-radius: 3px; background: #e9edf2; }
+    .computer.server::before { width: 22px; height: 14px; border-top: 2px solid #94a3b8; border-bottom: 2px solid #94a3b8; content: ""; }
+    .computer.win { border-color: #2f70c0; color: #2f70c0; }
+    .computer.mac { border-color: #6b7280; }
+    .computer svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .host-name { color: var(--ink); font: 650 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .host-meta { margin-top: 4px; color: var(--muted); font-size: 10.5px; }
+    .host-tools { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+    .tool { padding: 2px 5px; border: 1px solid var(--edge); border-radius: 4px; color: var(--muted); background: #fff; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .host-status { color: var(--ok); font: 650 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+    .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .kv { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 14px; padding: 10px 13px; border-top: 1px solid var(--soft-edge); }
+    .kv:first-of-type { border-top: 0; }
+    .kv-key { color: var(--muted); }
+    .kv-value { min-width: 0; color: var(--ink); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .pr-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; padding: 14px 16px; border: 1px solid var(--edge); border-radius: 10px; background: #fff; box-shadow: var(--shadow); }
+    .pr-head h1 { margin: 0; color: var(--ink); font-size: 17px; }
+    .pr-head .pr-title { color: var(--muted); }
+    .pr-head .right { margin-left: auto; display: flex; gap: 7px; }
+    .pr-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+    .finding { padding: 14px; border-top: 1px solid var(--soft-edge); }
+    .finding:first-of-type { border-top: 0; }
+    .finding-top { display: flex; align-items: center; gap: 7px; }
+    .finding h3 { margin: 8px 0 5px; color: var(--ink); font-size: 13px; }
+    .finding p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+    .finding-path { color: var(--accent); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .sev { padding: 2px 6px; border-radius: 4px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; }
+    .sev.major { color: var(--bad); background: var(--bad-bg); }
+    .sev.potential { color: var(--warn); background: var(--warn-bg); }
+    .sev.minor { color: var(--muted); background: #eef1f4; }
+    .cost-box { padding: 14px; }
+    .cost-range { color: var(--ink); font-size: 22px; font-weight: 720; letter-spacing: -.02em; }
+    .cost-copy { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .muted { color: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    @media (max-width: 1050px) {
+      .hero { grid-template-columns: minmax(0, 1fr) repeat(2, minmax(100px, 1fr)); }
+      .hero .stat:nth-last-child(-n+2) { border-top: 1px solid var(--soft-edge); }
+      .overview-grid, .pr-layout { grid-template-columns: 1fr; }
+      .repo-grid, .bot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .setup-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .topbar { align-items: flex-start; flex-wrap: wrap; gap: 8px 12px; padding: 9px 12px; }
+      .brandcopy { display: none; }
+      .nav { order: 3; width: 100%; overflow-x: auto; }
+      .nav button { flex: 0 0 auto; padding: 7px 9px; }
+      .live { margin-left: auto; }
+      main { width: calc(100% - 24px); padding-top: 12px; }
+      .hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hero-main { grid-column: 1 / -1; }
+      .stat { border-top: 1px solid var(--soft-edge); }
+      .headline { font-size: 18px; }
+      .toolbar { overflow-x: auto; flex-wrap: nowrap; }
+      .search { flex: 0 0 220px; }
+      .repo-grid, .bot-grid, .settings-grid { grid-template-columns: 1fr; }
+      .card { overflow-x: auto; }
+      table { min-width: 740px; }
+      .activity-card { display: none; }
+      .page-head { align-items: flex-start; }
+      .page-head .right { display: none; }
+      .kv { grid-template-columns: 1fr; gap: 4px; }
+      .pr-head { align-items: flex-start; flex-wrap: wrap; }
+      .pr-head .right { width: 100%; margin-left: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" data-view="overview" aria-label="Code Review Queue overview" style="border:0;background:transparent;color:inherit;padding:0">
+      <span class="brandmark">crq</span>
+      <span class="brandcopy"><span class="brandname">Code Review Queue</span><span class="brandsub">fleet control</span></span>
+    </button>
+    <nav class="nav" aria-label="Dashboard">
+      <button data-view="overview"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm10 7h6V11h-6v9ZM4 20h6v-3H4v3Zm10-13h6V4h-6v3Z"/></svg>Overview</button>
+      <button data-view="repos"><svg viewBox="0 0 24 24"><path d="m12 2 8 4-8 4-8-4 8-4Zm8 9-8 4-8-4m16 5-8 4-8-4"/></svg>Repos</button>
+      <button data-view="bots"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="13" rx="3"/><path d="M9 11h.01M15 11h.01M9 15h6M12 6V3"/></svg>Bots</button>
+      <button data-view="setup"><svg viewBox="0 0 24 24"><path d="m14.7 6.3 3-3 3 3-3 3M4 20l6.5-6.5M15 14l5 5M4 4l5 5"/></svg>Setup</button>
+      <button data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3a1.7 1.7 0 0 0 1.1 1.6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.38.37.72.6 1 .26.29.6.43 1 .4h.1v4H21a1.7 1.7 0 0 0-1.6.6Z"/></svg>Settings</button>
+    </nav>
+    <div class="live"><span class="live-dot"></span>LIVE · REV 4821</div>
+  </header>
+  <main id="app"><noscript><p>Enable JavaScript to switch among the screenshot views.</p></noscript></main>
+  <script>
+    const repos = [
+      {name:"northstar/checkout-service", icon:"r-pay", glyph:"card", reviewers:"CodeRabbit + Codex", required:"both required", active:1, queued:0, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/ios-app", icon:"r-ios", glyph:"phone", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:1, held:0, fixing:1, mode:"custom"},
+      {name:"northstar/web-storefront", icon:"r-web", glyph:"spark", reviewers:"Codex + Bugbot", required:"Codex required", active:1, queued:0, held:0, fixing:0, mode:"custom"},
+      {name:"northstar/data-platform", icon:"r-data", glyph:"db", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:1, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/design-system", icon:"r-design", glyph:"grid", reviewers:"Codex + Macroscope", required:"Codex required", active:0, queued:0, held:0, fixing:0, mode:"custom"},
+      {name:"northstar/infra-live", icon:"r-infra", glyph:"cube", reviewers:"CodeRabbit + Codex", required:"both required", active:1, queued:0, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/auth-gateway", icon:"r-auth", glyph:"lock", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:1, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/notifications", icon:"r-mail", glyph:"mail", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:0, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/edge-router", icon:"r-edge", glyph:"route", reviewers:"Codex + Bugbot", required:"Codex required", active:0, queued:0, held:0, fixing:0, mode:"custom"},
+      {name:"northstar/release-tools", icon:"r-tools", glyph:"tool", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:0, held:1, fixing:0, mode:"fleet"},
+      {name:"northstar/merchant-portal", icon:"r-pay", glyph:"shop", reviewers:"CodeRabbit + Codex", required:"both required", active:0, queued:0, held:0, fixing:0, mode:"fleet"},
+      {name:"northstar/docs", icon:"r-design", glyph:"doc", reviewers:"Codex", required:"Codex required", active:0, queued:0, held:0, fixing:0, mode:"custom"}
+    ];
+    const glyphs = {
+      card:'<path d="M3 6h18v12H3zM3 10h18M7 15h4"/>', phone:'<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M10 5h4M11 18h2"/>',
+      spark:'<path d="m12 2 1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6L12 2Z"/>', db:'<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
+      grid:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>', cube:'<path d="m12 2 8 4.5v9L12 20l-8-4.5v-9L12 2Zm0 9 8-4.5M12 11 4 6.5M12 11v9"/>',
+      lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>', mail:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
+      route:'<circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6h3a3 3 0 0 1 3 3v6a3 3 0 0 0 3 3"/>', tool:'<path d="M14.7 6.3a4 4 0 0 0-5 5L3 18l3 3 6.7-6.7a4 4 0 0 0 5-5l-2.6 2.6-3-3 2.6-2.6Z"/>',
+      shop:'<path d="M3 10h18l-2-6H5l-2 6Zm2 0v10h14V10M9 20v-6h6v6"/>', doc:'<path d="M6 2h9l4 4v16H6zM14 2v5h5M9 12h6M9 16h6"/>'
+    };
+    const icon = (repo, mini=false) => `<span class="repo-icon ${repo.icon}${mini?' mini':''}"><svg viewBox="0 0 24 24">${glyphs[repo.glyph]}</svg></span>`;
+    const repoBy = name => repos.find(r => r.name === name) || repos[0];
+    const botmarks = (items) => `<span class="botmarks">${items.map((x,i)=>`<span class="botmark ${i===0?'done':''}" title="${x}">${x.slice(0,2).toUpperCase()}</span>`).join('')}</span>`;
+    const phase = (text,tone='mut') => `<span class="phase ${tone}">${text}</span>`;
+    const machine = name => `<span class="machine">${name}</span>`;
+    const repoCell = (name, pr, title) => { const r=repoBy(name); return `<div class="repo-cell">${icon(r)}<div><div class="repo-name">${name.split('/')[1]}#${pr}</div><div class="repo-title">${title}</div></div></div>`; };
+    const hero = (scenario) => scenario==='quota' ? `
+      <section class="hero"><div class="hero-main"><p class="eyebrow">Fleet state</p><h1 class="headline">CodeRabbit quota blocked <span class="clock">47:18</span></h1><p class="detail">Only the metered lane is paused. Codex review and autofix continue.</p><p class="summary">1 in flight · 4 queued · 1 held · 1 fixing</p></div><div class="stat"><span class="stat-label">Quota</span><span class="stat-value">0</span><span class="stat-meta">reopens 14:42</span></div><div class="stat"><span class="stat-label">This week</span><span class="stat-value">64 / 60</span><span class="stat-meta">paced by vendor</span></div><div class="stat"><span class="stat-label">Fire slot</span><span class="stat-value">Open</span><span class="stat-meta">metered lane paused</span></div><div class="stat"><span class="stat-label">Leader</span><span class="stat-value">runner-eu-1</span><span class="stat-meta">healthy · 8s ago</span></div></section>
+      <div class="attention"><strong>Needs attention</strong><span>Past the weekly fair-use threshold (64 of 60)</span><span class="muted">Metered reviews resume automatically.</span><span class="more">Fleet settings →</span></div>` : `
+      <section class="hero"><div class="hero-main"><p class="eyebrow">Fleet state</p><h1 class="headline">Reviewing checkout-service#1842 <span class="clock">03:42</span></h1><p class="detail">Two reviewers are working on the current head. Autofix continues in parallel.</p><p class="summary">2 in flight · 3 queued · 1 held · 1 fixing</p></div><div class="stat"><span class="stat-label">Quota</span><span class="stat-value">18</span><span class="stat-meta">metered reviews left</span></div><div class="stat"><span class="stat-label">This week</span><span class="stat-value">42 / 60</span><span class="stat-meta">window · 6d old</span></div><div class="stat"><span class="stat-label">Fire slot</span><span class="stat-value">Held</span><span class="stat-meta">checkout-service#1842</span></div><div class="stat"><span class="stat-label">Leader</span><span class="stat-value">runner-eu-1</span><span class="stat-meta">healthy · 8s ago</span></div></section>`;
+    const inFlightRows = scenario => (scenario==='quota' ? [
+      ['northstar/infra-live',905,'Make deploy locks survive runner restarts','90eb87f14','fired','warn','2m','18m',['Codex'],'studio-mac-01']
+    ] : [
+      ['northstar/checkout-service',1842,'Prevent duplicate captures during checkout retries','a81df42c9','reviewing','ok','4m','16m',['CodeRabbit','Codex'],'runner-eu-1'],
+      ['northstar/infra-live',905,'Make deploy locks survive runner restarts','90eb87f14','fired','warn','1m','19m',['Codex'],'studio-mac-01']
+    ]).map(r=>`<tr><td>${repoCell(r[0],r[1],r[2])}</td><td><span class="sha">${r[3]}</span></td><td>${phase(r[4],r[5])}</td><td class="mono muted">${r[6]}</td><td class="mono muted">${r[7]}</td><td>${botmarks(r[8])}</td><td>${machine(r[9])}</td><td class="actions"><button class="small-button">Cancel</button></td></tr>`).join('');
+    const queueBase = [
+      ['northstar/web-storefront',631,'Reduce product-grid layout shifts','59d8b0a1e','slot busy','runner-eu-1'],
+      ['northstar/ios-app',733,'Keep offline drafts after authentication refresh','188ab6fd2','cooling down','studio-mac-01'],
+      ['northstar/data-platform',412,'Return stable pagination cursors','72f3ca190','behind earlier round','runner-eu-1'],
+      ['northstar/auth-gateway',288,'Rotate signing keys without failed logins','ef92a36b1','account blocked','github-runner-03']
+    ];
+    const queueRows = scenario => queueBase.slice(0,scenario==='quota'?4:3).map((r,i)=>`<tr><td class="queue-pos">${i+1}</td><td>${repoCell(r[0],r[1],r[2])}</td><td><span class="sha">${r[3]}</span></td><td><span class="why">${scenario==='quota'?'account blocked':r[4]}</span></td><td class="mono muted">${scenario==='quota'?'47m':i===1?'6m':'now'}</td><td>${machine(r[5])}</td><td class="actions"><button class="small-button">↑ Top</button></td></tr>`).join('');
+    function overview(scenario='busy') { return `${hero(scenario)}<div class="toolbar"><input class="search" aria-label="Filter pull requests" placeholder="Search repo, PR number or title…"><button class="chip active">All</button><button class="chip">In flight</button><button class="chip">Queued</button><button class="chip">Held</button><button class="chip">Fixing</button><button class="chip">Needs attention</button></div><div class="overview-grid"><div class="stack">
+      <section class="card"><div class="card-header"><span class="card-title">In flight</span><span class="count">${scenario==='quota'?1:2}</span></div><table><thead><tr><th>Pull request</th><th>Head</th><th>Phase</th><th>Fired</th><th>Deadline</th><th>Reviewers</th><th>Host</th><th></th></tr></thead><tbody>${inFlightRows(scenario)}</tbody></table></section>
+      <section class="card"><div class="card-header"><span class="card-title">Queue</span><span class="count">${scenario==='quota'?4:3}</span><span class="card-end">one metered review at a time</span></div><table><thead><tr><th>#</th><th>Pull request</th><th>Head</th><th>Waiting on</th><th>Ready</th><th>Host</th><th></th></tr></thead><tbody>${queueRows(scenario)}</tbody></table></section>
+      <section class="card"><div class="card-header"><span class="card-title">Held</span><span class="count">1</span></div><table><tbody><tr><td>${repoCell('northstar/release-tools',219,'Document multi-region failover')}</td><td><span class="sha">c6038da21</span></td><td><span class="why">Waiting for the architecture diagram</span></td><td>${machine('maya · 37m')}</td><td><button class="small-button">Unhold</button></td></tr></tbody></table></section>
+      <section class="card"><div class="card-header"><span class="card-title">Finished</span><span class="count">3</span></div><table><tbody><tr><td>${repoCell('northstar/auth-gateway',408,'Reject expired upload grants')}</td><td><span class="sha">4d197d0bd</span></td><td>${phase('completed','ok')}</td><td class="muted">all required reviewers completed</td></tr><tr><td>${repoCell('northstar/web-storefront',628,'Cache locale dictionaries by release')}</td><td><span class="sha">8bb21f6c2</span></td><td>${phase('converged','ok')}</td><td class="muted">clean on the current head</td></tr></tbody></table></section>
+      </div><aside class="stack"><section class="card"><div class="card-header"><span class="card-title">Autofix</span><span class="count">1</span><span class="card-end">2 healthy hosts</span></div><div style="padding:13px"><div class="repo-cell">${icon(repoBy('northstar/ios-app'))}<div><div class="repo-name">ios-app#731</div><div class="repo-title">Fixing 3 verified findings · attempt 2 of 5</div></div></div><div class="progress"><span></span></div><div style="display:flex;justify-content:space-between;margin-top:8px"><span>${machine('studio-mac-01')}</span><span class="mono muted">gpt-5.6-sol</span></div></div></section><section class="card activity-card"><div class="card-header"><span class="card-title">Activity</span><span class="card-end">live · since start</span></div><ol class="activity"><li><time>now</time><span class="event-dot"></span><span><span class="event-title">Codex acknowledged</span><br>checkout-service#1842</span></li><li><time>4m</time><span class="event-dot ok"></span><span><span class="event-title">Review command posted</span><br>checkout-service#1842 · a81df42c9</span></li><li><time>9m</time><span class="event-dot warn"></span><span><span class="event-title">Autofix attempt 2 started</span><br>ios-app#731 · 3 findings</span></li><li><time>18m</time><span class="event-dot ok"></span><span><span class="event-title">Round completed</span><br>auth-gateway#408 · clean</span></li><li><time>32m</time><span class="event-dot ok"></span><span><span class="event-title">All reviewers converged</span><br>web-storefront#628</span></li></ol></section></aside></div>`; }
+    function reposView() { return `<div class="page-head"><div><p class="eyebrow">Fleet inventory</p><h1>Repositories</h1><p>12 enrolled repositories across four review hosts.</p></div><div class="right"><button class="primary">Add repository</button></div></div><div class="toolbar"><input class="search" placeholder="Filter repositories…"><button class="chip active">All 12</button><button class="chip">Active 3</button><button class="chip">Queued 3</button><button class="chip">Overridden 4</button></div><div class="repo-grid">${repos.map(r=>`<article class="repo-card"><div class="repo-card-top">${icon(r)}<div style="min-width:0;flex:1"><div class="repo-card-name">${r.name}</div><div class="repo-title">${r.reviewers}</div></div>${phase(r.mode,r.mode==='custom'?'warn':'mut')}</div><div class="metrics"><div class="metric"><b>${r.active}</b><span>active</span></div><div class="metric"><b>${r.queued}</b><span>queued</span></div><div class="metric"><b>${r.held}</b><span>held</span></div><div class="metric"><b>${r.fixing}</b><span>fixing</span></div></div><div class="repo-meta">${phase('reviewed','ok')}${phase(r.required,'mut')}${r.fixing?phase('autofix on','ok'):phase('autofix default','mut')}</div></article>`).join('')}</div>`; }
+    const bots = [
+      ['CodeRabbit','coderabbitai[bot]','b-rabbit','working','primary · metered','Whole-PR review with line comments and follow-up rounds. The account allowance is shared across the fleet.','12 repos','2m ago'],
+      ['Codex','chatgpt-codex-connector[bot]','b-codex','working','co-reviewer · required','Independent code review that can cover correctness, design and repository-specific policy.','12 repos','now'],
+      ['Cursor Bugbot','cursor[bot]','b-cursor','quiet','co-reviewer · optional','Fast correctness pass for repositories that benefit from another independent signal.','4 repos','26m ago'],
+      ['Macroscope','macroscope[bot]','b-macro','working','co-reviewer · optional','Repository-aware analysis with correctness and approvability checks.','3 repos','11m ago'],
+      ['Sentinel CI','sentinel-review[bot]','b-sentinel','unverified','suggested','Security-oriented review lane configured for authentication and edge repositories.','0 repos','not seen'],
+      ['Local preflight','coderabbit CLI','b-local','working','before push · local','Uncommitted-change review used before the first commit or push in PR workflows.','4 hosts','7m ago']
+    ];
+    function botsView() { return `<div class="page-head"><div><p class="eyebrow">Reviewer registry</p><h1>Reviewers</h1><p>Four active reviewers, one suggested integration, and local preflight.</p></div></div><div class="bot-grid">${bots.map(b=>`<article class="bot-card"><div class="bot-top"><span class="bot-icon ${b[2]}">${b[0].split(' ').map(x=>x[0]).join('').slice(0,2)}</span><div><div class="bot-title">${b[0]}</div><div class="bot-handle">${b[1]}</div></div><span style="margin-left:auto">${phase(b[3],b[3]==='working'?'ok':b[3]==='quiet'?'mut':'warn')}</span></div><p class="bot-copy">${b[5]}</p><div class="bot-foot">${phase(b[4],'mut')}<span class="seen">${b[6]} · ${b[7]}</span></div></article>`).join('')}</div>`; }
+    const hosts = [
+      {name:'runner-eu-1', kind:'server', os:'Ubuntu 26.04 · x86_64', roles:'autoreview · autofix · serve', tools:['crq 2.0.0','git 2.55','gh 2.98','codex','coderabbit'], jobs:'2 active'},
+      {name:'studio-mac-01', kind:'mac laptop', os:'macOS 27 · Apple M4 Max', roles:'autofix · interactive', tools:['crq 2.0.0','git 2.54','gh 2.98','codex','claude'], jobs:'1 active'},
+      {name:'github-runner-03', kind:'server', os:'Ubuntu 24.04 · arm64', roles:'autoreview · observer', tools:['crq 2.0.0','git 2.53','gh 2.97','codex'], jobs:'idle'},
+      {name:'qa-windows-01', kind:'win', os:'Windows 11 · WSL2', roles:'observer · preflight', tools:['crq 2.0.0','git 2.52','gh 2.96','coderabbit'], jobs:'idle'},
+      {name:'edge-builder-02', kind:'server', os:'Debian 13 · x86_64', roles:'autofix · release', tools:['crq 2.0.0','git 2.53','gh 2.98','codex'], jobs:'healthy'}
+    ];
+    function computer(h){return `<span class="computer ${h.kind}">${h.kind==='server'?'':`<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>`}</span>`}
+    function setupView() { return `<div class="page-head"><div><p class="eyebrow">Fleet health</p><h1>Setup</h1><p>Every required dependency is healthy across five reporting computers.</p></div><div class="right">${phase('6 ready','ok')} ${phase('0 attention','mut')}</div></div><div class="setup-grid"><div class="stack"><section class="card"><div class="card-header"><span class="card-title">Readiness</span><span class="count">6</span></div><ul class="check-list">${[['Queue home','northstar/review-state · rev 4821'],['Markdown dashboard','issue #12'],['Quota calibration','PR #1 · current window'],['Review daemon','leader runner-eu-1'],['Required tools','present on all active hosts'],['Autofix','3 hosts reporting']].map(c=>`<li><span class="checkmark">✓</span><div><div class="check-label">${c[0]}</div><div class="check-detail">${c[1]}</div></div></li>`).join('')}</ul></section><section class="card"><div class="card-header"><span class="card-title">Fleet summary</span></div><div class="kv"><span class="kv-key">Newest crq</span><span class="kv-value">2.0.0</span></div><div class="kv"><span class="kv-key">Writer capabilities</span><span class="kv-value">15 / 15 on every writer</span></div><div class="kv"><span class="kv-key">Last state write</span><span class="kv-value">8 seconds ago</span></div></section></div><section class="card"><div class="card-header"><span class="card-title">Computers</span><span class="count">5</span><span class="card-end">all current</span></div><ul class="host-list">${hosts.map(h=>`<li class="host-card">${computer(h)}<div><div class="host-name">${h.name}</div><div class="host-meta">${h.os} · ${h.roles}</div><div class="host-tools">${h.tools.map(t=>`<span class="tool">${t}</span>`).join('')}</div></div><div style="text-align:right"><div class="host-status">● healthy</div><div class="host-meta">${h.jobs}</div></div></li>`).join('')}</ul></section></div>`; }
+    function settingsView() { const reviewers=[['CodeRabbit','always','required','metered'],['Codex','self-heal','required','free'],['Cursor Bugbot','self-heal','optional','free'],['Macroscope','never','optional','free']]; return `<div class="page-head"><div><p class="eyebrow">Resolved fleet policy</p><h1>Settings</h1><p>State-backed defaults with host-level sources shown beside each value.</p></div><div class="right"><button class="primary">Edit fleet policy</button></div></div><div class="settings-grid"><section class="card"><div class="card-header"><span class="card-title">Review policy</span><span class="card-end">recorded in shared state</span></div>${reviewers.map(r=>`<div class="kv"><span class="kv-key">${r[0]}</span><span class="kv-value">${r[1]} · ${r[2]} · ${r[3]}</span></div>`).join('')}<div class="kv"><span class="kv-key">Minimum interval</span><span class="kv-value">30s</span></div><div class="kv"><span class="kv-key">Weekly threshold</span><span class="kv-value">60 metered reviews</span></div></section><section class="card"><div class="card-header"><span class="card-title">Autofix</span><span class="card-end">fleet default</span></div><div class="kv"><span class="kv-key">Default</span><span class="kv-value">enabled</span></div><div class="kv"><span class="kv-key">Agent</span><span class="kv-value">codex</span></div><div class="kv"><span class="kv-key">Model</span><span class="kv-value">gpt-5.6-sol · high</span></div><div class="kv"><span class="kv-key">Max attempts</span><span class="kv-value">5</span></div><div class="kv"><span class="kv-key">Concurrency</span><span class="kv-value">3 sessions</span></div><div class="kv"><span class="kv-key">Ask mode</span><span class="kv-value">blocked</span></div></section><section class="card"><div class="card-header"><span class="card-title">Queue home</span></div><div class="kv"><span class="kv-key">Repository</span><span class="kv-value">northstar/review-state</span></div><div class="kv"><span class="kv-key">State ref</span><span class="kv-value">crq-state-v3</span></div><div class="kv"><span class="kv-key">Dashboard issue</span><span class="kv-value">#12</span></div><div class="kv"><span class="kv-key">Calibration PR</span><span class="kv-value">#1</span></div><div class="kv"><span class="kv-key">Scope</span><span class="kv-value">northstar/*</span></div></section><section class="card"><div class="card-header"><span class="card-title">Runtime</span></div><div class="kv"><span class="kv-key">Review host</span><span class="kv-value">runner-eu-1</span></div><div class="kv"><span class="kv-key">Watch interval</span><span class="kv-value">30s</span></div><div class="kv"><span class="kv-key">In-flight timeout</span><span class="kv-value">20m</span></div><div class="kv"><span class="kv-key">Workspace root</span><span class="kv-value">/srv/crq/workspaces</span></div><div class="kv"><span class="kv-key">Skip authors</span><span class="kv-value">dependabot · renovate</span></div></section></div>`; }
+    const finding = (sev,path,line,title,copy,bot) => `<article class="finding"><div class="finding-top"><span class="sev ${sev}">${sev}</span><span class="finding-path">${path}:${line}</span><span class="muted" style="margin-left:auto">${bot}</span></div><h3>${title}</h3><p>${copy}</p><div style="display:flex;gap:6px;margin-top:10px"><button class="small-button">Resolve</button><button class="small-button">Decline</button><button class="small-button">Dismiss</button></div></article>`;
+    function prView() { return `<div class="eyebrow" style="margin-bottom:8px">Overview / northstar/checkout-service / #1842</div><div class="pr-head">${icon(repoBy('northstar/checkout-service'))}<h1>checkout-service#1842</h1><span class="pr-title">Prevent duplicate captures during checkout retries</span>${phase('reviewing','ok')}${phase('3 open','warn')}<div class="right"><button class="small-button">Cancel round…</button><button class="primary">Refresh</button></div></div><div class="pr-layout"><div class="stack"><section class="card"><div class="card-header"><span class="card-title">Verified findings</span><span class="count">3</span><span class="card-end">head a81df42c9 · checked 1m ago</span></div>${finding('major','internal/checkout/capture.go',184,'Retry path can submit the same capture twice','The retry branch does not carry the idempotency key from the original attempt, so a network timeout can create a second capture.','CodeRabbit')}${finding('potential','internal/checkout/reconcile.go',77,'Reconciliation stops after the first transient error','A single provider timeout ends the batch and leaves later settlements unprocessed until the next scheduled run.','Codex')}${finding('minor','internal/checkout/capture_test.go',246,'Missing assertion for the preserved idempotency key','The retry test checks the response but not the provider request, so this regression would still pass.','CodeRabbit')}</section><section class="card"><div class="card-header"><span class="card-title">Round history</span></div><div class="kv"><span class="kv-key"><span class="sha">a81df42c9</span></span><span class="kv-value">reviewing · current head</span></div><div class="kv"><span class="kv-key"><span class="sha">4af71c290</span></span><span class="kv-value">superseded · new commits pushed</span></div></section></div><aside class="stack"><section class="card"><div class="card-header"><span class="card-title">Current round</span></div><div class="kv" style="grid-template-columns:100px 1fr"><span class="kv-key">Phase</span><span class="kv-value">reviewing</span></div><div class="kv" style="grid-template-columns:100px 1fr"><span class="kv-key">Host</span><span class="kv-value">runner-eu-1</span></div><div class="kv" style="grid-template-columns:100px 1fr"><span class="kv-key">Reviewers</span><span class="kv-value">CodeRabbit, Codex</span></div><div class="kv" style="grid-template-columns:100px 1fr"><span class="kv-key">Deadline</span><span class="kv-value">16m</span></div></section><section class="card"><div class="card-header"><span class="card-title">One more round</span></div><div class="cost-box"><div class="cost-range">$0.32–$0.48</div><p class="cost-copy">Estimated for both required reviewers on 418 changed lines across 11 files.</p><div class="progress"><span style="width:72%"></span></div><div class="kv" style="grid-template-columns:90px 1fr;padding-left:0;padding-right:0;margin-top:10px"><span class="kv-key">CodeRabbit</span><span class="kv-value">$0.24–$0.36</span></div><div class="kv" style="grid-template-columns:90px 1fr;padding-left:0;padding-right:0"><span class="kv-key">Codex</span><span class="kv-value">$0.08–$0.12</span></div></div></section></aside></div>`; }
+    const views = {overview, repos:reposView, bots:botsView, setup:setupView, settings:settingsView, pr:prView};
+    const app = document.querySelector('#app');
+    function render(view,scenario='busy') { const fn=views[view] || views.overview; app.innerHTML=fn(scenario); document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view)); document.body.dataset.view=view; window.scrollTo(0,0); }
+    document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.view,'busy')));
+    const params = new URLSearchParams(location.search); render(params.get('view')||'overview',params.get('scenario')||'busy');
+    window.crqScreenshotStudio = {render};
+  </script>
+</body>
+</html>

@@ -225,11 +225,13 @@ export function OverviewPage({
                     <tr key={r.key} className="group hover:bg-[#F7F8FA]">
                       <Td>
                         <div className="flex items-center gap-2 font-[550]">
-                          <RepoIcon repo={r.repo} />
+                          <RepoIcon repo={r.repo} size={26} />
                           <PRTitle repo={r.repo} pr={r.pr} title={r.title} />
                           {r.fixing && <Pill tone="ok">fixing</Pill>}
                         </div>
-                        {r.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{r.next}</div>}
+                        {r.next && (
+                          <div className="mt-1 ml-[34px] text-[12.5px] text-mut">{r.next}</div>
+                        )}
                       </Td>
                       <Td className="text-[13px]">
                         <CommitLink repo={r.repo} sha={r.head} />
@@ -304,10 +306,12 @@ export function OverviewPage({
                       </Td>
                       <Td>
                         <div className="flex items-center gap-2 font-[550]">
-                          <RepoIcon repo={q.repo} />
+                          <RepoIcon repo={q.repo} size={26} />
                           <PRTitle repo={q.repo} pr={q.pr} title={q.title} />
                         </div>
-                        {q.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{q.next}</div>}
+                        {q.next && (
+                          <div className="mt-1 ml-[34px] text-[12.5px] text-mut">{q.next}</div>
+                        )}
                       </Td>
                       <Td className="text-[13px]">
                         <CommitLink repo={q.repo} sha={q.head} />
@@ -378,7 +382,7 @@ export function OverviewPage({
                     <tr key={h.key} className="hover:bg-[#F7F8FA]">
                       <Td>
                         <div className="flex items-center gap-2 font-[550]">
-                          <RepoIcon repo={h.repo} />
+                          <RepoIcon repo={h.repo} size={26} />
                           <PRTitle repo={h.repo} pr={h.pr} title={h.title} />
                         </div>
                       </Td>
@@ -428,7 +432,7 @@ export function OverviewPage({
                     <tr key={`${d.key}-${d.head}`} className="hover:bg-[#F7F8FA]">
                       <Td>
                         <div className="flex items-center gap-2 font-[550]">
-                          <RepoIcon repo={d.repo} />
+                          <RepoIcon repo={d.repo} size={26} />
                           <PRTitle repo={d.repo} pr={d.pr} title={d.title} />
                         </div>
                       </Td>
@@ -556,7 +560,7 @@ function AutofixCard({
         fixing.map((s) => (
           <div key={s.key} className="border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
             <div className="flex flex-wrap items-center gap-2">
-              <RepoIcon repo={s.repo} />
+              <RepoIcon repo={s.repo} size={26} />
               <PRLink repo={s.repo} pr={s.pr} className="font-[550]" />
               <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
             </div>

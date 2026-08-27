@@ -306,10 +306,13 @@ export function PRTitle({
   className?: string;
 }) {
   return (
-    <span className={`flex min-w-0 items-baseline gap-2 ${className}`}>
-      <PRLink repo={repo} pr={pr} />
+    <span className={`grid min-w-0 gap-0.5 ${className}`}>
+      <PRLink repo={repo} pr={pr} className="font-[650] leading-[1.15]" />
       {title && (
-        <span className="min-w-0 truncate text-[12.5px] text-mut" title={title}>
+        <span
+          className="block min-w-0 truncate text-[12.5px] leading-[1.25] font-normal text-mut"
+          title={title}
+        >
           {title}
         </span>
       )}

@@ -24,13 +24,13 @@ const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
 export function mergeLivePRState(current: PRView | null, next: PRView): PRView {
   if (!current) return next;
   if (next.rev < current.rev) return current;
-  const sameHead = !next.round?.head || next.round.head === current.observed?.head;
+  const matchingHead = !next.round?.head || sameHead(next.round.head, current.observed?.head);
   return {
     ...next,
-    observed: sameHead ? current.observed : undefined,
-    observe_error: sameHead ? current.observe_error : undefined,
-    cost: sameHead ? current.cost : undefined,
-    cost_error: sameHead ? current.cost_error : undefined,
+    observed: matchingHead ? current.observed : undefined,
+    observe_error: matchingHead ? current.observe_error : undefined,
+    cost: matchingHead ? current.cost : undefined,
+    cost_error: matchingHead ? current.cost_error : undefined,
   };
 }
 
@@ -44,7 +44,7 @@ function sameHead(a: string | undefined, b: string | undefined): boolean {
 export function mergePRDetails(current: PRView | null, next: PRView): PRView {
   if (!current || next.rev > current.rev) return next;
 
-  const currentHead = current.round?.head;
+  const currentHead = current.round?.head ?? current.observed?.head;
   const detailsHead = next.observed?.head ?? next.round?.head;
   if (currentHead && detailsHead && !sameHead(currentHead, detailsHead)) return current;
 

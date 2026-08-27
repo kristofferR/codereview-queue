@@ -198,7 +198,7 @@ export function OverviewPage({
         )}
       </div>
 
-      <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-4 max-[1400px]:grid-cols-[minmax(0,1fr)]">
+      <div className="grid grid-cols-[minmax(0,1fr)_340px] items-start gap-3.5 max-[1050px]:grid-cols-[minmax(0,1fr)]">
         <div>
           <Card
             title="In flight"
@@ -408,65 +408,6 @@ export function OverviewPage({
           )}
 
           <Card
-            title="Autofix"
-            count={`${countLabel(fixing.length, ov.autofix.sessions.length, narrowed)} running · ${ov.autofix.hosts.length} hosts`}
-          >
-            {fixing.length === 0 ? (
-              <Empty>{narrowed ? "No fix session matches." : "No fix session is running."}</Empty>
-            ) : (
-              fixing.map((s) => (
-                <div
-                  key={s.key}
-                  className="flex flex-wrap items-center gap-4 border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]"
-                >
-                  <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
-                  <span className="flex items-center gap-2">
-                    <RepoIcon repo={s.repo} />
-                    <PRLink repo={s.repo} pr={s.pr} className="font-[550]" />
-                    <CommitLink repo={s.repo} sha={s.head} />
-                  </span>
-                  <span className="text-faint">
-                    {s.host}
-                    {s.model ? ` · ${s.model}` : ""}
-                    {s.attempt ? ` · attempt ${s.attempt}` : ""}
-                    {s.heartbeat ? ` · heartbeat ${clock(s.heartbeat)}` : ""}
-                  </span>
-                </div>
-              ))
-            )}
-            <div className="flex flex-wrap gap-3 px-[18px] py-3">
-              {ov.autofix.hosts.length === 0 && (
-                <span className="text-[13px] text-faint">No host has reported yet.</span>
-              )}
-              {ov.autofix.hosts.map((h) => (
-                <div
-                  key={h.name}
-                  className={`min-w-[170px] flex-1 rounded-lg border px-3 py-2 text-[12.5px] text-mut ${
-                    h.health === "unhealthy" ? "border-bad-edge bg-bad-bg" : "border-edge"
-                  }`}
-                >
-                  <span className="font-mono font-semibold text-ink">{h.name}</span>{" "}
-                  <Pill
-                    tone={h.health === "healthy" ? "ok" : h.health === "unhealthy" ? "bad" : "mut"}
-                  >
-                    {h.health === "unknown" ? "No recent signal" : h.health}
-                  </Pill>
-                  <div className="mt-1">
-                    {h.health === "unhealthy"
-                      ? `${h.failures} consecutive failures`
-                      : h.last_success
-                        ? `last success ${clock(h.last_success)}`
-                        : "nothing reported"}
-                  </div>
-                  {h.last_error && (
-                    <div className="mt-1 font-mono text-[11.5px] break-words">{h.last_error}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          <Card
             title="Recently finished"
             count={countLabel(finished.length, ov.finished.length, narrowed)}
           >
@@ -512,7 +453,10 @@ export function OverviewPage({
             )}
           </Card>
         </div>
-        <ActivityFeed events={events} />
+        <aside className="sticky top-16 min-w-0 max-[1050px]:static">
+          <AutofixCard autofix={ov.autofix} fixing={fixing} narrowed={narrowed} now={now} />
+          <ActivityFeed events={events} />
+        </aside>
       </div>
 
       {settingsFor &&
@@ -589,6 +533,79 @@ export function OverviewPage({
   );
 }
 
+function AutofixCard({
+  autofix,
+  fixing,
+  narrowed,
+  now,
+}: {
+  autofix: Overview["autofix"];
+  fixing: Overview["autofix"]["sessions"];
+  narrowed: boolean;
+  now: number;
+}) {
+  return (
+    <Card
+      title="Autofix"
+      count={`${countLabel(fixing.length, autofix.sessions.length, narrowed)} running`}
+      end={`${autofix.hosts.length} hosts`}
+    >
+      {fixing.length === 0 ? (
+        <Empty>{narrowed ? "No fix session matches." : "No fix session is running."}</Empty>
+      ) : (
+        fixing.map((s) => (
+          <div key={s.key} className="border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <RepoIcon repo={s.repo} />
+              <PRLink repo={s.repo} pr={s.pr} className="font-[550]" />
+              <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-faint">
+              <CommitLink repo={s.repo} sha={s.head} />
+              <span>
+                {s.host}
+                {s.model ? ` · ${s.model}` : ""}
+                {s.attempt ? ` · attempt ${s.attempt}` : ""}
+                {s.heartbeat ? ` · heartbeat ${clock(s.heartbeat)}` : ""}
+              </span>
+            </div>
+          </div>
+        ))
+      )}
+      <div className="grid gap-2 px-[18px] py-3">
+        {autofix.hosts.length === 0 && (
+          <span className="text-[13px] text-faint">No host has reported yet.</span>
+        )}
+        {autofix.hosts.map((h) => (
+          <div
+            key={h.name}
+            className={`rounded-lg border px-3 py-2 text-[12.5px] text-mut ${
+              h.health === "unhealthy" ? "border-bad-edge bg-bad-bg" : "border-edge"
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono font-semibold text-ink">{h.name}</span>
+              <Pill tone={h.health === "healthy" ? "ok" : h.health === "unhealthy" ? "bad" : "mut"}>
+                {h.health === "unknown" ? "No recent signal" : h.health}
+              </Pill>
+            </div>
+            <div className="mt-1">
+              {h.health === "unhealthy"
+                ? `${h.failures} consecutive failures`
+                : h.last_success
+                  ? `last success ${clock(h.last_success)}`
+                  : "nothing reported"}
+            </div>
+            {h.last_error && (
+              <div className="mt-1 font-mono text-[11.5px] break-words">{h.last_error}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 /**
  * The feed is derived from state revisions, so it is honest about its scope:
  * it starts when the server starts and cannot see a change that appears and
@@ -605,43 +622,41 @@ function ActivityFeed({ events }: { events: EventItem[] }) {
     return { event, key: `${base}-${occurrence}` };
   });
   return (
-    <aside className="sticky top-16">
-      <Card title="Activity" end="live — since this dashboard started">
-        {events.length === 0 ? (
-          <Empty>Nothing has changed since this dashboard started.</Empty>
-        ) : (
-          <ol className="px-[18px] pt-1.5 pb-3">
-            {keyedEvents.map(({ event: e, key }) => (
-              <li
-                key={key}
-                className="flex gap-2.5 border-b border-dashed border-[#EEF0F3] py-1.5 text-[12.5px] last:border-none"
-              >
-                <span className="w-[52px] shrink-0 pt-0.5 font-mono text-[11px] text-faint">
-                  {clock(e.at)}
-                </span>
-                <span className="shrink-0">
-                  <Pill tone={tone(e.level)}>{e.kind}</Pill>
-                </span>
-                <span className="text-mut">
-                  {e.repo && e.pr ? (
-                    <>
-                      <PRLink repo={e.repo} pr={e.pr} /> —{" "}
-                    </>
-                  ) : e.repo ? (
-                    <>{e.repo.split("/").pop()} — </>
-                  ) : null}
-                  {e.text}
-                  {e.detail && <span className="text-faint"> · {e.detail}</span>}
-                </span>
-              </li>
-            ))}
-          </ol>
-        )}
-        <p className="border-t border-[#EEF0F3] px-[18px] py-2 text-[11.5px] text-faint">
-          Derived by comparing state revisions — not an audit log. {events.length} event(s) held.
-        </p>
-      </Card>
-    </aside>
+    <Card title="Activity" end="live — since this dashboard started">
+      {events.length === 0 ? (
+        <Empty>Nothing has changed since this dashboard started.</Empty>
+      ) : (
+        <ol className="px-[18px] pt-1.5 pb-3">
+          {keyedEvents.map(({ event: e, key }) => (
+            <li
+              key={key}
+              className="flex gap-2.5 border-b border-dashed border-[#EEF0F3] py-1.5 text-[12.5px] last:border-none"
+            >
+              <span className="w-[52px] shrink-0 pt-0.5 font-mono text-[11px] text-faint">
+                {clock(e.at)}
+              </span>
+              <span className="shrink-0">
+                <Pill tone={tone(e.level)}>{e.kind}</Pill>
+              </span>
+              <span className="text-mut">
+                {e.repo && e.pr ? (
+                  <>
+                    <PRLink repo={e.repo} pr={e.pr} /> —{" "}
+                  </>
+                ) : e.repo ? (
+                  <>{e.repo.split("/").pop()} — </>
+                ) : null}
+                {e.text}
+                {e.detail && <span className="text-faint"> · {e.detail}</span>}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+      <p className="border-t border-[#EEF0F3] px-[18px] py-2 text-[11.5px] text-faint">
+        Derived by comparing state revisions — not an audit log. {events.length} event(s) held.
+      </p>
+    </Card>
   );
 }
 

@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kristofferR/codereview-queue/internal/dialect"
@@ -42,22 +43,60 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	if o.eng.Open && len(pull.Head.SHA) >= 9 {
 		o.eng.Head = pull.Head.SHA[:9]
 	}
+
+	// Once the pull establishes the head, these reads are independent. Keeping
+	// them serial made one observation cost a full GitHub round trip per
+	// resource even though none consumes another's result.
+	var (
+		commit      ghapi.Commit
+		commitErr   error
+		reviews     []ghapi.Review
+		reviewsErr  error
+		comments    []ghapi.IssueComment
+		commentsErr error
+		runs        []ghapi.CheckRun
+		checksErr   error
+		reads       sync.WaitGroup
+	)
+	if o.eng.Open && pull.Head.SHA != "" {
+		reads.Add(1)
+		go func() {
+			defer reads.Done()
+			commit, commitErr = s.gh.GetCommit(ctx, repo, pull.Head.SHA)
+		}()
+	}
+	reads.Add(2)
+	go func() {
+		defer reads.Done()
+		reviews, reviewsErr = s.gh.ListReviews(ctx, repo, pr)
+	}()
+	go func() {
+		defer reads.Done()
+		comments, commentsErr = s.gh.ListIssueComments(ctx, repo, pr)
+	}()
+	readChecks := o.eng.Open && pull.Head.SHA != "" && cfg.coChecksRelevant()
+	if readChecks {
+		reads.Add(1)
+		go func() {
+			defer reads.Done()
+			runs, checksErr = s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
+		}()
+	}
+	reads.Wait()
+
 	// The head's commit time bounds evidence that names no commit of its own
 	// (a SHA-less "Review skipped"), so such a notice cannot suppress a later
 	// head forever. Best-effort: an unreadable commit leaves it zero and the
 	// engine falls back to accepting the notice, the conservative reading.
-	if o.eng.Open && pull.Head.SHA != "" {
-		if c, cerr := s.gh.GetCommit(ctx, repo, pull.Head.SHA); cerr == nil {
-			o.eng.HeadAt = c.Committer.Date.UTC()
-		}
+	if commitErr == nil {
+		o.eng.HeadAt = commit.Committer.Date.UTC()
 	}
 
 	// Reviews and issue comments are fetched even for a closed PR: the daemon's
 	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its
 	// findings, and the extra two reads on a to-be-dropped round are negligible.
-	reviews, err := s.gh.ListReviews(ctx, repo, pr)
-	if err != nil {
-		return observation{}, err
+	if reviewsErr != nil {
+		return observation{}, reviewsErr
 	}
 	o.reviews = reviews
 	for _, review := range reviews {
@@ -80,9 +119,8 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		})
 	}
 
-	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
-	if err != nil {
-		return observation{}, err
+	if commentsErr != nil {
+		return observation{}, commentsErr
 	}
 	o.comments = comments
 	classifier := dialect.Classifier{
@@ -125,15 +163,14 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// wait rather than failing the observation; the log line is the operator's
 	// signal that a required check-bearing bot may time out spuriously.
 	checksUnknown := false
-	if o.eng.Open && pull.Head.SHA != "" && cfg.coChecksRelevant() {
-		runs, cerr := s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
-		if cerr != nil {
+	if readChecks {
+		if checksErr != nil {
 			// Record the uncertainty rather than letting "no checks returned"
 			// masquerade as "the bot has not started": that read posts a trigger
 			// over a run already in flight.
 			checksUnknown = true
 			if s.log != nil {
-				s.log.Printf("warning: check runs unavailable for %s#%d@%s: %v (co-reviewer triggers suppressed this pass)", repo, pr, dialect.ShortOID(pull.Head.SHA), cerr)
+				s.log.Printf("warning: check runs unavailable for %s#%d@%s: %v (co-reviewer triggers suppressed this pass)", repo, pr, dialect.ShortOID(pull.Head.SHA), checksErr)
 			}
 		} else {
 			for _, run := range runs {

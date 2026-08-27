@@ -31,6 +31,11 @@ type FeedbackReport struct {
 	// reader sees something was set aside rather than never reported.
 	Dismissed int       `json:"dismissed,omitempty"`
 	CheckedAt time.Time `json:"checked_at"`
+	// HeadOID and Diff come from the same pull read as Head. They stay outside
+	// the frozen feedback JSON contract, but let an in-process dashboard price
+	// the observed head without repeating that pull read.
+	HeadOID string           `json:"-"`
+	Diff    dialect.DiffStat `json:"-"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -103,6 +108,20 @@ func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (Fe
 	return s.feedback(ctx, repo, pr, false)
 }
 
+// FeedbackIn is Feedback against state a persistent caller already loaded. It
+// retains Feedback's incidental evidence writes while avoiding a redundant
+// state-ref read before the observation.
+func (s *Service) FeedbackIn(ctx context.Context, st State, repo string, pr int) (FeedbackReport, error) {
+	return s.feedbackIn(ctx, st, repo, pr, true)
+}
+
+// FeedbackReadOnlyIn observes a pull request against state the caller already
+// loaded. Persistent callers such as crq serve must not pay for the four-step
+// state-ref read a second time merely to render one PR.
+func (s *Service) FeedbackReadOnlyIn(ctx context.Context, st State, repo string, pr int) (FeedbackReport, error) {
+	return s.feedbackIn(ctx, st, repo, pr, false)
+}
+
 // onePassReviewEvidence answers the campaign's PR-wide "has any configured
 // reviewer genuinely completed a review?" question from Feedback's existing
 // observation. It deliberately mirrors reviewNeeded's anyConfigured branch,
@@ -152,11 +171,16 @@ func onePassReviewEvidence(st State, cfg Config, repo string, pr int, obs observ
 
 func (s *Service) feedback(ctx context.Context, repo string, pr int, persist bool) (FeedbackReport, error) {
 	repo = NormalizeRepo(repo)
-	now := s.clock()
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
+	return s.feedbackIn(ctx, st, repo, pr, persist)
+}
+
+func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int, persist bool) (FeedbackReport, error) {
+	repo = NormalizeRepo(repo)
+	now := s.clock()
 	round := st.Round(repo, pr)
 
 	// One fetch drives both halves: observe() reads the pull, reviews and issue
@@ -165,6 +189,17 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
+	type threadsRead struct {
+		threads []reviewThread
+		err     error
+	}
+	threadCtx, cancelThreads := context.WithCancel(ctx)
+	defer cancelThreads()
+	threadsCh := make(chan threadsRead, 1)
+	go func() {
+		threads, err := s.reviewThreads(threadCtx, repo, pr)
+		threadsCh <- threadsRead{threads: threads, err: err}
+	}()
 	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return FeedbackReport{}, err
@@ -225,17 +260,21 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		}
 	}
 	report := FeedbackReport{
-		Status:          "feedback",
-		Repo:            repo,
-		PR:              pr,
-		Head:            head,
-		Open:            obs.eng.Open,
-		HeadRef:         pull.Head.Ref,
-		HeadRepo:        NormalizeRepo(pull.Head.Repo.FullName),
-		ReviewedBy:      map[string]bool{},
-		config:          cfg,
-		Findings:        []dialect.Finding{},
-		CheckedAt:       now,
+		Status:     "feedback",
+		Repo:       repo,
+		PR:         pr,
+		Head:       head,
+		Open:       obs.eng.Open,
+		HeadRef:    pull.Head.Ref,
+		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
+		ReviewedBy: map[string]bool{},
+		config:     cfg,
+		Findings:   []dialect.Finding{},
+		CheckedAt:  now,
+		HeadOID:    pull.Head.SHA,
+		Diff: dialect.DiffStat{
+			Additions: pull.Additions, Deletions: pull.Deletions, ChangedFiles: pull.ChangedFiles,
+		},
 		onePassReviewed: onePassReviewed,
 	}
 
@@ -343,7 +382,8 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	// resurfaces until every duplicate is resolved by hand. Collect the stable
 	// ids settled in ANY thread first and suppress the whole family.
 	settledStableIDs := map[string]bool{}
-	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
+	threadRead := <-threadsCh
+	if threads, err := threadRead.threads, threadRead.err; err == nil {
 		// A stable id can appear in both settled and open threads, and the two
 		// readings pull opposite ways: an open thread may be a genuine re-report
 		// after a regression, or merely a leftover duplicate of the one just

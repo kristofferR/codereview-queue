@@ -2,6 +2,9 @@ package serve
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strconv"
@@ -17,7 +20,7 @@ import (
 // trip to GitHub. It is an interface so this package keeps working without one
 // — the cheap state layer still renders, and the findings arrive when they can.
 type Observer interface {
-	Observe(ctx context.Context, repo string, pr int) (Observation, error)
+	Observe(ctx context.Context, st state.State, repo string, pr int) (Observation, error)
 }
 
 // Observation is what one GitHub read tells us about a pull request.
@@ -30,13 +33,17 @@ type Observation struct {
 	Findings   []dialect.Finding `json:"findings"`
 	Dismissed  int               `json:"dismissed,omitempty"`
 	CheckedAt  time.Time         `json:"checked_at"`
+	// HeadOID and Diff travel only between the in-process observer and coster.
+	// The browser already receives the short Head and the rendered Cost.
+	HeadOID string   `json:"-"`
+	Diff    CostDiff `json:"-"`
 }
 
-// Coster estimates what one more round on a pull request would cost. Separate
-// from Observer because it is a different question with a different failure
-// mode: a page can show findings without a price, and a price without findings.
+// Coster estimates what one more round on an already-observed pull request
+// would cost. It receives the same state and pull facts, so pricing remains a
+// separate failure domain without repeating either remote read.
 type Coster interface {
-	Cost(ctx context.Context, repo string, pr int) (Cost, error)
+	Cost(ctx context.Context, st state.State, repo string, pr int, observed Observation) (Cost, error)
 }
 
 // Cost mirrors crq.RoundCost on the wire. Ranges, per-reviewer reasoning and a
@@ -220,10 +227,10 @@ func costKey(repo string, pr int, head string, bots []BotName, remaining *int) s
 	return b.String()
 }
 
-func observationKey(repo string, pr int, head string, rev int64, bots []BotName) string {
+func observationKey(repo string, pr int, head, stateKey string, bots []BotName) string {
 	var b strings.Builder
 	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head +
-		"|rev=" + strconv.FormatInt(rev, 10))
+		"|state=" + stateKey)
 	for _, bot := range bots {
 		b.WriteString("|" + bot.Login)
 		if bot.Primary {
@@ -236,6 +243,59 @@ func observationKey(repo string, pr int, head string, rev int64, bots []BotName)
 		b.WriteString(":grace=" + strconv.FormatInt(int64(bot.Grace), 10))
 	}
 	return b.String()
+}
+
+// observationStateKey fingerprints only persisted facts that can change one
+// PR's feedback. The fleet revision also moves for unrelated PRs, host
+// heartbeats and lease renewals; keying on it made a 60-second cache miss on
+// every request in an active fleet.
+func observationStateKey(st state.State, repo string, pr int) string {
+	key := state.Key(repo, pr)
+	repoKey := strings.ToLower(strings.TrimSpace(repo))
+	round := st.Round(repo, pr)
+	archive := make([]state.Round, 0)
+	for _, item := range st.Archive {
+		if state.Key(item.Repo, item.PR) == key {
+			archive = append(archive, item)
+		}
+	}
+	var reviewers *state.RepoReviewers
+	if configured, ok := st.RepoOverride(repo); ok {
+		reviewers = &configured
+	}
+	var onePass *state.OnePassEvidence
+	if evidence, ok := st.OnePassEvidence[repoKey]; ok {
+		onePass = &evidence
+	}
+	projection := struct {
+		AccountBlockedUntil *time.Time             `json:"account_blocked_until,omitempty"`
+		Fleet               state.FleetDefaults    `json:"fleet"`
+		Reviewers           *state.RepoReviewers   `json:"reviewers,omitempty"`
+		Solver              state.SolverSettings   `json:"solver"`
+		Round               *state.Round           `json:"round,omitempty"`
+		Archive             []state.Round          `json:"archive,omitempty"`
+		CoActivity          map[string]time.Time   `json:"co_activity,omitempty"`
+		CoAnswers           map[string]time.Time   `json:"co_answers,omitempty"`
+		OnePass             *state.OnePassEvidence `json:"one_pass,omitempty"`
+		Tidied              []state.PostedCommand  `json:"tidied,omitempty"`
+	}{
+		AccountBlockedUntil: st.Account.BlockedUntil,
+		Fleet:               st.Fleet,
+		Reviewers:           reviewers,
+		Solver:              st.EffectiveSolver(repo),
+		Round:               round,
+		Archive:             archive,
+		CoActivity:          st.CoActivity[key],
+		CoAnswers:           st.CoAnswers[key],
+		OnePass:             onePass,
+		Tidied:              st.TidiedCommands[key],
+	}
+	payload, err := json.Marshal(projection)
+	if err != nil {
+		return "rev:" + strconv.FormatInt(st.Rev, 10)
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // costCache mirrors observeCache. Keyed by costKey: a price for a head that has
@@ -398,7 +458,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if view.Round != nil {
 			head = view.Round.Head
 		}
-		key := observationKey(repo, pr, head, st.Rev, bots)
+		key := observationKey(repo, pr, head, observationStateKey(st, repo, pr), bots)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.observations.put(key, observeEntry{})
 		}
@@ -413,7 +473,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		} else {
 			ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 			defer cancel()
-			obs, err := s.observer.Observe(ctx, repo, pr)
+			obs, err := s.observer.Observe(ctx, st, repo, pr)
 			entry := observeEntry{obs: obs, fetched: time.Now()}
 			if err != nil {
 				entry.err = err.Error()
@@ -431,9 +491,9 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		view.ObserveError = "this server was started without GitHub access"
 	}
 
-	// Priced on the same trip and cached the same way: it costs one more pull
-	// read, which is why the overview does not price every queue row.
-	if !stateOnly && s.opts.Coster != nil {
+	// Price from the state and pull facts already used above. The cache can live
+	// longer than the observation because a diff is immutable at one head.
+	if !stateOnly && s.opts.Coster != nil && view.Observed != nil {
 		// The head GitHub just reported, when the observation above got one.
 		// The five-minute TTL rests entirely on "the diff of a head does not
 		// change", and keyed on a round's head that is empty or superseded that
@@ -452,7 +512,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		} else {
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
-			cost, err := s.opts.Coster.Cost(ctx, repo, pr)
+			cost, err := s.opts.Coster.Cost(ctx, st, repo, pr, *view.Observed)
 			entry := costEntry{fetched: time.Now()}
 			if err != nil {
 				entry.err = err.Error()

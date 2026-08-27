@@ -2737,13 +2737,13 @@ type prObserver struct {
 	readOnly bool
 }
 
-func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Observation, error) {
+func (o prObserver) Observe(ctx context.Context, st state.State, repo string, pr int) (serve.Observation, error) {
 	var report crq.FeedbackReport
 	var err error
 	if o.readOnly {
-		report, err = o.svc.FeedbackReadOnly(ctx, repo, pr)
+		report, err = o.svc.FeedbackReadOnlyIn(ctx, st, repo, pr)
 	} else {
-		report, err = o.svc.Feedback(ctx, repo, pr)
+		report, err = o.svc.FeedbackIn(ctx, st, repo, pr)
 	}
 	if err != nil {
 		return serve.Observation{}, err
@@ -2757,6 +2757,11 @@ func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Obs
 		Findings:   report.Findings,
 		Dismissed:  report.Dismissed,
 		CheckedAt:  report.CheckedAt,
+		HeadOID:    report.HeadOID,
+		Diff: serve.CostDiff{
+			Additions: report.Diff.Additions, Deletions: report.Diff.Deletions,
+			ChangedFiles: report.Diff.ChangedFiles,
+		},
 	}, nil
 }
 
@@ -2913,8 +2918,11 @@ func parseStamp(s string) *time.Time {
 // prCoster prices one more round for the dashboard's PR page.
 type prCoster struct{ svc *crq.Service }
 
-func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, error) {
-	est, err := c.svc.Cost(ctx, repo, pr)
+func (c prCoster) Cost(_ context.Context, st state.State, repo string, pr int, observed serve.Observation) (serve.Cost, error) {
+	est, err := c.svc.CostIn(st, repo, pr, observed.HeadOID, dialect.DiffStat{
+		Additions: observed.Diff.Additions, Deletions: observed.Diff.Deletions,
+		ChangedFiles: observed.Diff.ChangedFiles,
+	})
 	if err != nil {
 		return serve.Cost{}, err
 	}

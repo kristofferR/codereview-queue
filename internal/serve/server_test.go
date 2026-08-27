@@ -27,7 +27,7 @@ func (l *stubLoader) Load(context.Context) (state.State, state.Revision, error) 
 
 type countingObserver struct{ calls int }
 
-func (o *countingObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *countingObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	o.calls++
 	return Observation{}, nil
 }
@@ -37,7 +37,7 @@ type sequenceObserver struct {
 	calls        int
 }
 
-func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *sequenceObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	got := o.observations[o.calls]
 	o.calls++
 	return got, nil
@@ -45,7 +45,7 @@ func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, e
 
 type failingObserver struct{ calls int }
 
-func (o *failingObserver) Observe(context.Context, string, int) (Observation, error) {
+func (o *failingObserver) Observe(context.Context, state.State, string, int) (Observation, error) {
 	o.calls++
 	return Observation{}, errors.New("observation unavailable")
 }
@@ -84,7 +84,7 @@ func (a *previewGuardActor) SetEnrollment(
 	return nil, nil
 }
 
-func (c *countingCoster) Cost(context.Context, string, int) (Cost, error) {
+func (c *countingCoster) Cost(context.Context, state.State, string, int, Observation) (Cost, error) {
 	c.calls++
 	return c.cost, nil
 }
@@ -754,17 +754,68 @@ func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
 		{Login: "coderabbitai[bot]", Primary: true, Required: true},
 		{Login: "cursor[bot]", Required: true, Trigger: "always", Command: "bugbot run"},
 	}
-	if observationKey("o/r", 1, "abcdef123", 7, base) ==
-		observationKey("o/r", 1, "abcdef123", 7, changed) {
+	if observationKey("o/r", 1, "abcdef123", "state", base) ==
+		observationKey("o/r", 1, "abcdef123", "state", changed) {
 		t.Fatal("reviewer change reused the old observation cache key")
 	}
 }
 
-func TestObservationKeyIncludesStateRevision(t *testing.T) {
+func TestObservationStateKeyIgnoresUnrelatedFleetRevisions(t *testing.T) {
 	bots := []BotName{{Login: "coderabbitai[bot]", Primary: true, Required: true}}
-	if observationKey("o/r", 1, "abcdef123", 7, bots) ==
-		observationKey("o/r", 1, "abcdef123", 8, bots) {
+	before := state.New()
+	before.Rev = 7
+	after := state.New()
+	after.Rev = 8
+	if observationKey("o/r", 1, "abcdef123", observationStateKey(before, "o/r", 1), bots) !=
+		observationKey("o/r", 1, "abcdef123", observationStateKey(after, "o/r", 1), bots) {
+		t.Fatal("an unrelated fleet revision invalidated the PR observation cache")
+	}
+}
+
+func TestObservationStateKeyIncludesRoundState(t *testing.T) {
+	queued := state.New()
+	queued.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseQueued,
+	}
+	completed := state.New()
+	completed.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+	}
+	if observationStateKey(queued, "o/r", 1) == observationStateKey(completed, "o/r", 1) {
 		t.Fatal("round-state change reused the old observation cache key")
+	}
+}
+
+func TestPRObservationCacheSurvivesAnUnrelatedStateRevision(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{{
+		Head: "abcdef123", CheckedAt: now,
+	}}}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rev = 7
+	srv.lastState.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+	}
+
+	request := func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+		req.Header.Set("X-CRQ-Dashboard", "1")
+		req.SetPathValue("owner", "o")
+		req.SetPathValue("name", "r")
+		req.SetPathValue("pr", "1")
+		srv.handlePR(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	request()
+	srv.lastState.Rev++
+	request()
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want the unrelated revision to reuse the cached result", observer.calls)
 	}
 }
 
@@ -851,7 +902,7 @@ func TestPROmitsObservationThatRacedAheadOfState(t *testing.T) {
 	}
 }
 
-func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) {
+func TestPRDoesNotPriceWithoutAnObservedHead(t *testing.T) {
 	observer := &failingObserver{}
 	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
 	srv := New(&stubLoader{}, Options{
@@ -877,8 +928,8 @@ func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) 
 	}
 	request()
 	request()
-	if coster.calls != 2 {
-		t.Fatalf("cost calls = %d, want a fresh live-head price while observation is unavailable", coster.calls)
+	if coster.calls != 0 {
+		t.Fatalf("cost calls = %d, want pricing skipped when no observed head and diff are available", coster.calls)
 	}
 }
 

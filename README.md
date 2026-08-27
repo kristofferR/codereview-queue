@@ -9,6 +9,12 @@ On top of the queue, crq drives the whole review round: trigger, wait, normalize
 JSON, resolve the threads you fixed, and tell you when the PR has converged.
 </p>
 
+<p align="center">
+  <a href="docs/screenshots/dashboard/overview-busy.png">
+    <img src="docs/screenshots/dashboard/overview-busy.png" alt="Code Review Queue dashboard overview" width="1200">
+  </a>
+</p>
+
 ---
 
 ## The problem (in plain English)

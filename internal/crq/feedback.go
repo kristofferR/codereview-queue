@@ -189,6 +189,14 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	if err != nil {
+		return FeedbackReport{}, err
+	}
+
+	// Review threads are independent of the state work below, but only useful
+	// after the required REST observation succeeds. Starting here preserves
+	// that overlap without spending a GraphQL read on a failed observation.
 	type threadsRead struct {
 		threads []reviewThread
 		err     error
@@ -200,10 +208,6 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		threads, err := s.reviewThreads(threadCtx, repo, pr)
 		threadsCh <- threadsRead{threads: threads, err: err}
 	}()
-	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
-	if err != nil {
-		return FeedbackReport{}, err
-	}
 	pull := obs.pull
 	head := ""
 	if len(pull.Head.SHA) >= 9 {

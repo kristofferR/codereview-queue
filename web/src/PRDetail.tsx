@@ -42,7 +42,7 @@ function sameHead(a: string | undefined, b: string | undefined): boolean {
 
 /** Attach a slow GitHub observation without rolling back newer persisted state. */
 export function mergePRDetails(current: PRView | null, next: PRView): PRView {
-  if (!current || next.rev >= current.rev) return next;
+  if (!current || next.rev > current.rev) return next;
 
   const currentHead = current.round?.head;
   const detailsHead = next.observed?.head ?? next.round?.head;
@@ -402,8 +402,8 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
               </>
             ) : (
               <span>
-                {view.observe_error
-                  ? `Could not reach GitHub — ${view.observe_error}`
+                {view.observe_error || error
+                  ? `Could not read findings: ${view.observe_error ?? error}`
                   : "Reading findings from GitHub…"}
               </span>
             )}

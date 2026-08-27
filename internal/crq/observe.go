@@ -47,42 +47,59 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// Once the pull establishes the head, these reads are independent. Keeping
 	// them serial made one observation cost a full GitHub round trip per
 	// resource even though none consumes another's result.
+	readCtx, cancelReads := context.WithCancel(ctx)
+	defer cancelReads()
+	requiredErrs := make(chan error, 2)
+	failRequired := func(err error) {
+		if err == nil {
+			return
+		}
+		requiredErrs <- err
+		cancelReads()
+	}
 	var (
-		commit      ghapi.Commit
-		commitErr   error
-		reviews     []ghapi.Review
-		reviewsErr  error
-		comments    []ghapi.IssueComment
-		commentsErr error
-		runs        []ghapi.CheckRun
-		checksErr   error
-		reads       sync.WaitGroup
+		commit    ghapi.Commit
+		commitErr error
+		reviews   []ghapi.Review
+		comments  []ghapi.IssueComment
+		runs      []ghapi.CheckRun
+		checksErr error
+		reads     sync.WaitGroup
 	)
 	if o.eng.Open && pull.Head.SHA != "" {
 		reads.Add(1)
 		go func() {
 			defer reads.Done()
-			commit, commitErr = s.gh.GetCommit(ctx, repo, pull.Head.SHA)
+			commit, commitErr = s.gh.GetCommit(readCtx, repo, pull.Head.SHA)
 		}()
 	}
 	reads.Add(2)
 	go func() {
 		defer reads.Done()
-		reviews, reviewsErr = s.gh.ListReviews(ctx, repo, pr)
+		var err error
+		reviews, err = s.gh.ListReviews(readCtx, repo, pr)
+		failRequired(err)
 	}()
 	go func() {
 		defer reads.Done()
-		comments, commentsErr = s.gh.ListIssueComments(ctx, repo, pr)
+		var err error
+		comments, err = s.gh.ListIssueComments(readCtx, repo, pr)
+		failRequired(err)
 	}()
 	readChecks := o.eng.Open && pull.Head.SHA != "" && cfg.coChecksRelevant()
 	if readChecks {
 		reads.Add(1)
 		go func() {
 			defer reads.Done()
-			runs, checksErr = s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
+			runs, checksErr = s.gh.ListCheckRuns(readCtx, repo, pull.Head.SHA)
 		}()
 	}
 	reads.Wait()
+	select {
+	case err := <-requiredErrs:
+		return observation{}, err
+	default:
+	}
 
 	// The head's commit time bounds evidence that names no commit of its own
 	// (a SHA-less "Review skipped"), so such a notice cannot suppress a later
@@ -95,9 +112,6 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// Reviews and issue comments are fetched even for a closed PR: the daemon's
 	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its
 	// findings, and the extra two reads on a to-be-dropped round are negligible.
-	if reviewsErr != nil {
-		return observation{}, reviewsErr
-	}
 	o.reviews = reviews
 	for _, review := range reviews {
 		// CodeRabbit submits empty-bodied COMMENTED review objects as carriers
@@ -119,9 +133,6 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		})
 	}
 
-	if commentsErr != nil {
-		return observation{}, commentsErr
-	}
 	o.comments = comments
 	classifier := dialect.Classifier{
 		CodeRabbit:    s.cr,

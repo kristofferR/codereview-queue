@@ -74,6 +74,37 @@ describe("live PR state", () => {
     expect(merged.observed).toBe(observed.observed);
   });
 
+  it("preserves newer time-derived state when delayed details have the same revision", () => {
+    const current = { ...state("abcdef123", "completed"), rev: 5 };
+    const observed: PRView = {
+      ...state("abcdef123", "reviewing"),
+      rev: 5,
+      round: {
+        head: "abcdef123",
+        phase: "reviewing",
+        enqueued_at: "2026-07-29T11:00:00Z",
+        bots: [],
+        fixing: {
+          key: "owner/repo#7",
+          repo: "owner/repo",
+          pr: 7,
+          since: "2026-07-29T11:30:00Z",
+        },
+      },
+      observed: {
+        head: "abcdef1234",
+        converged: true,
+        findings: [],
+        checked_at: "2026-07-29T12:00:00Z",
+      },
+    };
+
+    const merged = mergePRDetails(current, observed);
+    expect(merged.round?.phase).toBe("completed");
+    expect(merged.round?.fixing).toBeUndefined();
+    expect(merged.observed).toBe(observed.observed);
+  });
+
   it("rejects delayed details for a superseded head", () => {
     const current = { ...state("fedcba987", "queued"), rev: 5 };
     const observed: PRView = {

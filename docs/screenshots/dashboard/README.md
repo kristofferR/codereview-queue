@@ -3,7 +3,10 @@
 The committed dashboard SPA and its real CSS/components, rendered against an
 isolated fictional API fixture for public documentation and website work. No
 repository, pull request, host, path, or fleet state in these images comes from
-a real crq installation.
+a real crq installation. Desktop captures are 2× (2880 × 1800), and the mobile
+capture is 3× (1290 × 2796), so they stay sharp when embedded at their CSS size.
+Reviewer artwork is the real public GitHub App avatar for CodeRabbit, Codex,
+Cursor Bugbot, and Macroscope; repository identities and icons are fictional.
 
 ![Dashboard screenshot contact sheet](contact-sheet.png)
 

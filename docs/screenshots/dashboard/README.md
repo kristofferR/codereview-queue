@@ -1,8 +1,9 @@
 # Dashboard screenshots
 
-Fictional product data for public documentation and website work. No repository,
-pull request, host, path, or fleet state in these images comes from a real crq
-installation.
+The committed dashboard SPA and its real CSS/components, rendered against an
+isolated fictional API fixture for public documentation and website work. No
+repository, pull request, host, path, or fleet state in these images comes from
+a real crq installation.
 
 ![Dashboard screenshot contact sheet](contact-sheet.png)
 
@@ -16,8 +17,3 @@ installation.
 - `settings.png`: review, autofix, queue, and runtime policy
 - `pull-request-findings.png`: detailed review round with three findings and pricing
 - `overview-mobile.png`: mobile overview
-- `repositories-mobile.png`: mobile repository inventory
-- `studio.html`: self-contained fictional dashboard used to generate the set
-
-The editable screenshot studio is published at
-[plans.kristofferr.com/d/4uuani4587ba](https://plans.kristofferr.com/d/4uuani4587ba).

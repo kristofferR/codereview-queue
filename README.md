@@ -1,12 +1,13 @@
 <h1 align="center">🐰 crq — Code Review Queue</h1>
 
-<p align="center"><b>Stop your AI agents from fighting over one CodeRabbit rate limit.</b></p>
+<p align="center"><b>Reviews every PR, fixes what the reviews find, and never trips the shared CodeRabbit rate limit.</b></p>
 
 <p align="center">
-One shared queue for your whole CodeRabbit account, so parallel agents request reviews
-<b>in an orderly line — one at a time, only when there's capacity</b> — instead of stampeding.
-On top of the queue, crq drives the whole review round: trigger, wait, normalize every finding to
-JSON, resolve the threads you fixed, and tell you when the PR has converged.
+crq turns review bots — CodeRabbit, Codex, Cursor Bugbot, Macroscope — into a pipeline that runs
+itself: every open PR gets reviewed, every finding lands as normalized JSON, one command tells your
+agent the single next action, and an unattended autofix daemon dispatches AI fix sessions until each
+PR converges. Underneath sits the part that makes this safe at scale: <b>one account-wide queue</b>,
+so a fleet of parallel agents never stampedes CodeRabbit's shared review limit.
 </p>
 
 <p align="center">
@@ -17,43 +18,53 @@ JSON, resolve the threads you fixed, and tell you when the PR has converged.
 
 ---
 
-## The problem (in plain English)
+## Two jobs, one tool
 
-You've got several pull requests moving at once — yours and your AI agents' — each looping:
-*fix code → push → ask CodeRabbit to review → read feedback → repeat.* To ask for a review, you
-post `@coderabbitai review` on the PR.
+### 1 · Review loops that drive themselves
 
-Here's the catch: **CodeRabbit's review limit is per *account/organization*, not per PR.** On the
-Pro plan, once you've been reviewing a lot, the refill rate drops — at the slowest tier it's
-effectively **one review at a time, hours apart**, shared across *all* your PRs.
+You stop being the glue between the review bot and the fix. crq owns the whole round — trigger,
+wait, normalize, resolve, converge — at whatever level of autonomy you want:
 
-So your agents collide:
+- 🔁 **`crq next` — the agent loop as one command.** It answers with the single next action as JSON:
+  `fix` (findings attached), `hold`, `push`, `wait`, `done`, or `blocked`. An agent driving it never
+  invents a delay, never decides on its own when to push, and never hand-polls the GitHub API.
+  Non-blocking and idempotent: kill it mid-loop and the next call resumes from persisted state.
+- 🤖 **`crq autoreview` — every open PR reviewed automatically.** A daemon enqueues each PR's new
+  head and fires reviews FIFO, rate-coordinated, until everything is reviewed — re-reviewing on
+  each push.
+- 🛠️ **`crq autofix` — the loop with no human in it.** It watches every PR, and when one needs
+  fixing it launches an AI fix session (claude, codex, …) in an isolated worktree with the findings
+  handed over as JSON. The session fixes, resolves the threads, pushes; the push re-enters the
+  review queue; repeat until converged. Per-repo model rankings, severity filters, attempt budgets,
+  and an optional fix-and-merge campaign mode.
+- 📊 **A live dashboard.** `crq serve` hosts a web dashboard (mirrored to a GitHub issue): the
+  queue, what's in flight, every PR's findings, per-review cost estimates, and fleet health.
 
-- 🔁 **They spam while blocked.** Agent A's PR is "available in 3 hours," but Agent B has no idea —
-  it keeps posting `@coderabbitai review` on *its* PR and getting rate-limited too. Noise everywhere.
-- 🐎 **They stampede when the window opens.** The moment one slot frees up, every agent fires at
-  once. One wins; the rest waste the slot and trip the limit again.
-- 🤷 **Nobody knows the real state.** Each agent only sees its own PR's stale countdown, but the
-  limit is account-wide — so that countdown is usually wrong.
+Findings from all four bots come out in **one JSON shape**, with the bookkeeping to actually close
+the loop: `crq resolve` / `crq decline` / `crq dismiss`, rebuttal detection when a bot contests a
+decline, and a convergence answer that accounts for every required reviewer on the current head.
 
-The result: wasted quota, redundant requests, and reviews landing in a random order.
+### 2 · Every CodeRabbit review your plan allows — none wasted
 
-## What crq does
+Here's the catch crq was born from: **CodeRabbit's review limit is per *account/organization*, not
+per PR.** On the Pro plan, once you've been reviewing a lot, the refill rate drops — at the slowest
+tier it's effectively one review at a time, hours apart, shared across *all* your PRs. Parallel
+agents that each post `@coderabbitai review` collide: they spam while blocked, stampede the moment
+a slot opens, and none of them can see the real account-wide state.
 
-`crq` puts **one queue in front of your whole account.** You don't post `@coderabbitai review`
-yourself anymore — you ask `crq`, and `crq`:
+crq puts **one queue in front of your whole account**:
 
 - 🧠 **Knows the real limit** — it *asks CodeRabbit directly* (`@coderabbitai rate limit`, which
   doesn't cost a review) instead of guessing from a stale comment.
 - 🚦 **Serializes everything** — compare-and-swap on a single git ref means reviews fire **one at a
-  time, in FIFO order, only when the account is actually unblocked.** No stampede, no spam.
-- 📊 **Shows you the line** — a live GitHub issue is the dashboard: who's queued, what's in flight,
-  recent history, and when the next slot opens.
+  time, in FIFO order, only when the account is actually unblocked.** No stampede, no spam, and
+  never two reviews spent on the same commit.
 - 🌍 **Works across machines** — agents on your laptop, a server, and a CI box share one queue and
-  send GitHub API work through one persistent `crq serve` control plane.
-- 🔁 **Drives the round** — `crq next` doesn't just trigger; it tracks CodeRabbit *and* Codex on the
-  current head and answers with the one thing to do now: fix these findings, hold the head, push,
-  wait until this time, or done.
+  send GitHub API work through one persistent `crq serve` control plane with a shared cache, so the
+  GitHub REST quota is spent once for everyone.
+- 🆓 **Spends nothing on the co-reviewers** — Codex, Bugbot and Macroscope rounds never take the
+  fire slot, and while CodeRabbit is blocked crq degrades to co-reviewer-only rounds instead of
+  idling the window out.
 
 One agent changes one line — `gh pr comment ... @coderabbitai review` becomes `crq next <repo> <pr>` —
 and the chaos is gone.
@@ -435,6 +446,44 @@ every stderr progress line or send repeated "still waiting" messages. Tell the u
 wait begins, then update only on a real state change (review fired, feedback wait, findings,
 convergence, timeout, rate-limit/window change, network outage/recovery), on request, or after at
 least 10 minutes of silence.
+
+---
+
+## 🛠️ Fix findings unattended: `crq autofix`
+
+Reviews nobody acts on are just noise. `crq autofix` closes the loop with no human in it:
+
+```bash
+crq autofix install        # prompt + wrapper + service, started; --dry-run previews
+```
+
+The service runs `crq watch`, which drives every open PR in scope through the same `crq next`
+oracle. When a PR's answer is `fix`, crq claims it — a compare-and-swap in shared state, so two
+hosts never fix the same PR, and never one an interactive agent has already claimed — and starts a
+fix session: your agent CLI in a crq-made worktree checked out at the PR head, with the normalized
+findings handed over as a JSON file. The session fixes, validates, resolves the threads, and
+pushes; the push re-enters the review queue; the cycle repeats until the PR converges.
+
+Built to be left running:
+
+- **Bounded.** Fix attempts per head are capped (`CRQ_DISPATCH_MAX_ATTEMPTS`, default 5), and an
+  exhausted attempt cycle backs off with an increasing cooldown instead of retrying forever.
+- **Model failover.** `crq solver set <repo> --models opus,sonnet,haiku` is an ordered ranking: a
+  provider outage parks that model until its reported reset and moves to the next, without spending
+  the attempt budget.
+- **Tunable per repository.** `crq solver` controls the model ranking, effort, which severities are
+  handed to the unattended agent, how readily it stops to ask a human instead of guessing
+  (`--ask`), and a standing extra prompt ("This project uses bun, never npm.").
+- **Scoped.** `crq autofix off <repo> --reason "…"` stops fixing one repository while reviewing and
+  watching continue there. A PR from a fork is reviewed but never dispatched — running an agent
+  with a write token over a stranger's code takes an explicit `CRQ_DISPATCH_FORKS=1`.
+- **Observable.** Session logs land under `$CRQ_WORKSPACE/logs/…`, and three consecutive failed
+  session starts surface as `dispatch failing` on the dashboard.
+
+For a bulk campaign, `crq solver set <repo> --one-pass on --merge squash` caps each PR at one
+review round, dispatches one fixer/finalizer even when that review was clean, and merges exactly
+the head that session released once GitHub reports it conflict-free. Restore ordinary incremental
+behavior afterwards with `crq solver set <repo> --inherit one-pass,merge`.
 
 ---
 

@@ -51,8 +51,23 @@ func (o *failingObserver) Observe(context.Context, state.State, string, int) (Ob
 }
 
 type countingCoster struct {
-	cost  Cost
-	calls int
+	cost   Cost
+	calls  int
+	states []state.State
+}
+
+type stateRecordingObserver struct {
+	observation Observation
+	state       state.State
+	after       func()
+}
+
+func (o *stateRecordingObserver) Observe(_ context.Context, st state.State, _ string, _ int) (Observation, error) {
+	o.state = st
+	if o.after != nil {
+		o.after()
+	}
+	return o.observation, nil
 }
 
 type previewGuardActor struct {
@@ -84,8 +99,9 @@ func (a *previewGuardActor) SetEnrollment(
 	return nil, nil
 }
 
-func (c *countingCoster) Cost(context.Context, state.State, string, int, Observation) (Cost, error) {
+func (c *countingCoster) Cost(_ context.Context, st state.State, _ string, _ int, _ Observation) (Cost, error) {
 	c.calls++
+	c.states = append(c.states, st)
 	return c.cost, nil
 }
 
@@ -830,6 +846,57 @@ func TestCostKeyIncludesReviewerPricingPolicy(t *testing.T) {
 	if costKey("o/r", 1, "abcdef123", base, nil) ==
 		costKey("o/r", 1, "abcdef123", primary, nil) {
 		t.Fatal("reviewer role change reused the old cost cache key")
+	}
+}
+
+func TestWritablePRObservationReloadsStateBeforeObservationAndPricing(t *testing.T) {
+	now := time.Now().UTC()
+	remaining := 1
+	stale := state.New()
+	stale.Rev = 1
+	stale.Account.Remaining = &remaining
+	stale.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+	}
+
+	current := state.New()
+	current.Rev = 2
+	current.Account.Remaining = &remaining
+	current.Rounds[state.Key("o/r", 1)] = stale.Rounds[state.Key("o/r", 1)]
+	current.SetRepoOverride("o/r", state.RepoReviewers{PrimaryOff: true})
+	loader := &stubLoader{st: current}
+	observer := &stateRecordingObserver{observation: Observation{Head: "abcdef123", CheckedAt: now}}
+	observer.after = func() {
+		postObservation := current
+		zero := 0
+		postObservation.Account.Remaining = &zero
+		loader.st = postObservation
+	}
+	coster := &countingCoster{cost: Cost{Head: "abcdef123"}}
+	srv := New(loader, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, ObserverWrites: true, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = stale
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	}
+	if override, ok := observer.state.RepoOverride("o/r"); !ok || !override.PrimaryOff {
+		t.Fatalf("observer state override = %+v, %v; want the current reviewer policy", override, ok)
+	}
+	if loader.reads != 2 {
+		t.Fatalf("state reads = %d, want one before and one after the writable observation", loader.reads)
+	}
+	if len(coster.states) != 1 || coster.states[0].Account.Remaining == nil || *coster.states[0].Account.Remaining != 0 {
+		t.Fatalf("coster states = %+v, want the post-observation account allowance", coster.states)
 	}
 }
 

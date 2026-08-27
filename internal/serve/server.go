@@ -104,6 +104,10 @@ type Options struct {
 	// Observer supplies the per-PR findings. Optional: without it the PR page
 	// still renders its state layer.
 	Observer Observer
+	// ObserverWrites says Observer may persist evidence while observing. Such
+	// an observer must receive current state rather than the dashboard poller's
+	// cached rendering snapshot.
+	ObserverWrites bool
 	// Actor performs writes. Nil, or ReadOnly, makes every action endpoint
 	// refuse — useful when pointing a dashboard at someone else's fleet.
 	Actor    Actor

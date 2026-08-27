@@ -816,17 +816,18 @@ func run(ctx context.Context, args []string) int {
 			AllowReposFor: func(st crq.State) []string {
 				return keysOf(service.ConfigIn(st, "").AllowRepos)
 			},
-			Discoverer:   repoDiscoverer{service},
-			Previewer:    enrollPreviewer{service},
-			Poll:         *poll,
-			Assets:       serve.Assets(),
-			Log:          stderrLogger{},
-			Host:         host,
-			LookupToken:  ghapi.LookupToken,
-			Gateway:      githubGateway{client: gh},
-			GatewayToken: cfg.ServerToken,
-			Observer:     prObserver{svc: service, readOnly: dashboardReadOnly},
-			Coster:       prCoster{service},
+			Discoverer:     repoDiscoverer{service},
+			Previewer:      enrollPreviewer{service},
+			Poll:           *poll,
+			Assets:         serve.Assets(),
+			Log:            stderrLogger{},
+			Host:           host,
+			LookupToken:    ghapi.LookupToken,
+			Gateway:        githubGateway{client: gh},
+			GatewayToken:   cfg.ServerToken,
+			Observer:       prObserver{svc: service, readOnly: dashboardReadOnly},
+			ObserverWrites: !dashboardReadOnly,
+			Coster:         prCoster{service},
 			TailLog: func(ctx context.Context, repo, path string, maxBytes int64) (serve.LogTail, error) {
 				tail, err := service.TailSessionLog(ctx, repo, path, maxBytes)
 				return serve.LogTail{Text: tail.Text, Size: tail.Size, Truncated: tail.Truncated}, err

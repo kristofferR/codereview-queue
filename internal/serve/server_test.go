@@ -856,23 +856,25 @@ func TestWritablePRObservationReloadsStateBeforeObservationAndPricing(t *testing
 	stale.Rev = 1
 	stale.Account.Remaining = &remaining
 	stale.Rounds[state.Key("o/r", 1)] = state.Round{
-		Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+		Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted,
 	}
 
 	current := state.New()
 	current.Rev = 2
 	current.Account.Remaining = &remaining
-	current.Rounds[state.Key("o/r", 1)] = stale.Rounds[state.Key("o/r", 1)]
+	current.Rounds[state.Key("o/r", 1)] = state.Round{
+		Repo: "o/r", PR: 1, Head: "bbbbbbbbb", Phase: state.PhaseCompleted,
+	}
 	current.SetRepoOverride("o/r", state.RepoReviewers{PrimaryOff: true})
 	loader := &stubLoader{st: current}
-	observer := &stateRecordingObserver{observation: Observation{Head: "abcdef123", CheckedAt: now}}
+	observer := &stateRecordingObserver{observation: Observation{Head: "bbbbbbbbb", CheckedAt: now}}
 	observer.after = func() {
 		postObservation := current
 		zero := 0
 		postObservation.Account.Remaining = &zero
 		loader.st = postObservation
 	}
-	coster := &countingCoster{cost: Cost{Head: "abcdef123"}}
+	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
 	srv := New(loader, Options{
 		Addr: "127.0.0.1:7777", Observer: observer, ObserverWrites: true, Coster: coster,
 	})

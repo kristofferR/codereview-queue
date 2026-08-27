@@ -491,6 +491,11 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 				} else {
 					st = current
 					bots = s.botsFor(&st)(repo)
+					view = buildPRView(st, repo, pr, bots, s.pacing(st).Inflight, s.opts.Now(), s.maxAttempts(st))
+					head = ""
+					if view.Round != nil {
+						head = view.Round.Head
+					}
 					key = observationKey(repo, pr, head, observationStateKey(st, repo, pr), bots)
 				}
 			}

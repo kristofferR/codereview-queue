@@ -8,13 +8,16 @@ import (
 )
 
 var (
-	codexBlobLinkRE = regexp.MustCompile(`(?m)^https://github\.com/[^/\s]+/[^/\s]+/blob/([0-9a-fA-F]{7,64})/(.+?)#L([0-9]+)(?:-L([0-9]+))?\s*$`)
-	markdownImageRE = regexp.MustCompile(`!\[[^]]*\]\([^)]+\)`)
-	subTagRE        = regexp.MustCompile(`(?i)</?sub>`)
+	codexBlobLinkRE   = regexp.MustCompile(`(?m)^https://github\.com/[^/\s]+/[^/\s]+/blob/([0-9a-fA-F]{7,64})/(.+?)#L([0-9]+)(?:-L([0-9]+))?\s*$`)
+	codexRunningRowRE = regexp.MustCompile("(?im)^\\|[^\\n]*\\*\\*running\\*\\*[^\\n]*\\|\\s*`([0-9a-f]{7,40})`\\s*\\|")
+	markdownImageRE   = regexp.MustCompile(`!\[[^]]*\]\([^)]+\)`)
+	subTagRE          = regexp.MustCompile(`(?i)</?sub>`)
 	// codexReviewedCommitRE matches Codex's "**Reviewed commit:** `4d9e8bca82`"
 	// line in the newer clean-summary format.
 	codexReviewedCommitRE = regexp.MustCompile("(?i)reviewed commit[:*\\s]*`([0-9a-fA-F]{7,40})`")
 )
+
+const codexReviewSummaryMarker = "<!-- codex-pull-request-review-summary -->"
 
 // CodexBotLogin is the canonical Codex GitHub app login. It is the one place
 // this literal may appear; engine/state/crq consume this constant rather than
@@ -64,6 +67,26 @@ func IsCodexEnvironmentNotice(text string) bool {
 // gate uses to avoid waiting on a Codex that will never finish.
 func IsCodexUsageLimit(text string) bool {
 	return strings.Contains(NormalizeReviewText(text), "usage limits for code reviews")
+}
+
+// IsCodexReviewSummary reports whether text is Codex's editable PR activity
+// summary. The whole comment is operational status, never review feedback.
+func IsCodexReviewSummary(text string) bool {
+	return strings.Contains(text, codexReviewSummaryMarker)
+}
+
+// CodexReviewInProgressSHA extracts the commit from a running row in Codex's
+// editable PR activity summary. A marked summary with no running row is still
+// informational, but it is not evidence that a review remains in flight.
+func CodexReviewInProgressSHA(text string) string {
+	if !IsCodexReviewSummary(text) {
+		return ""
+	}
+	match := codexRunningRowRE.FindStringSubmatch(text)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
 }
 
 // CodexReviewedCommitSHA extracts the commit hash Codex says it reviewed,

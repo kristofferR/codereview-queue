@@ -59,7 +59,7 @@ const (
 // comments: the dominant kind plus the fields specific kinds carry.
 type CoEvent struct {
 	Kind     EventKind
-	SHA      string // EvCoClean: reviewed-commit SHA, "" if absent
+	SHA      string // EvCoClean/EvCoInProgress: reviewed or running commit SHA
 	Approved *bool  // EvCoVerdict: approvability verdict
 }
 
@@ -166,9 +166,13 @@ func KnownCoReviewers() []CoReviewer {
 			DefaultTrigger:   "never",
 			RequiredTrigger:  "always",
 			ClassifyComment: func(body string) CoEvent {
-				switch {
-				case IsCodexNoActionReviewCompletion(body):
+				if IsCodexNoActionReviewCompletion(body) {
 					return CoEvent{Kind: EvCoClean, SHA: CodexReviewedCommitSHA(body)}
+				}
+				if sha := CodexReviewInProgressSHA(body); sha != "" {
+					return CoEvent{Kind: EvCoInProgress, SHA: sha}
+				}
+				switch {
 				case IsCodexUsageLimit(body):
 					// The usage-limit exhaustion notice is distinct from other acks:
 					// the dynamic completion gate reads it to stop waiting on a Codex

@@ -74,6 +74,42 @@ func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
 	}
 }
 
+func TestFeedbackTreatsCodexRunningSummaryAsActivityNotFinding(t *testing.T) {
+	started := time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
+	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "15d9ec9abcdef123"
+	gh.pulls[fakeKey("o/repo", 45)] = pull
+	comment := ghapi.IssueComment{
+		ID:        5462573246,
+		Body:      corpusMessage(t, "codex/review-summary-running.md"),
+		CreatedAt: started.Add(time.Minute),
+		UpdatedAt: started.Add(2 * time.Minute),
+	}
+	comment.User.Login = dialect.CodexBotLogin
+	gh.comments[fakeKey("o/repo", 45)] = []ghapi.IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "o/repo", 45, "15d9ec9a", PhaseReviewing, started, 0)
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(context.Background(), "o/repo", 45)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ReviewedBy[dialect.CodexBotLogin] {
+		t.Fatalf("a running summary must not count as a completed review: %#v", report.ReviewedBy)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("a running summary must not become a finding: %#v", report.Findings)
+	}
+}
+
 func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
 	cfg := firingConfig()
 	now := time.Now().UTC()

@@ -179,16 +179,17 @@ func coReviewedRound(r state.Round, obs Observation, login string, cutoff time.T
 	return false
 }
 
-// coCommentedRound reports whether login posted an actionable comment or a
-// clean summary at/after the round's fire — the round-window evidence that
-// means it is participating. Its notices (unable, acks, verdicts) do not
-// count.
+// coCommentedRound reports whether login posted an actionable comment, a
+// clean summary, or an in-progress summary at/after the round's fire — the
+// round-window evidence that means it is participating. Its notices (unable,
+// acks, verdicts) do not count.
 func coCommentedRound(obs Observation, login string, cutoff time.Time) bool {
 	for _, ev := range obs.Events {
 		if ev.Kind == dialect.EvOther && sameBot(ev.Bot, login) && notBefore(ev.ObservedTime(), cutoff) {
 			return true
 		}
-		if ev.Kind == dialect.EvCoClean && eventConcerns(ev, login) && notBefore(ev.ObservedTime(), cutoff) {
+		if (ev.Kind == dialect.EvCoClean || ev.Kind == dialect.EvCoInProgress) &&
+			eventConcerns(ev, login) && notBefore(ev.ObservedTime(), cutoff) {
 			return true
 		}
 	}
@@ -231,6 +232,20 @@ func coReviewedHeadAt(obs Observation, login string) (time.Time, bool) {
 func coReviewedHead(obs Observation, login string) bool {
 	_, matched := coReviewedHeadAt(obs, login)
 	return matched
+}
+
+// coReviewInProgressOnHead reports whether login's editable activity summary
+// says a review of the observed head is already running. It is engagement, not
+// completion evidence, and suppresses a duplicate trigger just like a running
+// review check does.
+func coReviewInProgressOnHead(obs Observation, login string) bool {
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCoInProgress && eventConcerns(ev, login) &&
+			obs.Head != "" && dialect.SHAPrefixMatch(ev.SHA, obs.Head) {
+			return true
+		}
+	}
+	return false
 }
 
 // CoActiveThisRound reports whether login shows activity bound to this round —
@@ -418,6 +433,9 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 		return false
 	}
 	if coReviewedHead(obs, cp.Login) {
+		return false
+	}
+	if coReviewInProgressOnHead(obs, cp.Login) {
 		return false
 	}
 	if coCheckAny(obs, cp.Login) {

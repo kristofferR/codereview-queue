@@ -530,7 +530,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	coEventKinds := map[int64]dialect.EventKind{}
 	for _, ev := range obs.eng.Events {
 		switch ev.Kind {
-		case dialect.EvCoClean, dialect.EvCoUnable, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
+		case dialect.EvCoClean, dialect.EvCoInProgress, dialect.EvCoUnable, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
 			coEventKinds[ev.CommentID] = ev.Kind
 		}
 	}

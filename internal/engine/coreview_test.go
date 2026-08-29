@@ -122,6 +122,22 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "always waits out an in-progress summary on the head",
+			cp:   policy(TriggerAlways),
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{
+				Kind: dialect.EvCoInProgress, Bot: bugbotLogin, SHA: head[:7], CreatedAt: now,
+			}}},
+			want: false,
+		},
+		{
+			name: "always ignores an in-progress summary for another head",
+			cp:   policy(TriggerAlways),
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{
+				Kind: dialect.EvCoInProgress, Bot: bugbotLogin, SHA: "0123456", CreatedAt: now,
+			}}},
+			want: true,
+		},
+		{
 			name: "always ignores another bot's check",
 			cp:   policy(TriggerAlways),
 			obs:  obsWith(CoSeen{}, CheckSeen{Bot: macroLogin, Verdict: dialect.CheckDone, CompletedAt: now}),
@@ -335,6 +351,22 @@ func TestCompletionVerdictIsParticipationOnly(t *testing.T) {
 	}
 	if reviewed := coReviewedHead(obs, macroLogin); reviewed {
 		t.Fatal("a verdict must never count as head review evidence")
+	}
+}
+
+func TestInProgressSummaryIsParticipationOnly(t *testing.T) {
+	fired := time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC)
+	head := "15d9ec9ab"
+	round := state.Round{Head: head, FiredAt: &fired}
+	running := dialect.BotEvent{Kind: dialect.EvCoInProgress, Bot: dialect.CodexBotLogin,
+		SHA: "15d9ec9", CommentID: 10, CreatedAt: fired.Add(time.Minute), UpdatedAt: fired.Add(2 * time.Minute)}
+	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{running}}
+
+	if !CoActiveThisRound(round, obs, dialect.CodexBotLogin) {
+		t.Fatal("a running summary must count as round participation")
+	}
+	if reviewed := coReviewedHead(obs, dialect.CodexBotLogin); reviewed {
+		t.Fatal("a running summary must never count as head review evidence")
 	}
 }
 

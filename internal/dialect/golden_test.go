@@ -43,9 +43,11 @@ func TestGoldenClassification(t *testing.T) {
 		summaryOnly     bool
 		codexClean      bool
 		codexUsageLimit bool
+		codexSummary    bool
 		nonActionable   bool
 		availableIn     time.Duration // 0 = no window must parse
 		reviewedSHA     string
+		inProgressSHA   string
 		// author + wantKind pin Classifier.Classify's dominant kind for the file;
 		// wantKind == EvOther (the zero value) skips the Classify assertion.
 		author   string
@@ -90,11 +92,14 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "coderabbit/finding-with-also-applies-trailer.md"},
 		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
+		{file: "codex/review-summary-running.md", codexSummary: true, nonActionable: true, inProgressSHA: "15d9ec9", author: CodexBotLogin, wantKind: EvCoInProgress},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoUnable},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82",
 			author: "chatgpt-codex-connector[bot]", wantKind: EvNoAction, registryPrimary: true},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true,
 			author: "chatgpt-codex-connector[bot]", wantKind: EvFailed, registryPrimary: true},
+		{file: "codex/review-summary-running.md", codexSummary: true, nonActionable: true, inProgressSHA: "15d9ec9",
+			author: CodexBotLogin, wantKind: EvInProgress, registryPrimary: true},
 		// Codex's "create an environment" platform ad, posted as a thread reply —
 		// never a finding, never a rebuttal.
 		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoNotice},
@@ -134,6 +139,7 @@ func TestGoldenClassification(t *testing.T) {
 				{"IsReviewSkipped", goldenCR.IsReviewSkipped(body), tc.reviewSkipped},
 				{"IsCodexNoActionReviewCompletion", IsCodexNoActionReviewCompletion(body), tc.codexClean},
 				{"IsCodexUsageLimit", IsCodexUsageLimit(body), tc.codexUsageLimit},
+				{"IsCodexReviewSummary", IsCodexReviewSummary(body), tc.codexSummary},
 				{"IsNonActionableText", IsNonActionableText(body), tc.nonActionable},
 			}
 			for _, c := range checks {
@@ -151,6 +157,9 @@ func TestGoldenClassification(t *testing.T) {
 			}
 			if got := CodexReviewedCommitSHA(body); got != tc.reviewedSHA {
 				t.Errorf("CodexReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
+			}
+			if got := CodexReviewInProgressSHA(body); got != tc.inProgressSHA {
+				t.Errorf("CodexReviewInProgressSHA = %q, want %q", got, tc.inProgressSHA)
 			}
 			if tc.wantKind != EvOther {
 				if got := activeClassifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {

@@ -31,6 +31,7 @@ const (
 	EvSkipped                   // "Review skipped": the bot refused this head outright
 	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
 	EvCoClean                   // co-reviewer clean-summary issue comment
+	EvCoInProgress              // editable co-reviewer summary: review still processing
 	EvCoUnable                  // co-reviewer cannot finish this round (Codex usage limits)
 	EvCoNotice                  // other non-actionable co-reviewer notice (acks)
 	EvCoVerdict                 // Macroscope approvability verdict (informational only)
@@ -54,7 +55,7 @@ type BotEvent struct {
 	SummaryOnly bool
 	Window      *time.Time // EvRateLimited: parsed "available in" deadline
 	Remaining   *int       // EvRateLimited: parsed remaining reviews
-	SHA         string     // EvCoClean: reviewed-commit sha, "" if absent
+	SHA         string     // EvCoClean/EvCoInProgress: reviewed or running commit sha
 	// For is the canonical co-reviewer login the event concerns: the commanded
 	// bot for EvCoCommand, the authoring bot for a co-reviewer's own comments.
 	// "" for primary-bot and human events.
@@ -124,6 +125,8 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		switch primary.Kind {
 		case EvCoClean:
 			ev.Kind = EvNoAction
+		case EvCoInProgress:
+			ev.Kind = EvInProgress
 		case EvCoUnable:
 			// A registry primary that cannot produce the requested review is a
 			// failed attempt, not an optional co-reviewer disengaging its gate.

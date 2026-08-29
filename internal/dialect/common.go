@@ -170,7 +170,7 @@ func LooksLikePath(summary string) bool {
 }
 
 func IsNonActionableText(text string) bool {
-	if IsCodexNoActionReviewCompletion(text) || IsCodexUsageLimit(text) || IsCodexEnvironmentNotice(text) {
+	if IsCodexNoActionReviewCompletion(text) || IsCodexUsageLimit(text) || IsCodexEnvironmentNotice(text) || IsCodexReviewSummary(text) {
 		return true
 	}
 	text = NormalizeReviewText(text)

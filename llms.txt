@@ -346,7 +346,7 @@ Change how fix sessions run, per repository or fleet-wide:
 
 ```bash
 crq solver REPO                                       # effective settings + where each came from
-crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5 --rounds 5
+crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5 --rounds 10
 crq solver set REPO --severities minor,potential --ask uncertain
 crq solver set REPO --prompt "This project uses bun, never npm."
 crq solver set REPO --models gpt-5.6-sol --effort medium --one-pass on --merge squash
@@ -367,7 +367,7 @@ failed session, draft, or conflict blocks instead of launching another fixer or 
 code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs while preserving
 unrelated repository solver overrides; `crq solver clear REPO` discards every repo solver override.
 
-Incremental loops default to five distinct reviewed heads per PR. Before a sixth reviewer trigger,
+Incremental loops default to ten distinct reviewed heads per PR. Before an eleventh reviewer trigger,
 crq creates a silent shared-state hold so a person can inspect scope. `crq unhold REPO PR` resets the
 counter and grants another cycle. `crq solver set REPO --rounds N` overrides the limit; zero is
 explicitly unlimited, while `--inherit rounds` returns to the fleet/env value.

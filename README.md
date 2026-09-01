@@ -488,10 +488,10 @@ review round, dispatches one fixer/finalizer even when that review was clean, an
 the head that session released once GitHub reports it conflict-free. Restore ordinary incremental
 behavior afterwards with `crq solver set <repo> --inherit one-pass,merge`.
 
-Ordinary incremental review loops have a separate PR-wide circuit breaker. By default, after five
+Ordinary incremental review loops have a separate PR-wide circuit breaker. By default, after ten
 distinct heads have received reviews, crq silently holds the PR before posting another reviewer
 trigger. Inspect whether the work still serves the PR's stated goal, then `crq unhold <repo> <pr>`
-to grant another five-round cycle. Set a repository or fleet default with `--rounds <n>`;
+to grant another ten-round cycle. Set a repository or fleet default with `--rounds <n>`;
 `--rounds 0` explicitly disables the cap.
 
 ---
@@ -667,7 +667,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_COBOT_<NAME>_REQUIRED` | `0` | make that co-reviewer gate convergence (folds it into `CRQ_REQUIRED_BOTS`); `<NAME>` ∈ `CODEX`, `BUGBOT`, `MACROSCOPE` |
 | `CRQ_COBOT_<NAME>_TRIGGER` | codex: `always` iff required, else `never`; bugbot/macroscope: `selfheal` | when crq posts that bot's command — `never`, `selfheal` (only nudge an active bot that missed the head past its grace), or `always` (post in the fire step) |
 | `CRQ_COBOT_<NAME>_CMD` | focused `@codex review …` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
-| `CRQ_MAX_REVIEW_ROUNDS` | `5` | distinct reviewed heads per PR before an automatic state hold; `0` disables |
+| `CRQ_MAX_REVIEW_ROUNDS` | `10` | distinct reviewed heads per PR before an automatic state hold; `0` disables |
 | `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
 | `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
 | `CRQ_PREFLIGHT_SKIP_BLOCKED` | on | skip local CodeRabbit preflight successfully while shared quota state is blocked; set `0` to force the CLI request |

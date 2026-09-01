@@ -230,8 +230,8 @@ Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<he
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
 
-Incremental review is also bounded across heads. The default five reviewed heads are a circuit
-breaker, not five fixer attempts: before another reviewer trigger crq creates a silent state hold.
+Incremental review is also bounded across heads. The default ten reviewed heads are a circuit
+breaker, not ten fixer attempts: before another reviewer trigger crq creates a silent state hold.
 Inspect whether the PR is still serving its original goal, then `crq unhold "$REPO" "$PR"` to grant
 another cycle. Configure it with `crq solver set "$REPO" --rounds <n>`; zero is unlimited.
 

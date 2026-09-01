@@ -374,7 +374,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FixSeverities:       fixSeverities,
 		FixAskMode:          askModeEnv(env["CRQ_FIX_ASK"]),
 		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
-		MaxReviewRounds:     boundedIntEnv(env, "CRQ_MAX_REVIEW_ROUNDS", 5, 0, 20),
+		MaxReviewRounds:     boundedIntEnv(env, "CRQ_MAX_REVIEW_ROUNDS", 10, 0, 20),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],

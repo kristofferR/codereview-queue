@@ -488,7 +488,7 @@ func TestLoadConfigReviewRoundsAreBounded(t *testing.T) {
 	for _, tc := range []struct {
 		value string
 		want  int
-	}{{"", 5}, {"0", 0}, {"7", 7}, {"21", 5}, {"bad", 5}} {
+	}{{"", 10}, {"0", 0}, {"7", 7}, {"21", 10}, {"bad", 10}} {
 		t.Run(tc.value, func(t *testing.T) {
 			t.Setenv("CRQ_MAX_REVIEW_ROUNDS", tc.value)
 			cfg, err := LoadConfig()

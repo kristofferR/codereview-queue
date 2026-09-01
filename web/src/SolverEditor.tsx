@@ -31,7 +31,7 @@ export function SolverEditor({
   const [effort, setEffort] = useState(solver.effort ?? "");
   const [prompt, setPrompt] = useState(solver.prompt ?? "");
   const [attempts, setAttempts] = useState(String(solver.max_attempts));
-  const [rounds, setRounds] = useState(String(solver.max_review_rounds ?? 5));
+  const [rounds, setRounds] = useState(String(solver.max_review_rounds ?? 10));
   const [severities, setSeverities] = useState(solver.severities);
   const [askMode, setAskMode] = useState(solver.ask_mode);
   const [forks, setForks] = useState(solver.forks);
@@ -42,7 +42,7 @@ export function SolverEditor({
   const solverEffort = solver.effort ?? "";
   const solverPrompt = solver.prompt ?? "";
   const solverAttempts = String(solver.max_attempts);
-  const solverRounds = String(solver.max_review_rounds ?? 5);
+  const solverRounds = String(solver.max_review_rounds ?? 10);
   const solverSeverities = [...solver.severities].sort().join("\0");
   const solverAskMode = solver.ask_mode;
   const solverAuthors = (solver.skip_authors ?? []).join(", ");
@@ -473,7 +473,7 @@ export function solverChange(
   if (
     edited.rounds !== undefined &&
     edited.rounds !== "" &&
-    edited.rounds !== String(solver.max_review_rounds ?? 5)
+    edited.rounds !== String(solver.max_review_rounds ?? 10)
   ) {
     change.max_review_rounds = Number(edited.rounds);
   }

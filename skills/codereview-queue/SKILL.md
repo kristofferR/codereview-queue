@@ -212,9 +212,15 @@ config file the install read and the credential must be one the service can reso
 (`gh auth login`, or a token in that file). Two rules the prompt earned the hard
 way — a session must stay on a detached HEAD and push by ref (`git push <head repo> HEAD:refs/heads/…`,
 which for a fork PR is not `origin`), because the worktrees share one mirror and a branch checked out
-in one of them makes git refuse to fetch for every PR. A session resolves or declines its current
-threads before calling `crq next --wait`; only that guarded wait can issue the `push` action once
-every required reviewer has answered.
+in one of them makes git refuse to fetch for every PR. After preparing its local fix, a session
+dismisses each judged threadless finding before moving the head, except `source: "review_comment"`
+findings whose failed thread lookup must be retried; those dismissal decisions are head-scoped and
+cannot be recorded after the push. It then calls non-blocking `crq next` once and pushes only on
+`push`. If a race returns `hold` or `wait` — including `wait` because another caller owns the shared
+claim — it stops cleanly and leaves its detached commit in the worktree; the watcher observes
+reviewer state and retries outside the model. An unattended session must never run
+`crq next --wait`, sleep, or poll. Threaded findings remain open until a confirmed push, after which
+the session resolves or declines each one it judged.
 
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard

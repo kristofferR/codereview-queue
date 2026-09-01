@@ -148,6 +148,11 @@ gates that round's convergence dynamically (an exhaustion notice such as Codex's
 check run reporting the bot cannot review the commit, releases the dynamic gate); one listed in
 `CRQ_REQUIRED_BOTS` always gates.
 
+The persisted feedback deadline bounds unattended rounds too. Once it expires, crq retires the
+same-head round without re-firing it, even if no interactive `crq loop` remains to observe the
+timeout. This preserves the dedup marker and prevents one silent review from starving cleanup of
+later rounds.
+
 Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
 nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
 `.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
@@ -262,7 +267,14 @@ crq autofix on REPO | crq autofix default REPO
 
 It drives every open PR in `CRQ_REPOS` through the same `crq next` oracle and emits one JSON line
 per PR per pass (`repo`, `pr`, `action`, `findings`, `dispatched`, `skipped`). Fixing is ON by
-default — watching a PR nobody fixes is a queue that reports work and does none. `--no-dispatch`
+default — watching a PR nobody fixes is a queue that reports work and does none. A finding can be
+reported while another required reviewer is still active; watch waits outside the model for that
+reviewer before dispatching. Actionable current-head findings always take precedence, so `crq next`
+returns `fix` while any still require changes. After those findings are accounted for, it reports
+`blocked` if required evidence remains missing past the persisted feedback deadline; the head is not
+reviewed again. The watcher admits a session for those findings only after the reviewers answer or
+the deadline expires, and releases that session's completed local fix after expiry. An explicitly
+deferred primary is released only once the configured co-review evidence is present. `--no-dispatch`
 makes one run an observer, `crq autofix off REPO` stops it for one repository (watching and reviewing
 continue there), and having no fix command configured observes with a log line rather than refusing
 to start. A PR whose action is `fix` is claimed under compare-and-swap and the

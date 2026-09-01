@@ -194,14 +194,14 @@ func (s *Service) onePassNext(
 	collectingRound := false
 	if round := st.Round(report.Repo, report.PR); round != nil && round.Head == report.Head {
 		switch round.Phase {
-		case PhaseCompleted:
-			// Completed is a scheduling phase, not proof that code was reviewed:
-			// summary-only and explicit-skipped primary responses deliberately
-			// complete a round so it does not retry forever. Require the PR-wide
-			// evidence derived from Feedback's observation before authorizing the
-			// campaign's only fixer and any merge that follows.
+		case PhaseCompleted, PhaseExpired:
+			// Scheduling phase alone is not proof that code was reviewed:
+			// summary-only, explicit-skipped and deadline-expired attempts all stop
+			// retrying without necessarily carrying review evidence. Require the
+			// PR-wide evidence derived from Feedback's observation before authorizing
+			// the campaign's only fixer and any merge that follows.
 			if !reviewed {
-				return blockedOnePass(report, "the one-pass round completed without review evidence; refusing to run a fixer or merge"), true, nil
+				return blockedOnePass(report, "the one-pass round ended without review evidence; refusing to run a fixer or merge"), true, nil
 			}
 		case PhaseQueued:
 			// An older review may already have consumed the PR's one round. If the

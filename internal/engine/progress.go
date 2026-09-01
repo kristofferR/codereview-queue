@@ -18,6 +18,7 @@ const (
 	OutReviewing           // bot acknowledged; release the slot, keep the round open
 	OutRetry               // park until Transition.RetryAt (account block, timeout, failure)
 	OutReleaseSlot         // reserved but never posted → back to queued
+	OutExpire              // feedback deadline elapsed with required evidence missing
 	OutAbandon             // PR closed/merged
 )
 
@@ -62,35 +63,32 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	completion := Completion(r, obs, p)
 	declined := primaryDeclinedRound(obs, p, firedAt)
 
-	// A reviewing round past its wait deadline whose primary review or proven
-	// re-review decline already stands: a gating co-bot (Codex) has gone silent
-	// too long, so give up on it. Re-firing a head the primary already answered
-	// would spam. Checked before the review loop below, which would otherwise hold
-	// a co-review wait open forever on the primary's ack. A reviewing round with
-	// NO primary evidence is deliberately left to the fall-through (KeepWaiting):
-	// the loop bounds and times out its own wait (exit 2), so an expired deadline
-	// never resets or re-fires the same head.
+	// A reviewing round's deadline is the durable bound on the review, regardless
+	// of whether an interactive Loop is still attached. Autoreview has no Loop,
+	// and an interrupted Loop cannot clear its own timeout. Leaving a round with
+	// no bot evidence in KeepWaiting therefore makes it immortal and lets the
+	// oldest such round starve reconciliation of every round behind it.
 	//
-	// The one round that fall-through cannot serve is a primary-UNAVAILABLE one:
-	// no primary review is ever coming (a summary-only plan, or a skipped
-	// review), so the condition above can never become true, and under
-	// `autoreview` there is no Loop to enforce the deadline either. Such a round
-	// would sit in `reviewing` forever — and because the daemon sweeps only the
-	// OLDEST reviewing round per pump, it would also starve every reviewing round
-	// behind it. Its deadline is the only thing that can end it.
+	// Expiring preserves a distinct same-head dedup marker without claiming every
+	// required reviewer answered. Re-firing an expired head here would spend quota
+	// again merely because its original waiter disappeared.
 	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) {
+		if completion.Done {
+			return Transition{Outcome: OutComplete, Reason: "feedback complete"}
+		}
 		if r.PrimarySettled {
-			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary was already settled"}
+			return Transition{Outcome: OutExpire, Reason: "co-review wait elapsed; primary was already settled"}
 		}
 		if primaryReviewedHead(r, obs, p) || PrimaryCompletedRound(r, obs, p) {
-			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+			return Transition{Outcome: OutExpire, Reason: "co-review wait elapsed; primary review stands"}
 		}
 		if declined {
-			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary re-review decline stands"}
+			return Transition{Outcome: OutExpire, Reason: "co-review wait elapsed; primary re-review decline stands"}
 		}
 		if PrimaryReviewUnavailable(obs, p, r.Head) {
-			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; no primary review is coming for this head"}
+			return Transition{Outcome: OutExpire, Reason: "co-review wait elapsed; no primary review is coming for this head"}
 		}
+		return Transition{Outcome: OutExpire, Reason: "review wait elapsed; required reviewer evidence is missing"}
 	}
 
 	// An "already reviewed" ack is only trusted alongside real review
@@ -177,10 +175,8 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		return Transition{Outcome: KeepWaiting, Reason: "review in flight"}
 	}
 
-	// Reviewing: the slot is long released and the review is running. The
-	// wall-clock wait deadline is the loop's concern (it times out its own wait),
-	// not the daemon's — the daemon keeps waiting for real bot evidence rather
-	// than re-firing a review that is still in progress.
+	// Reviewing: the slot is long released and the review is still inside the
+	// durable deadline handled above.
 	return Transition{Outcome: KeepWaiting, Reason: "reviewing"}
 }
 

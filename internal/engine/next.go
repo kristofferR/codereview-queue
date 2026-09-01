@@ -73,6 +73,10 @@ type NextInput struct {
 	// and CodeRabbit's review is still owed, firing at DeferredUntil.
 	Deferred      bool
 	DeferredUntil *time.Time
+	// DeferredReady says the configured non-primary evidence is sufficient to
+	// release a rate-limited primary. The caller owns that reviewer-specific
+	// policy; the action engine only consumes its bot-agnostic verdict.
+	DeferredReady bool
 	// MinDelay is the floor for Action.At — the caller's poll interval. It makes
 	// a hot loop unrepresentable: every wait is at least this long.
 	MinDelay time.Duration
@@ -131,8 +135,15 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    deliberately errs toward repeating. Clearing them properly needs an
 	//    explicit dismissal, not an inference from local state.
 	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
-		if in.LocalWork && in.Round.DispatchHeld(now) &&
-			pendingReviewRequested(in, pending) {
+		if in.LocalWork && in.Round.DispatchHeld(now) {
+			if AutofixReady(in, now) {
+				return Action{
+					Kind:     ActionPush,
+					Reason:   "autofix is complete and no active reviewer still gates this head",
+					Pending:  pending,
+					Findings: blocking,
+				}
+			}
 			return Action{
 				Kind:     ActionHold,
 				Reason:   "do not push: a required reviewer has not answered for this head",
@@ -161,7 +172,7 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    convergence — otherwise a degraded round pushes out from under a Bugbot
 	//    or Macroscope review that is still running.
 	if in.Deferred {
-		releasedByDegrade := DoneExceptWithEvidence(in.Completion.ReviewedBy, in.Primary, dialect.CodexBotLogin)
+		releasedByDegrade := in.DeferredReady
 		// The co-reviewers' evidence is as fresh here as anywhere else, so the
 		// same quiet period applies: a review shell can satisfy the degrade while
 		// its inline findings are still arriving, and moving the head strands
@@ -200,16 +211,14 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 3. Required reviewers still pending: the head must not move. Resolving a
 	//    thread does not restart a review; pushing does.
 	if !in.Completion.Done {
-		// ...unless the wait already expired. A primary that acknowledges the
-		// command and then never submits a review leaves the round reviewing
-		// forever, and `Progress` deliberately does not time it out because the
-		// legacy Loop owned that deadline. Without an actionable verdict here a
-		// caller — and `crq wait` — would idle indefinitely on a bot that
-		// crashed. Say so instead, and never re-fire: the head was acknowledged.
-		if in.waitExpired(now) && needsBotReview(in.Completion.ReviewedBy, in.Primary) {
+		// ...unless the wait already expired. Progress retires that round to keep
+		// the queue moving, but missing required evidence still must not read as
+		// convergence to a caller. Say so instead, and never re-fire: the head was
+		// already acknowledged.
+		if in.waitExpired(now) {
 			return Action{
 				Kind:    ActionBlocked,
-				Reason:  "the review was acknowledged for this head but never delivered before the deadline",
+				Reason:  "the review deadline elapsed before every required reviewer answered",
 				Pending: pending,
 			}
 		}
@@ -250,6 +259,36 @@ func NextAction(in NextInput, now time.Time) Action {
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
 }
 
+// AutofixReady reports whether an unattended fixer can start without becoming
+// a paid waiter after it has prepared local work.
+//
+// Interactive work may overlap a live review and hand its wait back to the
+// harness. An unattended model process cannot: keeping it alive on `hold`
+// repeatedly replays its entire context merely to poll a shell command. Delay
+// dispatch until active reviewers answer, except when no review was requested,
+// the primary is explicitly deferred, or its delivery deadline already passed.
+func AutofixReady(in NextInput, now time.Time) bool {
+	pending := pendingBots(in.Completion)
+	// The durable deadline ends the whole attempt, including its settle window.
+	// Once it expires, no reviewer from this round may keep a paid fixer alive.
+	if in.waitExpired(now) {
+		return true
+	}
+	if in.settling(now) {
+		return false
+	}
+	if len(pending) == 0 || !pendingReviewRequested(in, pending) {
+		return true
+	}
+	if !in.onlyPrimaryPending(pending) {
+		return false
+	}
+	if in.Deferred && in.DeferredReady {
+		return true
+	}
+	return false
+}
+
 func pendingReviewRequested(in NextInput, pending []string) bool {
 	for _, login := range pending {
 		if sameBot(login, in.Primary) {
@@ -259,7 +298,8 @@ func pendingReviewRequested(in NextInput, pending []string) bool {
 			continue
 		}
 		co := in.Round.Co(login)
-		if co.CommandedAt != nil || co.ClaimedAt != nil {
+		if co.CommandedAt != nil || co.ClaimedAt != nil ||
+			(co.SeenActiveAt != nil && !co.ActivityCarried) {
 			return true
 		}
 		if dialect.IsCodexBot(login) &&
@@ -322,17 +362,17 @@ func CanStillFire(r state.Round) bool {
 	return false
 }
 
-// waitExpired reports whether this round's own wait deadline has passed while it
-// is still under review.
-//
-// Callers must also confirm the PRIMARY is the reviewer still missing: when its
-// review has landed and only a co-reviewer is silent, Progress completes the
-// round on the primary's word, so reporting a terminal `blocked` here would
-// contradict the round crq is about to close.
+// waitExpired reports whether this head's persisted review deadline has passed.
+// A completed phase may carry that deadline after Progress retires a silent
+// round, while Next still needs to explain the missing required evidence.
 func (in NextInput) waitExpired(now time.Time) bool {
-	switch in.Round.Phase {
-	case state.PhaseFired, state.PhaseReviewing:
-		return in.Round.WaitDeadline != nil && now.After(*in.Round.WaitDeadline)
+	phase := in.Round.Phase
+	if phase == state.PhaseAwaitingRetry && in.Round.DispatchHeld(now) && in.Round.DispatchHoldPhase != "" {
+		phase = in.Round.DispatchHoldPhase
+	}
+	switch phase {
+	case state.PhaseFired, state.PhaseReviewing, state.PhaseCompleted, state.PhaseExpired:
+		return in.Round.WaitDeadline != nil && !now.Before(in.Round.WaitDeadline.UTC())
 	}
 	return false
 }

@@ -458,11 +458,14 @@ crq autofix install        # prompt + wrapper + service, started; --dry-run prev
 ```
 
 The service runs `crq watch`, which drives every open PR in scope through the same `crq next`
-oracle. When a PR's answer is `fix`, crq claims it — a compare-and-swap in shared state, so two
-hosts never fix the same PR, and never one an interactive agent has already claimed — and starts a
-fix session: your agent CLI in a crq-made worktree checked out at the PR head, with the normalized
-findings handed over as a JSON file. The session fixes, validates, resolves the threads, and
-pushes; the push re-enters the review queue; the cycle repeats until the PR converges.
+oracle. When a PR's answer is `fix`, crq waits outside the model for any active required reviewers,
+then claims it — a compare-and-swap in shared state, so two hosts never fix the same PR, and never
+one an interactive agent has already claimed — and starts a fix session: your agent CLI in a
+crq-made worktree checked out at the PR head, with the normalized findings handed over as a JSON
+file. The session fixes, validates, resolves the threads, and pushes; the push re-enters the review
+queue; the cycle repeats until the PR converges. An expired or explicitly deferred primary review
+does not strand a completed fix, and an unexpected `hold` ends the agent instead of paying it to
+poll.
 
 Built to be left running:
 
@@ -666,7 +669,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |
 | `CRQ_WAIT_TIMEOUT` | `0` | give up waiting for a slot after this long (`0` = never) |
-| `CRQ_FEEDBACK_WAIT_TIMEOUT` | `20m` | how long `crq loop` waits for feedback after firing |
+| `CRQ_FEEDBACK_WAIT_TIMEOUT` | `20m` | durable feedback deadline for both interactive and unattended review rounds |
 | `CRQ_SETTLE` | `90s` | after convergence the loop keeps polling this long before exiting 0, so a trailing review wave (e.g. a Codex auto-review of the pushed head) is caught by crq, not by a human re-checking the PR |
 | `CRQ_CALIBRATE_TTL` | `2m` | how long to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_AUTOREVIEW_POLL` | `1m` | how often the `autoreview` daemon scans for PRs to enqueue |
@@ -816,7 +819,7 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 |---------|-----|
 | `crq doctor` not ready | Finish `crq init`, start `crq serve`, and inspect its health error. The server host needs `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth login`. |
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
-| A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; it also auto-clears after `CRQ_INFLIGHT_TIMEOUT`. |
+| A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; unacknowledged fires retry after `CRQ_INFLIGHT_TIMEOUT`, while acknowledged reviews retire after `CRQ_FEEDBACK_WAIT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
 | `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |

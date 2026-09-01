@@ -177,9 +177,10 @@ func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
 		"crq resolve",
 		"crq dismiss",
 		"`hold` or `wait`",
-		"`crq next --wait \"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\"`",
+		"do not run `crq next --wait`",
 		"ONLY after the push is confirmed",
 		"Threadless findings are the exception",
+		"stop only after every finding is",
 	} {
 		if !strings.Contains(fixPrompt, want) {
 			t.Errorf("the embedded fix prompt no longer mentions %q", want)

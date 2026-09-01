@@ -48,6 +48,7 @@ const (
 	PhaseReviewing     = crqstate.PhaseReviewing
 	PhaseAwaitingRetry = crqstate.PhaseAwaitingRetry
 	PhaseCompleted     = crqstate.PhaseCompleted
+	PhaseExpired       = crqstate.PhaseExpired
 	PhaseAbandoned     = crqstate.PhaseAbandoned
 
 	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
@@ -71,6 +72,9 @@ const (
 	// CapsOnePass is the capability autoreview/autofix hosts need for one-pass
 	// review capping and post-fix merge hand-offs.
 	CapsOnePass = crqstate.CapsOnePass
+	// CapsExpiredRounds is the capability autoreview/autofix hosts need before
+	// the fleet may persist the terminal expired-round marker.
+	CapsExpiredRounds = crqstate.CapsExpiredRounds
 	// CapsPreflightSkipBlocked is the capability a host needs to honour the
 	// shared blocked-preflight policy.
 	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked

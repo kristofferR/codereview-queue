@@ -1923,6 +1923,244 @@ func TestPumpSweepsReviewingRoundToCompletion(t *testing.T) {
 	}
 }
 
+func TestPumpRetiresExpiredSilentReview(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.FeedbackWaitTimeout = 5 * time.Minute
+	cfg.FeedbackBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, base.Add(-10*time.Minute), 5)
+	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return base }
+
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if p := roundPhase(t, store, "owner/repo", 12); p != PhaseExpired {
+		t.Fatalf("expired silent review phase = %s, want expired dedup marker", p)
+	}
+	posted := len(gh.posted)
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || result.Action != "timeout" {
+		t.Fatalf("Wait on expired same-head round = code %d result %+v, want terminal timeout", code, result)
+	}
+	if p := roundPhase(t, store, "owner/repo", 12); p != PhaseExpired || len(gh.posted) != posted {
+		t.Fatalf("expired round was re-fired: phase=%s posts=%d, want phase expired and %d posts", p, len(gh.posted), posted)
+	}
+
+	lateFinding := ghapi.IssueComment{
+		ID: 91, Body: "Actionable Codex finding on the expired head",
+		CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second),
+	}
+	lateFinding.User.Login = dialect.CodexBotLogin
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{lateFinding}
+	result, code, err = service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 || result.Action != "deduped" {
+		t.Fatalf("late finding on expired round = code %d result %+v, want feedback before timeout", code, result)
+	}
+
+	gh.comments[fakeKey("owner/repo", 12)] = nil
+	lateReview := ghapi.Review{SubmittedAt: base.Add(2 * time.Second), CommitID: pull.Head.SHA}
+	lateReview.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{lateReview}
+	result, code, err = service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 || result.Action != "deduped" {
+		t.Fatalf("late review on expired round = code %d result %+v, want evidence before timeout", code, result)
+	}
+}
+
+func TestPumpWaitsForFleetSupportBeforePersistingExpiredRound(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.FeedbackWaitTimeout = 5 * time.Minute
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, base.Add(-10*time.Minute), 5)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "old-reviewer", Caps: CapsExpiredRounds - 1, Roles: []string{"autoreview"},
+		}, base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return base }
+
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if p := roundPhase(t, store, "owner/repo", 12); p != PhaseReviewing {
+		t.Fatalf("phase with an old active daemon = %s, want reviewing", p)
+	}
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "old-reviewer", Caps: CapsExpiredRounds, Roles: []string{"autoreview"},
+		}, base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if p := roundPhase(t, store, "owner/repo", 12); p != PhaseExpired {
+		t.Fatalf("phase after every active daemon upgraded = %s, want expired", p)
+	}
+}
+
+func TestPumpSweepsExpiredRoundBeforeOlderLiveReview(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.FeedbackWaitTimeout = time.Hour
+	gh := newFakeGitHub()
+	for key, head := range map[string]string{
+		fakeKey("owner/live", 1):    "aaaaaaaaa1111111",
+		fakeKey("owner/expired", 2): "bbbbbbbbb2222222",
+	} {
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Head.SHA = head
+		gh.pulls[key] = pull
+	}
+	// The newer overdue PR has already closed. It must be reconciled even while
+	// the older review legitimately remains inside its wait window.
+	closed := gh.pulls[fakeKey("owner/expired", 2)]
+	closed.State = "closed"
+	gh.pulls[fakeKey("owner/expired", 2)] = closed
+
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/live", 1, "aaaaaaaaa", PhaseReviewing, base.Add(-30*time.Minute), 10)
+	seedRound(t, store, cfg, "owner/expired", 2, "bbbbbbbbb", PhaseReviewing, base.Add(-10*time.Minute), 20)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round("owner/expired", 2)
+		deadline := base.Add(-time.Minute)
+		r.WaitDeadline = &deadline
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return base }
+
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("owner/expired", 2) != nil || len(st.Archive) != 1 ||
+		st.Archive[0].Repo != "owner/expired" || st.Archive[0].PR != 2 || st.Archive[0].Phase != PhaseAbandoned {
+		t.Fatalf("expired closed round was not archived as abandoned: current=%+v archive=%+v",
+			st.Round("owner/expired", 2), st.Archive)
+	}
+	if p := roundPhase(t, store, "owner/live", 1); p != PhaseReviewing {
+		t.Fatalf("older live review phase = %s, want reviewing", p)
+	}
+}
+
+func TestPumpReviewSweepRotatesPastAnUnreadableRound(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.FeedbackWaitTimeout = 5 * time.Minute
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey("owner/unreadable", 1)] = errors.New("repository unavailable")
+	var closed ghapi.Pull
+	closed.State = "closed"
+	closed.Head.SHA = "bbbbbbbbb2222222"
+	gh.pulls[fakeKey("owner/closed", 2)] = closed
+
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/unreadable", 1, "aaaaaaaaa", PhaseReviewing, base.Add(-20*time.Minute), 10)
+	seedRound(t, store, cfg, "owner/closed", 2, "bbbbbbbbb", PhaseReviewing, base.Add(-10*time.Minute), 20)
+	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return base }
+
+	// The first bounded sweep spends its one observation on the oldest PR and
+	// cannot read it. The next pass must advance its cursor instead of retrying
+	// that same failure forever.
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("owner/closed", 2) != nil || len(st.Archive) != 1 ||
+		st.Archive[0].Repo != "owner/closed" || st.Archive[0].Phase != PhaseAbandoned {
+		t.Fatalf("closed round behind unreadable PR was not reconciled: current=%+v archive=%+v",
+			st.Round("owner/closed", 2), st.Archive)
+	}
+	if st.Round("owner/unreadable", 1) == nil {
+		t.Fatal("the unreadable round should remain for a later retry")
+	}
+}
+
+func TestPumpReviewSweepRotatesOnlyAmongExpiredRounds(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.FeedbackWaitTimeout = 10 * time.Minute
+	gh := newFakeGitHub()
+	for _, key := range []string{
+		fakeKey("owner/expired-one", 1),
+		fakeKey("owner/expired-two", 2),
+		fakeKey("owner/live", 3),
+	} {
+		gh.pullErrs[key] = errors.New("repository unavailable")
+	}
+
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/expired-one", 1, "aaaaaaaaa", PhaseReviewing, base.Add(-30*time.Minute), 10)
+	seedRound(t, store, cfg, "owner/expired-two", 2, "bbbbbbbbb", PhaseReviewing, base.Add(-20*time.Minute), 20)
+	seedRound(t, store, cfg, "owner/live", 3, "ccccccccc", PhaseReviewing, base.Add(-5*time.Minute), 30)
+	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return base }
+
+	for range 3 {
+		if _, err := service.Pump(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gh.pullReads[fakeKey("owner/expired-one", 1)]; got != 2 {
+		t.Errorf("first expired round reads = %d, want 2 after rotation wraps", got)
+	}
+	if got := gh.pullReads[fakeKey("owner/expired-two", 2)]; got != 1 {
+		t.Errorf("second expired round reads = %d, want 1", got)
+	}
+	if got := gh.pullReads[fakeKey("owner/live", 3)]; got != 0 {
+		t.Errorf("live round reads = %d, want 0 while expired rounds remain", got)
+	}
+}
+
 func TestPumpDryRunDoesNotSweepReviewing(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

@@ -142,6 +142,22 @@ func TestRenderDashboardEmpty(t *testing.T) {
 	}
 }
 
+func TestExpiredRoundDoesNotRenderAsInFlight(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(Round{
+		Repo: "owner/repo", PR: 12, Head: "abcdef123", Phase: PhaseExpired,
+		EnqueuedAt: now.Add(-time.Hour), WaitDeadline: ptime(now.Add(-time.Minute)),
+	})
+
+	out := RenderDashboard(st, StoreConfig{})
+	if !strings.Contains(out, "## 🔬 In flight — 0\n\n_None._") {
+		t.Fatalf("expired round still rendered in flight:\n%s", out)
+	}
+	if got := RenderTitle(st, StoreConfig{}); got != "🐰 crq — idle" {
+		t.Fatalf("expired terminal marker title = %q, want idle", got)
+	}
+}
+
 // The queue is ordered the way rounds will actually fire: ready rounds first
 // (by Seq), then by when each window opens — regardless of Seq.
 func TestQueueOrdersByReadyThenSeq(t *testing.T) {

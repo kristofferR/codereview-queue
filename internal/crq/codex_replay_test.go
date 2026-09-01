@@ -344,12 +344,12 @@ func TestCodexReplayCoReviewWaitBoundsSilentCodex(t *testing.T) {
 		t.Fatalf("the wait must not fire @coderabbitai review, got %d", got)
 	}
 
-	// Codex stays silent past the deadline: the next pump completes the round on
-	// CodeRabbit's standing review (Progress OutComplete) rather than looping.
+	// Codex stays silent past the deadline: the next pump expires the attempt
+	// without claiming every gate answered or re-firing unchanged code.
 	f.clk.advance(f.cfg.FeedbackWaitTimeout + time.Minute)
 	f.pump()
-	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
-		t.Fatalf("past the deadline the round must complete, got %+v", r)
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseExpired {
+		t.Fatalf("past the deadline the round must expire, got %+v", r)
 	}
 	if got := f.codexPosted(repo, pr); got != 0 {
 		t.Fatalf("no codex command may post across the scenario, got %d", got)

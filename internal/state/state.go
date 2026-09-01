@@ -18,7 +18,7 @@ import (
 // by the methods on Round; everything else must go through them.
 //
 //	queued → reserved → fired → reviewing → completed
-//	   ↑         │         │         │
+//	   ↑         │         │         ├───────────→ expired
 //	   └─────────┘         ├─────────┴→ awaiting_retry (→ fire-eligible again)
 //	 (post failed)         └→ completed (review lands while slot held)
 //	 any → abandoned (PR closed, cancelled, or superseded by a new head)
@@ -31,6 +31,7 @@ const (
 	PhaseReviewing     Phase = "reviewing"      // bot acknowledged; slot released, review runs
 	PhaseAwaitingRetry Phase = "awaiting_retry" // throttled or timed out; may re-fire at RetryAt
 	PhaseCompleted     Phase = "completed"      // every required bot reviewed this head
+	PhaseExpired       Phase = "expired"        // feedback deadline elapsed; same-head dedup marker
 	PhaseAbandoned     Phase = "abandoned"      // closed, cancelled, or superseded
 )
 
@@ -673,7 +674,12 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 15
+const WriterCaps = 16
+
+// CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
+// daemons do not recognise that terminal same-head marker and could otherwise
+// enqueue another paid review for a round a newer daemon retired.
+const CapsExpiredRounds = 16
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -1101,6 +1107,22 @@ func (r *Round) Complete() error {
 	return nil
 }
 
+// Expire retires a reviewing round whose durable feedback deadline elapsed
+// before every required reviewer answered. It remains in Rounds as the
+// same-head dedup marker: losing an interactive waiter must never buy another
+// review of unchanged code.
+func (r *Round) Expire(reason string) error {
+	if r.Phase != PhaseReviewing {
+		return r.illegal(PhaseExpired)
+	}
+	r.Phase = PhaseExpired
+	r.Token = ""
+	r.ReservedAt = nil
+	r.ForceCoReviewers = nil
+	r.Note = reason
+	return nil
+}
+
 // Dedupe completes a not-yet-fired round because the configured bot already
 // reviewed its head independently (an adopted review, not a fire crq made): a
 // queued (or retry-eligible) round → completed. The completed round stays as
@@ -1154,8 +1176,8 @@ func (r *Round) FireEligible(now time.Time) bool {
 }
 
 // Active reports whether the round still occupies its PR slot (i.e. is not
-// finished). Completed rounds are NOT active but still occupy Rounds as the
-// reviewed-head marker.
+// finished). Completed and expired rounds are NOT active but still occupy
+// Rounds as same-head dedup markers.
 func (r *Round) Active() bool {
 	switch r.Phase {
 	case PhaseQueued, PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
@@ -2525,15 +2547,15 @@ func (st *State) ContainsActive(repo string, pr int) bool {
 
 // firedMarker returns the head for which repo#pr has already been requested and
 // must not be re-fired without a new head — the v2 Fired[key] dedupe. A
-// completed round, or one still fired/reviewing, is such a marker; a parked
-// awaiting_retry round is not (Pump re-fires it once RetryAt passes).
+// completed/expired round, or one still fired/reviewing, is such a marker; a
+// parked awaiting_retry round is not (Pump re-fires it once RetryAt passes).
 func (st *State) FiredMarker(repo string, pr int) string {
 	r := st.Round(repo, pr)
 	if r == nil {
 		return ""
 	}
 	switch r.Phase {
-	case PhaseFired, PhaseReviewing, PhaseCompleted:
+	case PhaseFired, PhaseReviewing, PhaseCompleted, PhaseExpired:
 		return r.Head
 	}
 	return ""

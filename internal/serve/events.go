@@ -97,6 +97,8 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 				level, text = "ok", "Acknowledged — the fire slot was released"
 			case state.PhaseCompleted:
 				level, text = "ok", "Round completed"
+			case state.PhaseExpired:
+				level, text = "warn", "Review deadline elapsed"
 			case state.PhaseAwaitingRetry:
 				level, text = "warn", "Parked for retry"
 			case state.PhaseReserved:

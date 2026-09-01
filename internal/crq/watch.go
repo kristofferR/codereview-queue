@@ -492,6 +492,8 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(skipCfg, repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !report.dispatchReady {
+				event.Skipped = "waiting for active reviewers before starting autofix"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claim here and hand preparation to the pool. Checkout and
 				// cmd.Start may block on a remote; neither belongs in the serial

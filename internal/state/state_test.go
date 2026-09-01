@@ -48,6 +48,28 @@ func TestHappyPathTransitions(t *testing.T) {
 	}
 }
 
+func TestExpiredRoundRemainsASameHeadDedupMarker(t *testing.T) {
+	s := New()
+	r := newFired(t, &s)
+	var transition *TransitionError
+	if err := r.Expire("too soon"); !errors.As(err, &transition) {
+		t.Fatalf("expiring before acknowledgement must be illegal, got %v", err)
+	}
+	if err := r.Acknowledge(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Expire("required reviewer missed the deadline"); err != nil {
+		t.Fatal(err)
+	}
+	if r.Phase != PhaseExpired || r.Active() || r.FireEligible(t0.Add(time.Hour)) {
+		t.Fatalf("expired round must be terminal: %+v", r)
+	}
+	s.PutRound(r)
+	if got := s.FiredMarker(r.Repo, r.PR); got != r.Head {
+		t.Fatalf("expired marker = %q, want %q", got, r.Head)
+	}
+}
+
 // TestFiredHeadCannotRefire encodes the #448 invariant: once a head has
 // fired, no transition path leads back to another Fire without an explicit
 // retry window or a new head.

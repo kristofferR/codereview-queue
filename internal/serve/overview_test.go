@@ -37,6 +37,23 @@ func TestFinishedRowsShowMergedOutcome(t *testing.T) {
 	}
 }
 
+func TestExpiredRoundIsFinishedRatherThanInFlight(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	st := state.New()
+	st.Rounds[state.Key("o/repo", 2)] = state.Round{
+		Repo: "o/repo", PR: 2, Head: "expired-head", Phase: state.PhaseExpired,
+		Note: "required reviewer missed the deadline",
+	}
+
+	ov := BuildOverview(st, now, time.Minute, time.Minute, func(string) []BotName { return nil }, 0, nil)
+	if len(ov.InFlight) != 0 || ov.Counts.InFlight != 0 {
+		t.Fatalf("expired round counted in flight: rows=%+v count=%d", ov.InFlight, ov.Counts.InFlight)
+	}
+	if len(ov.Finished) != 1 || ov.Finished[0].Outcome != "expired" {
+		t.Fatalf("expired round missing from finished history: %+v", ov.Finished)
+	}
+}
+
 func TestPrimaryOffQueueRowWaitsForALiveFireSlot(t *testing.T) {
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
 	blocked := now.Add(time.Hour)

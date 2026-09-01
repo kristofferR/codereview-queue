@@ -41,14 +41,15 @@ Then:
    an older commit: the push already superseded it.
 6. Ask crq whether the head may move, then push:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"
-   Push (as above) unless `.action` is `hold` or `wait`. crq accounts for this
-   live session's local commit before repeating its still-open findings, so
-   those actions take priority when a reviewer is reading THIS commit. Moving
-   the head would restart or strand that review and spend another metered
-   round; for `hold` or `wait`, block on
-   `crq next --wait "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"` and push when it
-   stops saying so. Anything else — including `fix` once no in-progress
-   reviewer holds the head — means push now. Never force-push.
+   The watcher admits an unattended session after active reviewers have
+   answered or their persisted feedback deadline has expired, so the expected
+   action after a completed local fix is `push`.
+   Push only on `push`. If the answer is `fix`, address the remaining findings
+   and ask again. If a race returns `hold` or `wait`, STOP the session cleanly:
+   leave the detached commit in this worktree, do not run `crq next --wait`, do
+   not sleep or poll, and do not push. The watcher will observe the reviewer
+   state without keeping a model alive and retry after the gate changes. On
+   `blocked`, stop and leave the worktree for inspection. Never force-push.
 7. ONLY after the push is confirmed on the branch, account for each finding
    with a thread_id.
    With a thread_id, for one you addressed:
@@ -78,4 +79,7 @@ Hard limits: do not open pull requests; do not merge or close the pull request o
 GitHub (the base-branch integration described above is allowed); do not
 force-push; do not touch code unrelated to the findings; do not change another
 repository.
-If the findings are already fixed, resolve their threads and stop.
+If the findings are already fixed on the pull request's current head and no
+local commit is needed, dismiss each current-head finding with no thread_id,
+resolve each finding with a thread_id, and stop only after every finding is
+accounted for.

@@ -477,7 +477,7 @@ func finishedRows(st state.State) []DoneRow {
 		out = append(out, row)
 	}
 	for _, r := range st.Rounds {
-		if r.Phase == state.PhaseCompleted {
+		if r.Phase == state.PhaseCompleted || r.Phase == state.PhaseExpired {
 			add(r)
 		}
 	}

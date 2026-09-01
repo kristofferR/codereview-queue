@@ -304,12 +304,10 @@ func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	}
 }
 
-// TestReviewingRoundDeadlineBoundsCoReviewWait covers the daemon-side co-review
-// bound: a reviewing round past its WaitDeadline completes when the primary bot
-// reviewed the head (its review stands; give up on the silent co-bot). Without a
-// primary review it keeps waiting — the loop bounds and times out its own wait,
-// so the daemon never resets or re-fires an expired head. Before the deadline it
-// keeps waiting on the co-bot too.
+// TestReviewingRoundDeadlineBoundsCoReviewWait covers the durable daemon-side
+// review bound. A Loop may disappear and autoreview has no Loop at all, so the
+// persisted deadline must retire the round with or without reviewer evidence.
+// Before the deadline it keeps waiting on the configured reviewers.
 func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	codexReq := policy
 	codexReq.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
@@ -327,23 +325,31 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	crAtHead := Observation{Head: "abcdef123", Open: true,
 		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: t0}}}
 
-	// At the deadline with the primary review standing → complete (co-bot gave up).
+	// At the deadline with the primary review standing but a required co-reviewer
+	// missing → expire without claiming convergence.
 	past := t0.Add(time.Hour).Add(time.Second)
-	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, past, codexReq); tr.Outcome != OutComplete {
-		t.Fatalf("primary review at head past the deadline must complete, got %+v", tr)
+	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, past, codexReq); tr.Outcome != OutExpire {
+		t.Fatalf("primary review with a missing required co-reviewer must expire, got %+v", tr)
 	}
-	// At the deadline with NO primary review → keep waiting (the loop times out its
-	// own wait; the daemon must not reset the deadline or re-fire the head).
+	allAtHead := crAtHead
+	allAtHead.Reviews = append(allAtHead.Reviews, ReviewSeen{
+		Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: t0,
+	})
+	if tr := Progress(reviewing(), state.AccountQuota{}, allAtHead, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("an expired clock must not hide complete reviewer evidence, got %+v", tr)
+	}
+	// At the deadline with NO primary review → expire. Depending on an
+	// interactive loop to retire this state left daemon rounds immortal.
 	noReview := Observation{Head: "abcdef123", Open: true}
-	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
-		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
+	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != OutExpire {
+		t.Fatalf("no primary review past the deadline must retire without re-firing, got %+v", tr)
 	}
 	// A completed round reopened only to restore co-review activity carries
 	// durable proof that its primary side was already final. Its original
 	// command may have been tidied, so no observable primary evidence need remain.
 	settled := reviewing()
 	settled.PrimarySettled = true
-	if tr := Progress(settled, state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != OutComplete {
+	if tr := Progress(settled, state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != OutExpire {
 		t.Fatalf("a settled primary must end the restored co-review wait at its deadline, got %+v", tr)
 	}
 	// A proven decline is also final primary evidence. Once the co-review
@@ -355,25 +361,21 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 			{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001, CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)},
 			{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 1002, AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)},
 		}}
-	if tr := Progress(reviewing(), state.AccountQuota{}, declined, past, codexReq); tr.Outcome != OutComplete {
-		t.Fatalf("proven primary decline past the deadline must complete, got %+v", tr)
+	if tr := Progress(reviewing(), state.AccountQuota{}, declined, past, codexReq); tr.Outcome != OutExpire {
+		t.Fatalf("proven primary decline past the deadline must expire, got %+v", tr)
 	}
-	// Before the deadline the bound must not fire: keep waiting on the co-bot —
+	// Before the deadline the bound must not fire: keep waiting on the co-reviewer —
 	// KeepWaiting, not a re-emitted OutReviewing, so the sweep doesn't write the
 	// same state and re-sync the dashboard on every pump.
 	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, t0.Add(30*time.Minute), codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("before the deadline a co-review wait must keep waiting, got %+v", tr)
 	}
 
-	// The exception to "no primary review → keep waiting": a round whose primary
-	// review is never coming (a summary-only plan, a skipped review). Its
-	// deadline is the ONLY thing that can end it — `autoreview` runs no Loop, and
-	// the primary-reviewed branch above can never become true — so leaving it to
-	// the fall-through wedges it in `reviewing` forever, and with it every
-	// reviewing round behind it (the daemon sweeps only the oldest per pump).
+	// A round whose primary review is explicitly unavailable uses the more
+	// specific reason, but follows the same deadline bound.
 	summaryOnly := Observation{Head: "abcdef123", Open: true,
 		Events: []dialect.BotEvent{{Kind: dialect.EvOther, Bot: "coderabbitai[bot]", SummaryOnly: true, CommentID: 9}}}
-	if tr := Progress(reviewing(), state.AccountQuota{}, summaryOnly, past, codexReq); tr.Outcome != OutComplete {
+	if tr := Progress(reviewing(), state.AccountQuota{}, summaryOnly, past, codexReq); tr.Outcome != OutExpire {
 		t.Fatalf("a wait no primary review can ever satisfy must end at its deadline, got %+v", tr)
 	}
 	if tr := Progress(reviewing(), state.AccountQuota{}, summaryOnly, t0.Add(30*time.Minute), codexReq); tr.Outcome == OutComplete {
@@ -776,7 +778,7 @@ func TestDecideFireForcedCoReviewerGate(t *testing.T) {
 	}
 }
 
-func TestProgressCompletesExpiredCoWaitOnPrimaryCompletionEvidence(t *testing.T) {
+func TestProgressExpiresSilentDynamicCoWaitOnPrimaryCompletionEvidence(t *testing.T) {
 	fired := t0.Add(-time.Hour)
 	deadline := t0.Add(-time.Minute)
 	head := "abcdef123"
@@ -787,8 +789,8 @@ func TestProgressCompletesExpiredCoWaitOnPrimaryCompletionEvidence(t *testing.T)
 		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal}}}
 	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{{Kind: dialect.EvNoAction, Bot: p.Bot,
 		CreatedAt: fired.Add(time.Minute), UpdatedAt: fired.Add(time.Minute)}}}
-	if got := Progress(r, state.AccountQuota{}, obs, t0, p); got.Outcome != OutComplete {
-		t.Fatalf("expired co-review wait must complete on a clean primary summary, got %+v", got)
+	if got := Progress(r, state.AccountQuota{}, obs, t0, p); got.Outcome != OutExpire {
+		t.Fatalf("silent dynamic co-review must expire without claiming completion, got %+v", got)
 	}
 }
 

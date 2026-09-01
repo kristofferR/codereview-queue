@@ -37,6 +37,11 @@ type NextReport struct {
 	// dispatchUntil is the locally known expiry of a watch-only dispatch claim.
 	// It lets the session stop at the lease boundary if shared-state writes fail.
 	dispatchUntil time.Time
+	// dispatchReady is watch-only admission state. Interactive callers may begin
+	// fixing while another reviewer is active and hand the wait back to their
+	// harness; an unattended model process must not be launched merely to become
+	// that waiter.
+	dispatchReady bool
 
 	// RecheckAfter is when to call `crq next` again — the ONE time field, set
 	// for both hold and wait so there is never a question of which to read. crq
@@ -334,8 +339,11 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		LocalWork:     report.LocalWork,
 		Deferred:      feedback.CodeRabbitDeferred,
 		DeferredUntil: feedback.DeferredUntil,
-		MinDelay:      s.cfg.PollInterval,
-		SettleUntil:   s.settleUntil(feedback),
+		DeferredReady: feedback.CodeRabbitDeferred && engine.DoneExceptWithEvidence(
+			feedback.ReviewedBy, feedback.config.Bot, dialect.CodexBotLogin,
+		),
+		MinDelay:    s.cfg.PollInterval,
+		SettleUntil: s.settleUntil(feedback),
 	}
 	// Only a round that still tracks THIS head may shape the verdict. A stale
 	// fired/reviewing round carries its own phase and deadline, and an elapsed
@@ -345,6 +353,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	}
 
 	action := engine.NextAction(in, now)
+	report.dispatchReady = engine.AutofixReady(in, now)
 	report.Action = string(action.Kind)
 	report.Reason = action.Reason
 	report.Pending = action.Pending

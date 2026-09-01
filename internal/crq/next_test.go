@@ -106,6 +106,58 @@ func TestNextRefreshesClaimBeforeReturningFix(t *testing.T) {
 	}
 }
 
+func TestAutofixAdmissionWaitsForActiveReviewersWithoutStartingAModel(t *testing.T) {
+	base := time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "owner/repo", 510, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected a live review round, got %+v", res)
+	}
+
+	// Codex reports a finding while the primary review is still active. The
+	// finding remains visible as `fix`, but watch must keep the wait in crq
+	// rather than paying an agent process to sit on `crq next --wait`.
+	f.codexReview(repo, pr, 900, head, f.clk.now().Add(time.Minute))
+	f.gh.mu.Lock()
+	comment := ghapi.ReviewComment{
+		ID: 901, CommitID: head, Path: "a.go", Line: 1,
+		Body: "This current-head finding needs a fix.",
+	}
+	comment.User.Login = codexLogin
+	f.gh.reviewComments[fakeKey(repo, pr)] = append(f.gh.reviewComments[fakeKey(repo, pr)], comment)
+	f.gh.mu.Unlock()
+	f.clk.advance(2 * time.Minute)
+
+	report, _, _, err := f.svc.nextFromState(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionFix) || report.dispatchReady {
+		t.Fatalf("active-review report = %+v ready=%t, want visible fix held outside the model", report, report.dispatchReady)
+	}
+
+	// A reviewer that acknowledged but never delivered cannot park the fix for
+	// ever. Once the round's deadline passes, the next unattended session may
+	// land its replacement head immediately.
+	round := f.round(repo, pr)
+	if round == nil || round.WaitDeadline == nil {
+		t.Fatalf("live round has no deadline: %+v", round)
+	}
+	f.clk.advance(round.WaitDeadline.Sub(f.clk.now()) + time.Second)
+	report, _, _, err = f.svc.nextFromState(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Action != string(engine.ActionFix) || !report.dispatchReady {
+		t.Fatalf("expired-review report = %+v ready=%t, want fixer admission", report, report.dispatchReady)
+	}
+}
+
 // A whole review round driven only by `crq next`: the caller never chooses a
 // delay, never decides when the head may move, and never reads an exit code.
 // Each step asserts the instruction crq returns for a state an agent would

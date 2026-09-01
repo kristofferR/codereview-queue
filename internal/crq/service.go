@@ -64,6 +64,10 @@ type Service struct {
 	// outlive rounds, so they need their own sweep rather than piggybacking on
 	// the review queue.
 	lastHeldSweep string
+	// lastReviewSweep rotates the bounded fired/reviewing reconciliation. One PR
+	// may legitimately keep waiting or remain unreadable; neither may monopolize
+	// the single observation every pump budgets for this cleanup.
+	lastReviewSweep string
 	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
 	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
 	// single-writer (the watch caller).
@@ -470,7 +474,7 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 				return nil
 			}
 			switch r.Phase {
-			case PhaseFired, PhaseReviewing, PhaseCompleted:
+			case PhaseFired, PhaseReviewing, PhaseCompleted, PhaseExpired:
 				result.Deduped = true
 				result.Head = head
 			default:
@@ -1252,6 +1256,16 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		if err := r.Complete(); err != nil {
 			return err
 		}
+	case engine.OutExpire:
+		if reviewersChanged(st, r.Repo, cfg) {
+			return ErrNoChange
+		}
+		if len(st.LaggingRoleWriters(CapsExpiredRounds, now, "autoreview", "autofix")) > 0 {
+			return ErrNoChange
+		}
+		if err := r.Expire(tr.Reason); err != nil {
+			return err
+		}
 	case engine.OutReviewing:
 		if err := r.Acknowledge(); err != nil {
 			return err
@@ -1357,7 +1371,7 @@ func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
 func slotResult(slot Round, tr engine.Transition) PumpResult {
 	r := PumpResult{Repo: slot.Repo, PR: slot.PR, Head: slot.Head, Reason: tr.Reason}
 	switch tr.Outcome {
-	case engine.OutComplete, engine.OutReviewing:
+	case engine.OutComplete, engine.OutReviewing, engine.OutExpire:
 		r.Action = "cleared"
 	case engine.OutRetry, engine.OutReleaseSlot:
 		r.Action = "requeued"
@@ -1369,27 +1383,44 @@ func slotResult(slot Round, tr engine.Transition) PumpResult {
 	return r
 }
 
-// sweepReviewing progresses the oldest fired/reviewing round that is not holding
-// the fire slot, so a round whose slot was released on a bot ack still reaches
-// completion (or parks) without a Loop running. Bounded to one per pump.
+// sweepReviewing progresses one fired/reviewing round that is not holding the
+// fire slot, so a round whose slot was released on a bot ack still reaches
+// completion (or parks) without a Loop running. Overdue waits go first and the
+// cursor rotates after every attempt, so a live or unreadable PR cannot starve
+// the rest. Bounded to one observation per pump.
 func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (State, error) {
 	if s.cfg.DryRun {
 		return st, nil
 	}
-	var target *Round
+	var candidates []Round
 	for key := range st.Rounds {
 		r := st.Rounds[key]
 		if r.Phase != PhaseFired && r.Phase != PhaseReviewing {
 			continue
 		}
-		if target == nil || firedOrEnqueuedAt(r).Before(firedOrEnqueuedAt(*target)) {
-			c := r
-			target = &c
-		}
+		candidates = append(candidates, r)
 	}
-	if target == nil {
+	if len(candidates) == 0 {
 		return st, nil
 	}
+	sort.Slice(candidates, func(i, j int) bool { return reviewSweepBefore(candidates[i], candidates[j], now) })
+	expiredCount := 0
+	for expiredCount < len(candidates) && reviewSweepExpired(candidates[expiredCount], now) {
+		expiredCount++
+	}
+	rotationLen := len(candidates)
+	if expiredCount > 0 {
+		rotationLen = expiredCount
+	}
+	index := 0
+	for i := range candidates[:rotationLen] {
+		if QueueKey(candidates[i].Repo, candidates[i].PR) == s.lastReviewSweep {
+			index = (i + 1) % rotationLen
+			break
+		}
+	}
+	target := &candidates[index]
+	s.lastReviewSweep = QueueKey(target.Repo, target.PR)
 	cfg := s.cfgFor(st, target.Repo)
 	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, now)
 	if err != nil {
@@ -1453,6 +1484,27 @@ func firedOrEnqueuedAt(r Round) time.Time {
 		return *r.FiredAt
 	}
 	return r.EnqueuedAt
+}
+
+// reviewSweepBefore puts overdue waits ahead of live ones, then preserves the
+// oldest-first order within each group. A live review can legitimately return
+// KeepWaiting for its whole window; letting it stay first would prevent the
+// bounded sweep from noticing already-expired or closed rounds behind it.
+func reviewSweepBefore(a, b Round, now time.Time) bool {
+	aExpired := reviewSweepExpired(a, now)
+	bExpired := reviewSweepExpired(b, now)
+	if aExpired != bExpired {
+		return aExpired
+	}
+	aAt, bAt := firedOrEnqueuedAt(a), firedOrEnqueuedAt(b)
+	if !aAt.Equal(bAt) {
+		return aAt.Before(bAt)
+	}
+	return QueueKey(a.Repo, a.PR) < QueueKey(b.Repo, b.PR)
+}
+
+func reviewSweepExpired(r Round, now time.Time) bool {
+	return r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC())
 }
 
 // applyFire executes a DecideFire verdict.
@@ -2837,9 +2889,9 @@ func isCommentCapError(err error) bool {
 // Wait enqueues repo#pr and pumps until a review fires for its head (code 0),
 // current-head feedback is already available (code 3), the wait times out (code
 // 2), or the PR is closed or held (code 2). The wait IS the round: a fired/reviewing
-// round for the head is the in-flight wait, a completed round is the "already
-// reviewed" dedup marker, and firedMarker/waitingHead read those states off the
-// round rather than a separate wait record.
+// round for the head is the in-flight wait, and completed/expired rounds are
+// terminal same-head dedup markers. firedMarker/waitingHead read those states
+// off the round rather than a separate wait record.
 // postFailureBackoff parks a round after a review-command post fails, so a
 // persistent failure (auth, a 4xx, GitHub down past the client's own retries)
 // retries on a bounded cadence instead of re-posting on every pump.
@@ -2888,6 +2940,10 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
+				expired, expiredReason := false, ""
+				if round := state.Round(repo, pr); round != nil && round.Head == result.Head && round.Phase == PhaseExpired {
+					expired, expiredReason = true, round.Note
+				}
 				if state.WaitingHead(repo, pr) == result.Head {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
@@ -2906,6 +2962,11 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				// nobody's, and the marker it justifies would be deleted and rebought.
 				if reviewedByConfiguredBot(report.ReviewedBy, report.config.Bot) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				if expired {
+					return PumpResult{
+						Action: "timeout", Repo: repo, PR: pr, Head: result.Head, Reason: expiredReason,
+					}, 2, nil
 				}
 				// A completed round at this head with no real head review is a poisoned
 				// dedup marker (a mistaken completion). Drop it and enqueue the real

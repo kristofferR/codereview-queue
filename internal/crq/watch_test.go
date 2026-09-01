@@ -484,6 +484,61 @@ func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	}
 }
 
+func TestWatchKeepsActiveReviewWaitOutsideTheFixAgent(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	repo, pr, head := "owner/thing", 4, "aaaaaaaaa1111111"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	cfg.FeedbackWaitTimeout = time.Hour
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, head
+	pull.Head.Repo.FullName = repo
+	gh.pulls[fakeKey(repo, pr)] = pull
+	codex := ghapi.Review{CommitID: head, SubmittedAt: base.Add(time.Minute)}
+	codex.User.Login = codexLogin
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{codex}
+	created := base.Add(time.Minute).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + created + `","author":{"login":"` + codexLogin + `"},"commit":{"oid":"` + head + `"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return noForcePush(query, nil, out)
+	}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, repo, pr, head[:9], PhaseReviewing, base, 10)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return base.Add(2 * time.Minute) }
+
+	var events []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(),
+		Command: []string{"/this/agent/must/not/start"}, MaxAttempts: 3,
+	}, newDispatchPool(1), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != string(engine.ActionFix) || events[0].Dispatched ||
+		!strings.Contains(events[0].Skipped, "waiting for active reviewers") {
+		t.Fatalf("events = %+v, want the finding observed with its fix agent held outside", events)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Dispatch != nil {
+		t.Fatalf("active review acquired an autofix dispatch claim: %+v", round)
+	}
+}
+
 // recordingLogger keeps what the service said, so a test can assert on the one
 // line that explains a silent-looking mode.
 type recordingLogger struct{ lines []string }

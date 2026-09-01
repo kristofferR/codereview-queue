@@ -65,6 +65,7 @@ func TestNextAction(t *testing.T) {
 		return completionOf(map[string]bool{nextPrimary: cr, "chatgpt-codex-connector[bot]": codex})
 	}
 	deferredUntil := t0.Add(30 * time.Minute)
+	expiredDeadline := t0.Add(-time.Minute)
 	coPendingRound := state.Round{
 		Phase:    state.PhaseCompleted,
 		Dispatch: &state.DispatchClaim{Heartbeat: t0},
@@ -111,6 +112,34 @@ func TestNextAction(t *testing.T) {
 			pending: []string{nextPrimary},
 		},
 		{
+			name: "live fix session pushes findings when the primary is deferred",
+			in: NextInput{
+				Round: state.Round{
+					Phase:    state.PhaseReviewing,
+					Dispatch: &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, Primary: nextPrimary,
+				Deferred: true, DeferredUntil: &deferredUntil, DeferredReady: true,
+			},
+			want:    ActionPush,
+			pending: []string{nextPrimary},
+		},
+		{
+			name: "live fix session pushes findings after a completed round missed its deadline",
+			in: NextInput{
+				Round: state.Round{
+					Phase:        state.PhaseCompleted,
+					WaitDeadline: &expiredDeadline,
+					Dispatch:     &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, Primary: nextPrimary,
+			},
+			want:    ActionPush,
+			pending: []string{nextPrimary},
+		},
+		{
 			name: "live fix session holds findings while a co-reviewer is reading",
 			in: NextInput{
 				Round: coPendingRound,
@@ -137,7 +166,7 @@ func TestNextAction(t *testing.T) {
 				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
 				Primary: nextPrimary,
 			},
-			want: ActionFix,
+			want: ActionPush,
 		},
 		{
 			// The rule agents break most: a finding is in hand but a required bot
@@ -166,7 +195,7 @@ func TestNextAction(t *testing.T) {
 			name: "rate-limit degrade releases the head instead of holding it",
 			in: NextInput{
 				Obs: openObs(), Completion: both(false, true), LocalWork: true,
-				Deferred: true, DeferredUntil: &deferredUntil, MinDelay: time.Minute,
+				Deferred: true, DeferredUntil: &deferredUntil, DeferredReady: true, MinDelay: time.Minute,
 			},
 			want: ActionPush,
 		},
@@ -175,7 +204,7 @@ func TestNextAction(t *testing.T) {
 			in: NextInput{
 				Round: state.Round{Phase: state.PhaseQueued},
 				Obs:   openObs(), Completion: both(false, true),
-				Deferred: true, DeferredUntil: &deferredUntil, MinDelay: time.Minute,
+				Deferred: true, DeferredUntil: &deferredUntil, DeferredReady: true, MinDelay: time.Minute,
 			},
 			want: ActionWait, wantAt: deferredUntil,
 			pending: []string{"coderabbitai[bot]"},
@@ -301,6 +330,162 @@ func TestNextAction(t *testing.T) {
 				if !got.At.After(t0) {
 					t.Errorf("At = %s is not in the future", got.At)
 				}
+			}
+		})
+	}
+}
+
+func TestAutofixReadyWaitsOutsideTheModel(t *testing.T) {
+	both := func(primary, codex bool) CompletionStatus {
+		return completionOf(map[string]bool{
+			nextPrimary: primary, "chatgpt-codex-connector[bot]": codex,
+		})
+	}
+	expired := t0.Add(-time.Minute)
+	deferredUntil := t0.Add(time.Hour)
+	settleUntil := t0.Add(time.Minute)
+	coRound := state.Round{Phase: state.PhaseCompleted}
+	coRound.SetCoCommand(nextCoBot, 42, t0.Add(-time.Minute))
+	expiredCoRound := coRound
+	expiredCoRound.WaitDeadline = &expired
+	boundaryCoRound := coRound
+	boundaryCoRound.WaitDeadline = &t0
+	dynamicCoRound := state.Round{Phase: state.PhaseCompleted}
+	dynamicCoRound.NoteCoParticipation(nextCoBot, t0.Add(-time.Minute))
+	heldExpiredRound := state.Round{
+		Phase: state.PhaseAwaitingRetry, DispatchHoldPhase: state.PhaseReviewing,
+		WaitDeadline: &expired,
+		Dispatch: &state.DispatchClaim{
+			Host: "autofix", Token: "live", At: t0, Heartbeat: t0,
+		},
+	}
+
+	cases := []struct {
+		name string
+		in   NextInput
+		want bool
+	}{
+		{
+			name: "active primary review stays outside the agent",
+			in: NextInput{
+				Round:      state.Round{Phase: state.PhaseReviewing},
+				Completion: both(false, true), Primary: nextPrimary,
+			},
+		},
+		{
+			name: "unrequested queued review does not block a fixer",
+			in: NextInput{
+				Round:      state.Round{Phase: state.PhaseQueued},
+				Completion: both(false, true), Primary: nextPrimary,
+			},
+			want: true,
+		},
+		{
+			name: "deferred primary releases a fixer after co-review",
+			in: NextInput{
+				Round:      state.Round{Phase: state.PhaseReviewing},
+				Completion: both(false, true), Primary: nextPrimary,
+				Deferred: true, DeferredUntil: &deferredUntil, DeferredReady: true,
+			},
+			want: true,
+		},
+		{
+			name: "settling still happens before a deferred fixer starts",
+			in: NextInput{
+				Round:      state.Round{Phase: state.PhaseReviewing},
+				Completion: both(false, true), Primary: nextPrimary,
+				Deferred: true, DeferredUntil: &deferredUntil, DeferredReady: true, SettleUntil: &settleUntil,
+			},
+		},
+		{
+			name: "expired completed round releases a fixer",
+			in: NextInput{
+				Round:      state.Round{Phase: state.PhaseCompleted, WaitDeadline: &expired},
+				Completion: both(false, true), Primary: nextPrimary,
+			},
+			want: true,
+		},
+		{
+			name: "active co-reviewer keeps the fixer outside the model",
+			in: NextInput{
+				Round: coRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Primary: nextPrimary,
+			},
+		},
+		{
+			name: "dynamically active co-reviewer keeps the fixer outside the model",
+			in: NextInput{
+				Round: dynamicCoRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Primary: nextPrimary,
+			},
+		},
+		{
+			name: "expired round releases a pending required co-reviewer",
+			in: NextInput{
+				Round: expiredCoRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Primary: nextPrimary,
+			},
+			want: true,
+		},
+		{
+			name: "expired deadline overrides a later settle window",
+			in: NextInput{
+				Round: expiredCoRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Primary: nextPrimary, SettleUntil: &settleUntil,
+			},
+			want: true,
+		},
+		{
+			name: "expired logical review phase releases a live dispatch hold",
+			in: NextInput{
+				Round: heldExpiredRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: false, "chatgpt-codex-connector[bot]": true,
+				}),
+				Primary: nextPrimary,
+			},
+			want: true,
+		},
+		{
+			name: "deadline boundary releases a pending required co-reviewer",
+			in: NextInput{
+				Round: boundaryCoRound,
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Primary: nextPrimary,
+			},
+			want: true,
+		},
+		{
+			name: "complete review set is ready",
+			in:   NextInput{Completion: both(true, true), Primary: nextPrimary},
+			want: true,
+		},
+		{
+			name: "complete review set still waits for the settle window",
+			in: NextInput{
+				Completion: both(true, true), Primary: nextPrimary, SettleUntil: &settleUntil,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AutofixReady(tc.in, t0); got != tc.want {
+				t.Errorf("AutofixReady() = %t, want %t", got, tc.want)
 			}
 		})
 	}
@@ -434,10 +619,9 @@ func TestNextActionKeepsShortCadenceForACommandedCoReviewer(t *testing.T) {
 	}
 }
 
-// A primary that acknowledges the command and then never submits a review leaves
-// the round reviewing forever — Progress deliberately does not time that out,
-// because the legacy Loop owned the deadline. Without an actionable verdict here
-// the newly recommended flow idles indefinitely on a bot that crashed.
+// Progress retires an incomplete review at its durable deadline. Next must keep
+// that missing evidence visible as a terminal block, whether the primary or a
+// co-reviewer was the bot that never answered.
 func TestNextActionReportsAnExpiredReviewWait(t *testing.T) {
 	expired := t0.Add(-time.Minute)
 	got := NextAction(NextInput{
@@ -449,6 +633,17 @@ func TestNextActionReportsAnExpiredReviewWait(t *testing.T) {
 	}, t0)
 	if got.Kind != ActionBlocked {
 		t.Fatalf("NextAction = %q (%s), want %q", got.Kind, got.Reason, ActionBlocked)
+	}
+	got = NextAction(NextInput{
+		Round: state.Round{Phase: state.PhaseExpired, WaitDeadline: &expired},
+		Obs:   openObs(),
+		Completion: completionOf(map[string]bool{
+			nextPrimary: true, nextCoBot: false,
+		}),
+		Primary: nextPrimary,
+	}, t0)
+	if got.Kind != ActionBlocked || len(got.Pending) != 1 || got.Pending[0] != nextCoBot {
+		t.Fatalf("expired co-review = %+v, want blocked with %s pending", got, nextCoBot)
 	}
 
 	// An unexpired deadline is still just a wait.

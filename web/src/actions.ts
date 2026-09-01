@@ -61,6 +61,7 @@ export type ActionBody = {
     effort?: string;
     prompt?: string;
     max_attempts?: number;
+    max_review_rounds?: number;
     severities?: string[];
     ask_mode?: string;
     forks?: boolean;
@@ -70,6 +71,7 @@ export type ActionBody = {
     unset_models?: boolean;
     unset_effort?: boolean;
     unset_prompt?: boolean;
+    unset_max_review_rounds?: boolean;
     unset_severities?: boolean;
     unset_ask_mode?: boolean;
     unset_forks?: boolean;

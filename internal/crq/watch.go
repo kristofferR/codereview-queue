@@ -1109,6 +1109,7 @@ func appendAutofixPolicy(prompt string, severities map[string]bool, askMode stri
 	}
 	instruction := "Autofix policy:\n- Work only on findings passed to this session (configured severities: " +
 		strings.Join(allowed, ", ") + ").\n"
+	instruction += "- Judge every finding against the pull request's stated goal. Fix genuine shortcomings within that goal; decline unrelated refactors, new features, speculative hardening, and follow-up suggestions that expand the original scope.\n"
 	switch askMode {
 	case "ambiguous":
 		instruction += "- Stop at the first meaningful ambiguity: if multiple reasonable solutions would change behavior differently, do not guess.\n"

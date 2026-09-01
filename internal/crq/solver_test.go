@@ -86,6 +86,7 @@ func TestSolverLayering(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.DispatchMaxAttempts = 3
+	cfg.MaxReviewRounds = 5
 	cfg.DispatchCommand = []string{"/usr/bin/claude"}
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
@@ -95,7 +96,7 @@ func TestSolverLayering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Overridden || view.MaxAttempts != 3 || view.Model != "" {
+	if view.Overridden || view.MaxAttempts != 3 || view.MaxReviewRounds != 5 || view.Model != "" {
 		t.Fatalf("view = %+v, want the env values with no record", view)
 	}
 	if view.Sources["one_pass"] != "default" || view.Sources["merge_method"] != "default" {
@@ -218,6 +219,40 @@ func TestSolverLayering(t *testing.T) {
 	}
 	if v, _ := svc.Solver(ctx, "o/special"); v.Overridden {
 		t.Error("a record with nothing in it must not report the repository as overridden")
+	}
+}
+
+func TestSolverReviewRoundBudgetCanOverrideAndDisable(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.MaxReviewRounds = 5
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	seven := 7
+	view, err := svc.SetSolver(ctx, "o/r", SolverChange{MaxReviewRounds: &seven})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.MaxReviewRounds != 7 || view.Sources["max_review_rounds"] != "repo" {
+		t.Fatalf("review budget override = %+v", view)
+	}
+
+	zero := 0
+	view, err = svc.SetSolver(ctx, "o/r", SolverChange{MaxReviewRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.MaxReviewRounds != 0 || view.Sources["max_review_rounds"] != "repo" {
+		t.Fatalf("explicit unlimited review budget = %+v", view)
+	}
+
+	view, err = svc.SetSolver(ctx, "o/r", SolverChange{UnsetMaxReviewRounds: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.MaxReviewRounds != 5 || view.Sources["max_review_rounds"] != "env" {
+		t.Fatalf("inherited review budget = %+v", view)
 	}
 }
 

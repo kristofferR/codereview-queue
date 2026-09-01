@@ -270,7 +270,7 @@ func TestRunSolverParsesOnePassCampaign(t *testing.T) {
 	svc := crqcore.NewService(cfg, nil, store, nil)
 	if code := runSolver(t.Context(), svc, []string{
 		"set", "owner/repo", "--models", "gpt-5.6-sol", "--effort", "medium",
-		"--attempts", "1", "--one-pass", "on", "--merge", "squash",
+		"--attempts", "1", "--rounds", "6", "--one-pass", "on", "--merge", "squash",
 	}); code != 0 {
 		t.Fatalf("runSolver campaign exit = %d", code)
 	}
@@ -278,7 +278,7 @@ func TestRunSolverParsesOnePassCampaign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !view.OnePass || view.MergeMethod != "squash" || view.Model != "gpt-5.6-sol" || view.Effort != "medium" || view.MaxAttempts != 1 {
+	if !view.OnePass || view.MergeMethod != "squash" || view.Model != "gpt-5.6-sol" || view.Effort != "medium" || view.MaxAttempts != 1 || view.MaxReviewRounds != 6 {
 		t.Fatalf("campaign view = %+v", view)
 	}
 }

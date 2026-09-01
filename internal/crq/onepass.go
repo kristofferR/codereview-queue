@@ -591,6 +591,10 @@ func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) 
 		if st.ClearOnePassProgress(repo, pr) {
 			changed = true
 		}
+		if _, ok := st.ReviewedHeads[QueueKey(repo, pr)]; ok {
+			st.ClearReviewBudget(repo, pr)
+			changed = true
+		}
 		if !changed {
 			return ErrNoChange
 		}

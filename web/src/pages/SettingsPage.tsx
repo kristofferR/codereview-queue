@@ -107,6 +107,7 @@ export function SettingsPage({
             d="one argv for the fleet"
           />
           <Row k="Max attempts per head" v={String(c.autofix_max_attempts ?? "—")} />
+          <Row k="Review rounds per PR" v={String(c.max_review_rounds ?? "—")} />
           <Row
             k="Concurrency"
             v={c.autofix_concurrency ? String(c.autofix_concurrency) : "uncapped"}

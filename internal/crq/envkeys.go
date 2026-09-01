@@ -88,6 +88,8 @@ var envKeys = []EnvKey{
 		Help: "Pull-request authors auto-review never enqueues.", AllowEmpty: true},
 	{Key: "CRQ_AUTOREVIEW_SKIP_MARKER", Kind: "text", Group: "review", Label: "Skip marker",
 		Help: "A pull-request body containing this is left alone by fleet auto-review.", AllowEmpty: true},
+	{Key: "CRQ_MAX_REVIEW_ROUNDS", Kind: "int", Group: "review", Label: "Review rounds",
+		Help: "Distinct reviewed heads per PR before a silent scope hold. 0 is unlimited; also settable per repository."},
 
 	// Per-bot trigger policy. Generated rather than listed, so adding a
 	// co-reviewer to the registry adds its settings here too — the alternative
@@ -253,6 +255,9 @@ func validateEnvValue(key, value string) error {
 		}
 		if n == 0 && positiveOnly[key] {
 			return fmt.Errorf("%s has to be greater than 0 — a zero is ignored, and every host stays on its own value", key)
+		}
+		if key == "CRQ_MAX_REVIEW_ROUNDS" && n > 20 {
+			return fmt.Errorf("%s cannot exceed 20", key)
 		}
 	case "bool":
 		if value != "0" && value != "1" {

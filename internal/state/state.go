@@ -596,6 +596,13 @@ type State struct {
 	// one-pass review cap: an in-progress, auxiliary, or failed check did not
 	// deliver a review.
 	CoAnswers map[string]map[string]time.Time `json:"co_answers,omitempty"`
+	// ReviewedHeads is the PR-wide review-round ledger. A round itself is scoped
+	// to one head and is archived whenever a fixer pushes, so its attempt count
+	// cannot stop a long review/fix loop. Keeping the distinct reviewed heads
+	// here lets the scheduler bound that loop without mistaking repeated
+	// observations of one review for new work. An explicitly empty entry is a
+	// reset cycle; Normalize must not reconstruct it from the archive.
+	ReviewedHeads map[string][]string `json:"reviewed_heads,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -674,12 +681,18 @@ const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 16
+const WriterCaps = 17
 
 // CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
 // daemons do not recognise that terminal same-head marker and could otherwise
 // enqueue another paid review for a round a newer daemon retired.
 const CapsExpiredRounds = 16
+
+// CapsReviewRoundBudget is the capability both review schedulers and autofix
+// watchers need before a PR-wide review budget can be relied on. Older review
+// schedulers keep posting new-head commands, while older fixers keep producing
+// the heads that invite them.
+const CapsReviewRoundBudget = 17
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -1245,6 +1258,12 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 	if cur, ok := s.Rounds[key]; ok {
 		return nil, fmt.Errorf("round already exists for %s@%s (%s)", key, cur.Head, cur.Phase)
 	}
+	if s.ReviewedHeads == nil {
+		s.ReviewedHeads = map[string][]string{}
+	}
+	if _, initialized := s.ReviewedHeads[key]; !initialized {
+		s.ReviewedHeads[key] = []string{}
+	}
 	s.NextSeq++
 	r := Round{
 		Repo:       strings.ToLower(repo),
@@ -1257,6 +1276,47 @@ func (s *State) NewRound(repo string, pr int, head string, now time.Time) (*Roun
 	s.carryCoActivity(&r)
 	s.Rounds[key] = r
 	return &r, nil
+}
+
+// NoteReviewedHead records one delivered reviewer round for a pull request.
+// It is idempotent because the same GitHub evidence is observed by several
+// queue paths and on every subsequent poll.
+func (s *State) NoteReviewedHead(repo string, pr int, head string) bool {
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return false
+	}
+	if s.ReviewedHeads == nil {
+		s.ReviewedHeads = map[string][]string{}
+	}
+	key := Key(repo, pr)
+	for _, seen := range s.ReviewedHeads[key] {
+		if seen == head {
+			return false
+		}
+	}
+	s.ReviewedHeads[key] = append(s.ReviewedHeads[key], head)
+	return true
+}
+
+// ReviewRoundCount reports how many distinct heads received a review in the
+// current budget cycle.
+func (s *State) ReviewRoundCount(repo string, pr int) int {
+	return len(s.ReviewedHeads[Key(repo, pr)])
+}
+
+// ResetReviewBudget starts a fresh review-round cycle while preserving the
+// explicit entry that prevents Normalize from rebuilding old archive history.
+func (s *State) ResetReviewBudget(repo string, pr int) {
+	if s.ReviewedHeads == nil {
+		s.ReviewedHeads = map[string][]string{}
+	}
+	s.ReviewedHeads[Key(repo, pr)] = []string{}
+}
+
+// ClearReviewBudget retires a PR's ledger when the PR can no longer continue.
+func (s *State) ClearReviewBudget(repo string, pr int) {
+	delete(s.ReviewedHeads, Key(repo, pr))
 }
 
 func (s *State) rememberCoActivity(r Round) {
@@ -2442,6 +2502,9 @@ func (s *State) Normalize(now time.Time) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
 	}
+	if s.ReviewedHeads == nil {
+		s.ReviewedHeads = map[string][]string{}
+	}
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
@@ -2513,6 +2576,35 @@ func (s *State) Normalize(now time.Time) {
 		}
 		s.Rounds[key] = r
 	}
+	// Bootstrap the PR-wide ledger once when upgrading existing live rounds.
+	// Presence, including an empty slice, means the cycle was already
+	// initialized or deliberately reset and must not be rebuilt.
+	for key, current := range s.Rounds {
+		if _, initialized := s.ReviewedHeads[key]; initialized {
+			continue
+		}
+		s.ReviewedHeads[key] = []string{}
+		for _, archived := range s.Archive {
+			if Key(archived.Repo, archived.PR) == key && roundHasReviewEvidence(archived) {
+				s.NoteReviewedHead(archived.Repo, archived.PR, archived.Head)
+			}
+		}
+		if roundHasReviewEvidence(current) {
+			s.NoteReviewedHead(current.Repo, current.PR, current.Head)
+		}
+	}
+}
+
+func roundHasReviewEvidence(r Round) bool {
+	if r.PrimaryAnsweredAt != nil {
+		return true
+	}
+	for _, co := range r.CoBots {
+		if co.AnsweredAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // --- round-native views consumed by crq's Wait/Loop ------------------------

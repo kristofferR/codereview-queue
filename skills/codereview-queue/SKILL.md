@@ -149,6 +149,10 @@ commit, and bot.
 reports. It also surfaces still-open findings from earlier commits (any unresolved, non-outdated
 review thread), so there is no need to audit past reviews by hand.
 
+Judge every finding against the user's original goal. Address real shortcomings, but do not let
+review feedback broaden the PR or create scope creep. If a bot's suggestion is not worth addressing,
+reply with the reason and resolve the comment rather than leaving it open.
+
 Review-body findings have no GitHub resolution state. Before a new review round starts, crq keeps
 the newest body so failed-to-post comments are not lost after a rebase. Once a round is persisted
 for the current head, body findings written before that round are suppressed; the current reviewer
@@ -225,6 +229,11 @@ the session resolves or declines each one it judged.
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
+
+Incremental review is also bounded across heads. The default five reviewed heads are a circuit
+breaker, not five fixer attempts: before another reviewer trigger crq creates a silent state hold.
+Inspect whether the PR is still serving its original goal, then `crq unhold "$REPO" "$PR"` to grant
+another cycle. Configure it with `crq solver set "$REPO" --rounds <n>`; zero is unlimited.
 
 For a temporary bulk campaign that explicitly wants one review and one fixer per PR followed by a
 merge, use the repository-scoped solver policy:

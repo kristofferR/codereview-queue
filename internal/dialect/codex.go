@@ -24,6 +24,11 @@ const codexReviewSummaryMarker = "<!-- codex-pull-request-review-summary -->"
 // repeating the wording.
 const CodexBotLogin = "chatgpt-codex-connector[bot]"
 
+// CodexReviewCommand uses Codex's documented focused-review suffix so every
+// automated round carries the fleet's scope boundary even before a repository
+// adds its own AGENTS.md review rules.
+const CodexReviewCommand = "@codex review for consequential defects introduced by this PR; do not expand its original scope with unrelated refactors, features, or speculative hardening"
+
 func IsCodexBot(login string) bool {
 	return NormalizeBotName(login) == NormalizeBotName(CodexBotLogin)
 }

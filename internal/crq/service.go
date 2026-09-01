@@ -296,6 +296,13 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 	released := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		released = false
+		hold, held := st.HeldPR(repo, pr)
+		if held && strings.HasPrefix(hold.Reason, reviewBudgetHoldPrefix) {
+			// Releasing an automatic circuit breaker is the operator's explicit
+			// grant of another cycle. Reset atomically with the release so a pump
+			// cannot immediately recreate the same hold from the old count.
+			st.ResetReviewBudget(repo, pr)
+		}
 		if !st.Unhold(repo, pr) {
 			return ErrNoChange
 		}
@@ -1293,6 +1300,7 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		}
 	case engine.OutAbandon:
 		st.EndRound(r.Repo, r.PR, tr.Reason)
+		st.ClearReviewBudget(r.Repo, r.PR)
 		releaseSlot(st, key, ownerToken)
 		return nil
 	default:
@@ -1519,6 +1527,9 @@ func reviewSweepExpired(r Round, now time.Time) bool {
 // is meant to close: SetReviewers commits in between, and the mutation goes on
 // to apply the decision the new configuration would not have made.
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	if result, held, err := s.enforceReviewBudget(ctx, round, d, now); err != nil || held {
+		return result, err
+	}
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
@@ -1539,6 +1550,80 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
+}
+
+const reviewBudgetHoldPrefix = "automated review budget exhausted:"
+
+func decisionPostsReview(d engine.FireDecision) bool {
+	return d.Verdict == engine.FirePost || len(d.PostCo) > 0
+}
+
+// enforceReviewBudget is the final gate before any path posts a new reviewer
+// trigger. It writes only shared state: automatic circuit breaking must not
+// impersonate an operator by adding a GitHub comment.
+func (s *Service) enforceReviewBudget(
+	ctx context.Context,
+	round Round,
+	d engine.FireDecision,
+	now time.Time,
+) (PumpResult, bool, error) {
+	if !decisionPostsReview(d) {
+		return PumpResult{}, false, nil
+	}
+	result := PumpResult{Action: "held", Repo: round.Repo, PR: round.PR, Head: round.Head}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	if len(st.LaggingRoleWriters(CapsReviewRoundBudget, now, "autoreview", "autofix")) > 0 {
+		return PumpResult{}, false, nil
+	}
+	liveCfg := s.cfgFor(st, round.Repo)
+	if liveCfg.MaxReviewRounds <= 0 || liveCfg.OnePass {
+		return PumpResult{}, false, nil
+	}
+	limit := liveCfg.MaxReviewRounds
+	count := st.ReviewRoundCount(round.Repo, round.PR)
+	if count < limit {
+		return PumpResult{}, false, nil
+	}
+	result.Reason = fmt.Sprintf("%s %d reviewed heads reached the limit of %d; inspect scope, then unhold to grant another cycle", reviewBudgetHoldPrefix, count, limit)
+	if s.cfg.DryRun {
+		return result, true, nil
+	}
+	held := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		held = false
+		if !sameRound(st.Round(round.Repo, round.PR), round) {
+			return ErrNoChange
+		}
+		live := s.cfgFor(*st, round.Repo)
+		if live.MaxReviewRounds <= 0 || live.OnePass ||
+			st.ReviewRoundCount(round.Repo, round.PR) < live.MaxReviewRounds ||
+			len(st.LaggingRoleWriters(CapsReviewRoundBudget, now, "autoreview", "autofix")) > 0 {
+			return ErrNoChange
+		}
+		if _, exists := st.HeldPR(round.Repo, round.PR); exists {
+			return ErrNoChange
+		}
+		count = st.ReviewRoundCount(round.Repo, round.PR)
+		limit = live.MaxReviewRounds
+		result.Reason = fmt.Sprintf("%s %d reviewed heads reached the limit of %d; inspect scope, then unhold to grant another cycle", reviewBudgetHoldPrefix, count, live.MaxReviewRounds)
+		st.Hold(round.Repo, round.PR, result.Reason, "crq", now)
+		held = true
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return PumpResult{}, false, err
+	}
+	if !held {
+		return PumpResult{Action: "lost_race", Repo: round.Repo, PR: round.PR, Head: round.Head}, true, nil
+	}
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("%s#%d held after %d reviewed heads (limit %d)", round.Repo, round.PR, count, limit)
+	}
+	return result, true, nil
 }
 
 func mapFireNo(reason string) string {
@@ -1570,6 +1655,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 			return ErrNoChange
 		}
 		st.EndRound(round.Repo, round.PR, reason)
+		st.ClearReviewBudget(round.Repo, round.PR)
 		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 		ended = true
 		return nil
@@ -2494,6 +2580,7 @@ func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 		}
 		token := round.Token
 		st.EndRound(repo, pr, "cancelled")
+		st.ClearReviewBudget(repo, pr)
 		releaseSlot(st, QueueKey(repo, pr), token)
 		return nil
 	})
@@ -3174,6 +3261,7 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 			return ErrNoChange
 		}
 		current.Unhold(repo, pr)
+		current.ClearReviewBudget(repo, pr)
 		if round := current.Round(repo, pr); round != nil {
 			token := round.Token
 			current.EndRound(repo, pr, "pr merged")
@@ -3242,8 +3330,13 @@ func withoutMergedHold(st State, repo string, pr int) State {
 		updated.Rounds[key] = round
 	}
 	updated.Archive = append([]Round(nil), st.Archive...)
+	updated.ReviewedHeads = make(map[string][]string, len(st.ReviewedHeads))
+	for key, heads := range st.ReviewedHeads {
+		updated.ReviewedHeads[key] = append([]string(nil), heads...)
+	}
 
 	updated.Unhold(repo, pr)
+	updated.ClearReviewBudget(repo, pr)
 	if round := updated.Round(repo, pr); round != nil {
 		token := round.Token
 		updated.EndRound(repo, pr, "pr merged")
@@ -3343,10 +3436,15 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	}
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
+	reviewed := cfg.MaxReviewRounds > 0 && primary
+	for _, didAnswer := range answered {
+		reviewed = reviewed || (cfg.MaxReviewRounds > 0 && didAnswer)
+	}
 	if len(active) == 0 && !primary {
 		return nil, nil
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
+		budgetChanged := reviewed && st.NoteReviewedHead(round.Repo, round.PR, round.Head)
 		noteHistorical := func(r *Round) {
 			for _, login := range active {
 				if answered[dialect.NormalizeBotName(login)] {
@@ -3365,7 +3463,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				}
 				before := archived.CoBots
 				noteHistorical(archived)
-				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) {
+				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) && !budgetChanged {
 					return ErrNoChange
 				}
 				st.RememberCoActivity(*archived)
@@ -3376,7 +3474,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
 			noteHistorical(&round)
-			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) {
+			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) && !budgetChanged {
 				return ErrNoChange
 			}
 			st.RememberCoActivity(round)
@@ -3397,7 +3495,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 					answerChanged = true
 				}
 			}
-			if sameCoActivity(before, r.CoBots) && !answerChanged {
+			if sameCoActivity(before, r.CoBots) && !answerChanged && !budgetChanged {
 				return ErrNoChange
 			}
 			if r.Phase == PhaseCompleted {
@@ -3422,7 +3520,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		if primary {
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
-		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
+		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged {
 			return ErrNoChange
 		}
 		st.PutRound(*r)

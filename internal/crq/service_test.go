@@ -1157,6 +1157,57 @@ func firingConfig() Config {
 	}
 }
 
+func TestReviewBudgetHoldsBeforePostingAndUnholdResetsIt(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.MaxReviewRounds = 2
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+
+	var round Round
+	if _, err := store.Update(ctx, func(st *State) error {
+		r, err := st.NewRound("owner/repo", 7, "head-c", now)
+		if err != nil {
+			return err
+		}
+		st.NoteReviewedHead("owner/repo", 7, "head-a")
+		st.NoteReviewedHead("owner/repo", 7, "head-b")
+		round = *r
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.applyFire(ctx, cfg, round, engine.Observation{Head: round.Head, Open: true}, engine.FireDecision{Verdict: engine.FirePost}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "held" || !strings.Contains(result.Reason, "limit of 2") {
+		t.Fatalf("budget result = %+v", result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("automatic budget hold posted a GitHub comment: %v", gh.posted)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hold, ok := st.HeldPR("owner/repo", 7); !ok || !strings.HasPrefix(hold.Reason, reviewBudgetHoldPrefix) {
+		t.Fatalf("automatic hold = %+v, present %t", hold, ok)
+	}
+
+	if _, err := svc.Unhold(ctx, "owner/repo", 7); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ = store.Load(ctx)
+	if got := st.ReviewRoundCount("owner/repo", 7); got != 0 {
+		t.Fatalf("unhold review round count = %d, want a fresh cycle", got)
+	}
+}
+
 func TestApplyTransitionDropsRetryWhenFleetPolicyChanged(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
@@ -3484,7 +3535,7 @@ func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 		}
 		return n
 	}
-	if countPosts(":@codex review") != 1 {
+	if countPosts(":"+dialect.CodexReviewCommand) != 1 {
 		t.Fatalf("exactly one codex command must be posted during the block, got %v", gh.posted)
 	}
 	if countPosts(":@coderabbitai review") != 0 {
@@ -3500,7 +3551,7 @@ func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 	if res.Action != "fired" {
 		t.Fatalf("expected the coderabbit fire after the window, got %#v", res)
 	}
-	if countPosts(":@coderabbitai review") != 1 || countPosts(":@codex review") != 1 {
+	if countPosts(":@coderabbitai review") != 1 || countPosts(":"+dialect.CodexReviewCommand) != 1 {
 		t.Fatalf("after the window: one coderabbit fire, still one codex command, got %v", gh.posted)
 	}
 }

@@ -31,6 +31,7 @@ export function SolverEditor({
   const [effort, setEffort] = useState(solver.effort ?? "");
   const [prompt, setPrompt] = useState(solver.prompt ?? "");
   const [attempts, setAttempts] = useState(String(solver.max_attempts));
+  const [rounds, setRounds] = useState(String(solver.max_review_rounds ?? 5));
   const [severities, setSeverities] = useState(solver.severities);
   const [askMode, setAskMode] = useState(solver.ask_mode);
   const [forks, setForks] = useState(solver.forks);
@@ -41,6 +42,7 @@ export function SolverEditor({
   const solverEffort = solver.effort ?? "";
   const solverPrompt = solver.prompt ?? "";
   const solverAttempts = String(solver.max_attempts);
+  const solverRounds = String(solver.max_review_rounds ?? 5);
   const solverSeverities = [...solver.severities].sort().join("\0");
   const solverAskMode = solver.ask_mode;
   const solverAuthors = (solver.skip_authors ?? []).join(", ");
@@ -50,6 +52,7 @@ export function SolverEditor({
     setEffort(solverEffort);
     setPrompt(solverPrompt);
     setAttempts(solverAttempts);
+    setRounds(solverRounds);
     setSeverities(solverSeverities ? solverSeverities.split("\0") : []);
     setAskMode(solverAskMode);
     setForks(solver.forks);
@@ -59,6 +62,7 @@ export function SolverEditor({
     solverEffort,
     solverPrompt,
     solverAttempts,
+    solverRounds,
     solverSeverities,
     solverAskMode,
     solver.forks,
@@ -70,10 +74,12 @@ export function SolverEditor({
     effort !== solverEffort ||
     prompt !== solverPrompt ||
     attempts !== solverAttempts ||
+    rounds !== solverRounds ||
     !sameMembers(severities, solver.severities) ||
     askMode !== solverAskMode ||
     forks !== solver.forks ||
     authors !== solverAuthors;
+  const roundsValid = rounds !== "";
 
   const save = (clear = false) => {
     setWarning(null);
@@ -87,6 +93,7 @@ export function SolverEditor({
               effort,
               prompt,
               attempts,
+              rounds,
               severities,
               askMode,
               forks,
@@ -103,7 +110,15 @@ export function SolverEditor({
   };
 
   const inherit = (
-    field: "models" | "effort" | "prompt" | "severities" | "ask_mode" | "forks" | "skip_authors",
+    field:
+      | "models"
+      | "effort"
+      | "prompt"
+      | "max_review_rounds"
+      | "severities"
+      | "ask_mode"
+      | "forks"
+      | "skip_authors",
   ) => {
     setWarning(null);
     const change: NonNullable<ActionBody["solver"]> =
@@ -113,13 +128,15 @@ export function SolverEditor({
           ? { unset_effort: true }
           : field === "prompt"
             ? { unset_prompt: true }
-            : field === "severities"
-              ? { unset_severities: true }
-              : field === "ask_mode"
-                ? { unset_ask_mode: true }
-                : field === "forks"
-                  ? { unset_forks: true }
-                  : { unset_skip_authors: true };
+            : field === "max_review_rounds"
+              ? { unset_max_review_rounds: true }
+              : field === "severities"
+                ? { unset_severities: true }
+                : field === "ask_mode"
+                  ? { unset_ask_mode: true }
+                  : field === "forks"
+                    ? { unset_forks: true }
+                    : { unset_skip_authors: true };
     runOperation(
       act("solver", {
         repo,
@@ -195,6 +212,12 @@ export function SolverEditor({
             own install-time values: {solver.lagging_hosts.join(", ")}
           </div>
         )}
+        {solver.review_budget_lagging_hosts && solver.review_budget_lagging_hosts.length > 0 && (
+          <div className="mt-2.5 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
+            The review-round limit is paused until these review/fix services are upgraded:{" "}
+            {solver.review_budget_lagging_hosts.join(", ")}
+          </div>
+        )}
 
         <table className="mt-2.5 w-full border-collapse">
           <tbody>
@@ -243,6 +266,24 @@ export function SolverEditor({
               <span className="ml-2 text-[12px] text-faint">
                 fix sessions per head before crq stops trying; 0 inherits
               </span>
+            </Row>
+            <Row label="Review rounds" source={src("max_review_rounds")}>
+              <input
+                aria-label="Maximum reviewed heads per pull request"
+                aria-invalid={!roundsValid}
+                value={rounds}
+                inputMode="numeric"
+                onChange={(e) => setRounds(e.target.value.replace(/[^0-9]/g, ""))}
+                className="w-16 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+              />
+              <span className="ml-2 text-[12px] text-faint">
+                reviewed heads before a scope hold; 0 is unlimited
+              </span>
+              <Inherit
+                shown={src("max_review_rounds") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("max_review_rounds")}
+              />
             </Row>
             <Row label="Fix findings" source={src("severities")}>
               <div className="flex flex-wrap gap-2">
@@ -367,13 +408,17 @@ export function SolverEditor({
         <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            disabled={!dirty || busy}
+            disabled={!dirty || busy || !roundsValid}
             onClick={() => void save()}
             className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
           >
             {busy ? "Saving…" : "Save fix settings"}
           </button>
-          {dirty && <span className="text-[12.5px] text-warn">unsaved changes</span>}
+          {dirty && (
+            <span className="text-[12.5px] text-warn">
+              {roundsValid ? "unsaved changes" : "review rounds cannot be blank"}
+            </span>
+          )}
           {solver.overridden && !dirty && (
             <button
               type="button"
@@ -403,6 +448,7 @@ export function solverChange(
     effort: string;
     prompt: string;
     attempts: string;
+    rounds?: string;
     severities: string[];
     askMode: string;
     forks: boolean;
@@ -423,6 +469,13 @@ export function solverChange(
   if (edited.prompt !== (solver.prompt ?? "")) change.prompt = edited.prompt;
   if (edited.attempts !== String(solver.max_attempts)) {
     change.max_attempts = Number(edited.attempts) || 0;
+  }
+  if (
+    edited.rounds !== undefined &&
+    edited.rounds !== "" &&
+    edited.rounds !== String(solver.max_review_rounds ?? 5)
+  ) {
+    change.max_review_rounds = Number(edited.rounds);
   }
   if (!sameMembers(edited.severities, solver.severities)) {
     change.severities = edited.severities;

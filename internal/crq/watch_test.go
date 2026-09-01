@@ -1698,6 +1698,8 @@ func TestAutofixPolicyFiltersAndExtractsClarification(t *testing.T) {
 	}
 	prompt := appendAutofixPolicy("use bun", map[string]bool{"minor": true}, "uncertain")
 	if !strings.Contains(prompt, "configured severities: minor") ||
+		!strings.Contains(prompt, "pull request's stated goal") ||
+		!strings.Contains(prompt, "decline unrelated refactors") ||
 		!strings.Contains(prompt, clarificationMarker) ||
 		!strings.Contains(prompt, "confidence is low") {
 		t.Fatalf("policy prompt did not carry its enforcement contract:\n%s", prompt)

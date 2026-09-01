@@ -505,6 +505,9 @@ func (c Config) withSolver(sv SolverSettings) Config {
 	if sv.MaxAttempts != nil {
 		out.DispatchMaxAttempts = *sv.MaxAttempts
 	}
+	if sv.MaxReviewRounds != nil {
+		out.MaxReviewRounds = *sv.MaxReviewRounds
+	}
 	if sv.SetSeverities || len(sv.Severities) > 0 {
 		out.FixSeverities = severitySet(strings.Join(sv.Severities, ","))
 	}

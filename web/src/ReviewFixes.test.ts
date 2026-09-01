@@ -102,6 +102,38 @@ describe("settings deltas", () => {
     ).toEqual({ models: [] });
   });
 
+  it("does not turn a blank review-round limit into unlimited", () => {
+    const solver: RepoSolver = {
+      overridden: false,
+      models: [],
+      model_choices: [],
+      max_attempts: 3,
+      max_review_rounds: 5,
+      severities: [],
+      ask_mode: "blocked",
+      forks: false,
+      skip_authors: [],
+      one_pass: false,
+      sources: {},
+    };
+    const edited = {
+      model: "",
+      effort: "",
+      prompt: "",
+      attempts: "3",
+      rounds: "",
+      severities: [] as string[],
+      askMode: "blocked",
+      forks: false,
+      authors: "",
+    };
+
+    expect(solverChange(solver, edited)).toEqual({});
+    expect(solverChange(solver, { ...edited, rounds: "0" })).toEqual({
+      max_review_rounds: 0,
+    });
+  });
+
   it("starts a one-pass auto-merge campaign as one atomic solver change", () => {
     const solver: RepoSolver = {
       overridden: false,

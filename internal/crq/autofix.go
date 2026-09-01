@@ -421,6 +421,7 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		"CRQ_SCOPE":                  strings.Join(s.cfg.Scope, ","),
 		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
+		"CRQ_MAX_REVIEW_ROUNDS":      fmt.Sprint(s.cfg.MaxReviewRounds),
 		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),
 		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
 		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,

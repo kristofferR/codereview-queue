@@ -75,6 +75,9 @@ const (
 	// CapsExpiredRounds is the capability autoreview/autofix hosts need before
 	// the fleet may persist the terminal expired-round marker.
 	CapsExpiredRounds = crqstate.CapsExpiredRounds
+	// CapsReviewRoundBudget is required before the PR-wide reviewed-head cap is
+	// safe to enforce across the review and autofix fleet.
+	CapsReviewRoundBudget = crqstate.CapsReviewRoundBudget
 	// CapsPreflightSkipBlocked is the capability a host needs to honour the
 	// shared blocked-preflight policy.
 	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked

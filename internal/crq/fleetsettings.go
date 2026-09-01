@@ -861,6 +861,8 @@ func configValueOf(cfg Config, key string) string {
 		return cfg.WatchInterval.String()
 	case "CRQ_DISPATCH_MAX_ATTEMPTS":
 		return fmt.Sprint(cfg.DispatchMaxAttempts)
+	case "CRQ_MAX_REVIEW_ROUNDS":
+		return fmt.Sprint(cfg.MaxReviewRounds)
 	case "CRQ_DISPATCH_FORKS":
 		return boolString(cfg.DispatchForks)
 	case "CRQ_DISPATCH_CONCURRENCY":

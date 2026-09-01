@@ -40,6 +40,10 @@ type SolverSettings struct {
 	// MaxAttempts bounds fix sessions per head, so a fix that keeps not working
 	// stops. Nil inherits.
 	MaxAttempts *int `json:"max_attempts,omitempty"`
+	// MaxReviewRounds bounds distinct reviewed heads per pull request before crq
+	// holds it for human scope inspection. Nil inherits; zero explicitly makes
+	// the review loop unlimited.
+	MaxReviewRounds *int `json:"max_review_rounds,omitempty"`
 	// Severities limits which findings autofix hands to an agent. SetSeverities
 	// distinguishes an explicit empty selection ("fix nothing") from inherit.
 	Severities    []string `json:"severities,omitempty"`
@@ -89,7 +93,7 @@ type SolverSettings struct {
 func (s SolverSettings) Empty() bool {
 	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
 		!s.SetEffort && s.Effort == "" && !s.SetPrompt && s.Prompt == "" &&
-		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 &&
+		s.MaxAttempts == nil && s.MaxReviewRounds == nil && !s.SetSeverities && len(s.Severities) == 0 &&
 		!s.SetAskMode && s.AskMode == "" &&
 		s.Forks == nil && !s.SetSkipAuthors && !s.SetOnePass && s.OnePassCampaign == "" && !s.SetMerge &&
 		len(s.unknown) == 0
@@ -121,6 +125,9 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 	}
 	if over.MaxAttempts != nil {
 		out.MaxAttempts = over.MaxAttempts
+	}
+	if over.MaxReviewRounds != nil {
+		out.MaxReviewRounds = over.MaxReviewRounds
 	}
 	if over.SetSeverities || len(over.Severities) > 0 {
 		out.Severities = append([]string(nil), over.Severities...)

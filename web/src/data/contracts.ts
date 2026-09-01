@@ -192,6 +192,7 @@ export const RepoSolverSchema = Schema.Struct({
   effort: Optional(Schema.String),
   prompt: Optional(Schema.String),
   max_attempts: Schema.Number,
+  max_review_rounds: Optional(Schema.Number),
   severities: MutableArray(Schema.String),
   ask_mode: Schema.String,
   forks: Schema.Boolean,
@@ -202,6 +203,7 @@ export const RepoSolverSchema = Schema.Struct({
   by: Optional(Schema.String),
   lagging_hosts: Optional(MutableArray(Schema.String)),
   one_pass_lagging_hosts: Optional(MutableArray(Schema.String)),
+  review_budget_lagging_hosts: Optional(MutableArray(Schema.String)),
   agent_on: Optional(
     MutableArray(
       Schema.Struct({
@@ -359,6 +361,7 @@ export const FleetConfigSchema = Schema.Struct({
   reviewers: MutableArray(ReviewerCfgSchema),
   autofix_command: Optional(MutableArray(Schema.String)),
   autofix_max_attempts: Optional(Schema.Number),
+  max_review_rounds: Optional(Schema.Number),
   autofix_concurrency: Optional(Schema.Number),
   autofix_forks: Optional(Schema.Boolean),
   workspace_root: Optional(Schema.String),

@@ -709,12 +709,13 @@ func run(ctx context.Context, args []string) int {
 			out := serve.RepoSolver{
 				Overridden: v.Overridden, Agent: v.Agent, Models: v.Models, ModelChoices: v.ModelChoices,
 				Model: v.Model, Effort: v.Effort,
-				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
+				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, MaxReviewRounds: v.MaxReviewRounds, Forks: v.Forks,
 				Severities: v.Severities, AskMode: v.AskMode,
 				SkipAuthors: v.SkipAuthors, OnePass: v.OnePass, MergeMethod: v.MergeMethod,
 				Sources: v.Sources, By: v.By,
-				Lagging:        hostsOfWriters(v.Lagging),
-				OnePassLagging: hostsOfWriters(v.OnePassLagging),
+				Lagging:             hostsOfWriters(v.Lagging),
+				OnePassLagging:      hostsOfWriters(v.OnePassLagging),
+				ReviewBudgetLagging: hostsOfWriters(v.ReviewBudgetLagging),
 			}
 			// Which hosts can actually run the agent — capability, beside the
 			// policy, so a repository is never quietly set to something no
@@ -853,6 +854,7 @@ func run(ctx context.Context, args []string) int {
 
 				AutofixCommand:     cfg.DispatchCommand,
 				AutofixMaxAttempts: cfg.DispatchMaxAttempts,
+				MaxReviewRounds:    cfg.MaxReviewRounds,
 				AutofixConcurrency: cfg.DispatchConcurrency,
 				AutofixForks:       cfg.DispatchForks,
 				WorkspaceRoot:      cfg.WorkspaceRoot,
@@ -1376,9 +1378,9 @@ every agent rejects differently and none ignores.
 crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
                       [--severities <critical,major,potential,minor,unknown>]
                       [--ask blocked|uncertain|ambiguous]
-                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
+                      [--attempts <n>] [--rounds <n>] [--forks on|off] [--skip-authors <a,b>]
                       [--one-pass on|off] [--merge off|merge|squash|rebase]
-                      [--inherit models,effort,severities,ask,forks,skip-authors,one-pass,merge]
+                      [--inherit models,effort,severities,ask,rounds,forks,skip-authors,one-pass,merge]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1391,12 +1393,14 @@ this repository. .sources says which layer answered for each setting.
   --models        preferred model followed by ordered fallbacks
   --model         legacy spelling for a one-entry model ranking
   --effort        low | medium | high | xhigh | max
-	  --prompt        standing instruction appended to every fix session here
-	                  ("this project uses bun, never npm")
-	  --severities    only hand these finding severities to the agent
-	  --ask           when uncertainty becomes a dashboard clarification
+  --prompt        standing instruction appended to every fix session here
+                  ("this project uses bun, never npm")
+  --severities    only hand these finding severities to the agent
+  --ask           when uncertainty becomes a dashboard clarification
   --attempts      failed code-fix sessions per head before crq stops; provider
                   outages do not count; 0 inherits
+  --rounds        reviewed heads per PR before crq silently holds it for scope
+                  inspection; unhold grants another cycle; 0 is unlimited
   --forks         allow sessions on pull requests from another repository.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
@@ -3225,6 +3229,18 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				return 1
 			}
 			change.MaxAttempts = &n
+		case "--rounds":
+			hasMutation = true
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				fatal(fmt.Errorf("--rounds: %w", err))
+				return 1
+			}
+			change.MaxReviewRounds = &n
 		case "--forks":
 			hasMutation = true
 			v, ok := value()
@@ -3280,6 +3296,8 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetEffort = true
 				case "prompt":
 					change.UnsetPrompt = true
+				case "rounds", "review-rounds", "review_rounds":
+					change.UnsetMaxReviewRounds = true
 				case "severities":
 					change.UnsetSeverities = true
 				case "ask", "ask-mode", "ask_mode":
@@ -3293,7 +3311,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				case "merge", "merge-method", "merge_method":
 					change.UnsetMerge = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors, one-pass, merge)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, rounds, severities, ask, forks, skip-authors, one-pass, merge)", field))
 					return 1
 				}
 			}
@@ -3370,15 +3388,16 @@ func validateSolverTarget(repo string, fleet bool) error {
 func (a prActor) SetSolver(ctx context.Context, repo string, change serve.SolverChange) error {
 	c := crq.SolverChange{
 		Models: change.Models, Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
-		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
+		MaxAttempts: change.MaxAttempts, MaxReviewRounds: change.MaxReviewRounds, Forks: change.Forks,
 		Severities: change.Severities, AskMode: change.AskMode,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
 		OnePass: change.OnePass, MergeMethod: change.MergeMethod,
 		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
 		UnsetPrompt: change.UnsetPrompt, UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
-		UnsetForks:       change.UnsetForks,
-		UnsetSkipAuthors: change.UnsetSkipAuthors,
-		UnsetOnePass:     change.UnsetOnePass, UnsetMerge: change.UnsetMerge,
+		UnsetMaxReviewRounds: change.UnsetMaxReviewRounds,
+		UnsetForks:           change.UnsetForks,
+		UnsetSkipAuthors:     change.UnsetSkipAuthors,
+		UnsetOnePass:         change.UnsetOnePass, UnsetMerge: change.UnsetMerge,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's
 	// --fleet flag expresses.

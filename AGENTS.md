@@ -60,6 +60,9 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   generic reviewer activity and completed-review evidence separately after the
   bounded round archive is evicted. They currently have no automatic pruning
   rule, so their state footprint grows with the number of reviewed PRs.
+  `ReviewedHeads` is the per-PR, distinct-head ledger behind the incremental
+  review circuit breaker. Closed/merged PRs clear it; an automatic budget hold
+  keeps it until explicit unhold resets the next cycle.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

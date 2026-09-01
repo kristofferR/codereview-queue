@@ -156,10 +156,11 @@ func (c CoReviewer) matchesCommand(trimmed string) bool {
 func KnownCoReviewers() []CoReviewer {
 	return []CoReviewer{
 		{
-			Login:   CodexBotLogin,
-			Name:    "codex",
-			Command: "@codex review",
-			Budget:  BudgetNone,
+			Login:          CodexBotLogin,
+			Name:           "codex",
+			Command:        CodexReviewCommand,
+			TriggerAliases: []string{"@codex review"},
+			Budget:         BudgetNone,
 			// Codex predates the registry: its command env var is still read,
 			// and it only ever triggered at fire time when required.
 			LegacyCommandEnv: "CRQ_CODEX_CMD",

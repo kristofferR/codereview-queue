@@ -453,7 +453,7 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 		t.Fatalf("CoBots = %#v, want the three that were named", cfg.CoBots)
 	}
 	codex, _ := coBotByName(cfg, "codex")
-	if codex.Trigger != engine.TriggerNever || codex.Command != "@codex review" || codex.Required {
+	if codex.Trigger != engine.TriggerNever || codex.Command != dialect.CodexReviewCommand || codex.Required {
 		t.Fatalf("codex defaults wrong: %+v", codex)
 	}
 
@@ -481,6 +481,24 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	// Wanted-only bots never fold into RequiredBots.
 	if len(cfg.RequiredBots) != 1 {
 		t.Fatalf("RequiredBots must stay CodeRabbit-only by default: %#v", cfg.RequiredBots)
+	}
+}
+
+func TestLoadConfigReviewRoundsAreBounded(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{{"", 5}, {"0", 0}, {"7", 7}, {"21", 5}, {"bad", 5}} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("CRQ_MAX_REVIEW_ROUNDS", tc.value)
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MaxReviewRounds != tc.want {
+				t.Fatalf("MaxReviewRounds = %d, want %d", cfg.MaxReviewRounds, tc.want)
+			}
+		})
 	}
 }
 

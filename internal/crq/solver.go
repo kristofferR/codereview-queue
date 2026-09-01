@@ -23,18 +23,19 @@ type SolverView struct {
 	// and effort below are being handed to.
 	Agent string `json:"agent,omitempty"`
 
-	Models       []string `json:"models"`
-	ModelChoices []string `json:"model_choices"`
-	Model        string   `json:"model,omitempty"`
-	Effort       string   `json:"effort,omitempty"`
-	Prompt       string   `json:"prompt,omitempty"`
-	MaxAttempts  int      `json:"max_attempts"`
-	Severities   []string `json:"severities"`
-	AskMode      string   `json:"ask_mode"`
-	Forks        bool     `json:"forks"`
-	SkipAuthors  []string `json:"skip_authors"`
-	OnePass      bool     `json:"one_pass"`
-	MergeMethod  string   `json:"merge_method,omitempty"`
+	Models          []string `json:"models"`
+	ModelChoices    []string `json:"model_choices"`
+	Model           string   `json:"model,omitempty"`
+	Effort          string   `json:"effort,omitempty"`
+	Prompt          string   `json:"prompt,omitempty"`
+	MaxAttempts     int      `json:"max_attempts"`
+	MaxReviewRounds int      `json:"max_review_rounds"`
+	Severities      []string `json:"severities"`
+	AskMode         string   `json:"ask_mode"`
+	Forks           bool     `json:"forks"`
+	SkipAuthors     []string `json:"skip_authors"`
+	OnePass         bool     `json:"one_pass"`
+	MergeMethod     string   `json:"merge_method,omitempty"`
 
 	// Sources says, per setting, whether the value came from this repository's
 	// record, the fleet default, or this host's env.
@@ -45,6 +46,9 @@ type SolverView struct {
 	// OnePassLagging is reported even before a campaign is active so clients
 	// cannot offer an activation that some live review/fix host will ignore.
 	OnePassLagging []string `json:"one_pass_lagging_hosts,omitempty"`
+	// ReviewBudgetLagging names live schedulers/fixers that would ignore the
+	// cross-head circuit breaker during a rolling upgrade.
+	ReviewBudgetLagging []string `json:"review_budget_lagging_hosts,omitempty"`
 }
 
 // Solver reports how repo's fix sessions will run.
@@ -69,7 +73,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		Repo: repo, Overridden: has && !own.Empty(),
 		Models: append([]string{}, cfg.FixModels...),
 		Model:  cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
-		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
+		MaxAttempts: cfg.DispatchMaxAttempts, MaxReviewRounds: cfg.MaxReviewRounds, Forks: cfg.DispatchForks,
 		Severities: sortedKeys(cfg.FixSeverities), AskMode: cfg.FixAskMode,
 		SkipAuthors: sortedKeys(cfg.SkipAuthors),
 		OnePass:     cfg.OnePass, MergeMethod: cfg.MergeMethod,
@@ -95,6 +99,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		fleet.SetEffort || fleet.Effort != "")
 	source("prompt", own.SetPrompt || own.Prompt != "", fleet.SetPrompt || fleet.Prompt != "")
 	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
+	source("max_review_rounds", own.MaxReviewRounds != nil, fleet.MaxReviewRounds != nil)
 	source("severities", own.SetSeverities || len(own.Severities) > 0,
 		fleet.SetSeverities || len(fleet.Severities) > 0)
 	source("ask_mode", own.SetAskMode || own.AskMode != "",
@@ -123,6 +128,11 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	view.OnePassLagging = st.LaggingRoleWriters(
 		CapsOnePass, s.clock().UTC(), "autoreview", "autofix",
 	)
+	if cfg.MaxReviewRounds > 0 {
+		view.ReviewBudgetLagging = st.LaggingRoleWriters(
+			CapsReviewRoundBudget, s.clock().UTC(), "autoreview", "autofix",
+		)
+	}
 	if has && own.UpdatedAt != nil {
 		view.By = own.By
 		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -175,30 +185,32 @@ func modelChoicesFor(agent string, selected []string) []string {
 // SolverChange is a proposed edit. Absent fields are left alone, so a form
 // posting its whole state cannot clobber a setting changed a second earlier.
 type SolverChange struct {
-	Models      []string `json:"models"`
-	Model       *string  `json:"model"`
-	Effort      *string  `json:"effort"`
-	Prompt      *string  `json:"prompt"`
-	MaxAttempts *int     `json:"max_attempts"`
-	Severities  []string `json:"severities"`
-	AskMode     *string  `json:"ask_mode"`
-	Forks       *bool    `json:"forks"`
-	SkipAuthors []string `json:"skip_authors"`
-	OnePass     *bool    `json:"one_pass"`
-	MergeMethod *string  `json:"merge_method"`
+	Models          []string `json:"models"`
+	Model           *string  `json:"model"`
+	Effort          *string  `json:"effort"`
+	Prompt          *string  `json:"prompt"`
+	MaxAttempts     *int     `json:"max_attempts"`
+	MaxReviewRounds *int     `json:"max_review_rounds"`
+	Severities      []string `json:"severities"`
+	AskMode         *string  `json:"ask_mode"`
+	Forks           *bool    `json:"forks"`
+	SkipAuthors     []string `json:"skip_authors"`
+	OnePass         *bool    `json:"one_pass"`
+	MergeMethod     *string  `json:"merge_method"`
 	// Unset* hands ONE setting back to the layer beneath, the same instruction
 	// FleetChange's Unset* fields carry. An empty model ranking and an empty
 	// effort both mean "use the agent default", false is a real fork policy, and
 	// an empty author list is "skip nobody", so none can also mean inheritance.
-	UnsetModels      bool `json:"unset_models,omitempty"`
-	UnsetEffort      bool `json:"unset_effort,omitempty"`
-	UnsetPrompt      bool `json:"unset_prompt,omitempty"`
-	UnsetSeverities  bool `json:"unset_severities,omitempty"`
-	UnsetAskMode     bool `json:"unset_ask_mode,omitempty"`
-	UnsetForks       bool `json:"unset_forks,omitempty"`
-	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
-	UnsetOnePass     bool `json:"unset_one_pass,omitempty"`
-	UnsetMerge       bool `json:"unset_merge,omitempty"`
+	UnsetModels          bool `json:"unset_models,omitempty"`
+	UnsetEffort          bool `json:"unset_effort,omitempty"`
+	UnsetPrompt          bool `json:"unset_prompt,omitempty"`
+	UnsetMaxReviewRounds bool `json:"unset_max_review_rounds,omitempty"`
+	UnsetSeverities      bool `json:"unset_severities,omitempty"`
+	UnsetAskMode         bool `json:"unset_ask_mode,omitempty"`
+	UnsetForks           bool `json:"unset_forks,omitempty"`
+	UnsetSkipAuthors     bool `json:"unset_skip_authors,omitempty"`
+	UnsetOnePass         bool `json:"unset_one_pass,omitempty"`
+	UnsetMerge           bool `json:"unset_merge,omitempty"`
 	// Clear drops the whole record, returning every setting to the fleet default.
 	Clear bool `json:"clear"`
 }
@@ -417,6 +429,15 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		} else {
 			sv.MaxAttempts = &n
 		}
+	}
+	if change.UnsetMaxReviewRounds {
+		sv.MaxReviewRounds = nil
+	} else if change.MaxReviewRounds != nil {
+		n := *change.MaxReviewRounds
+		if n < 0 || n > 20 {
+			return sv, errors.New("max review rounds must be between 0 and 20")
+		}
+		sv.MaxReviewRounds = &n
 	}
 	if change.UnsetSeverities {
 		sv.Severities, sv.SetSeverities = nil, false

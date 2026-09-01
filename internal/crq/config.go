@@ -83,6 +83,9 @@ type Config struct {
 	// which is not the same as any particular agent.
 	FixAgent            string
 	DispatchMaxAttempts int
+	// MaxReviewRounds bounds distinct reviewed heads across the whole pull
+	// request. Zero disables the circuit breaker.
+	MaxReviewRounds int
 	// FixModels/FixEffort/FixPrompt are the per-repository solver settings, put
 	// into the fix session's ENVIRONMENT rather than its argv. Argv is fixed
 	// when the watcher starts; the environment is built per dispatch, which is
@@ -371,6 +374,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FixSeverities:       fixSeverities,
 		FixAskMode:          askModeEnv(env["CRQ_FIX_ASK"]),
 		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
+		MaxReviewRounds:     boundedIntEnv(env, "CRQ_MAX_REVIEW_ROUNDS", 5, 0, 20),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
@@ -536,6 +540,14 @@ func intEnv(env map[string]string, key string, fallback int) int {
 func positiveIntEnv(env map[string]string, key string, fallback int) int {
 	n := intEnv(env, key, fallback)
 	if n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func boundedIntEnv(env map[string]string, key string, fallback, min, max int) int {
+	n := intEnv(env, key, fallback)
+	if n < min || n > max {
 		return fallback
 	}
 	return n

@@ -69,9 +69,10 @@ type Service struct {
 	// may legitimately keep waiting or remain unreadable; neither may monopolize
 	// the single observation every pump budgets for this cleanup.
 	lastReviewSweep string
-	// lastClosedSweep rotates the one terminal round retireClosedRounds inspects
-	// per repository. Completed/expired rounds stay as dedupe markers, so
-	// checking all of them on every watch pass would grow with repository age.
+	// lastClosedSweep rotates the one terminal PR retireClosedRounds inspects per
+	// repository. Completed/expired rounds and durable per-PR indexes can both
+	// outlive the archive, so checking all of them on every watch pass would grow
+	// with repository age.
 	lastClosedSweep map[string]int
 	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
 	// starved of dispatch slots forever by the ones ahead of it; in-memory only,

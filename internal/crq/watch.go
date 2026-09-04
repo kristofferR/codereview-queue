@@ -1860,7 +1860,8 @@ func sessionLogTimestamp(name string) string {
 // from a merely closed PR, whose evidence must survive a possible reopen.
 func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
 	key := NormalizeRepo(repo)
-	var stale, terminal []Round
+	var stale []Round
+	terminal := map[int]Round{}
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
@@ -1872,26 +1873,53 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		if r.Active() {
 			stale = append(stale, r)
 		} else {
-			terminal = append(terminal, r)
+			terminal[r.PR] = r
+		}
+	}
+	// During a rolling upgrade, an older writer can rebuild these indexes from
+	// an archived merged round and later evict that round. Include index-only PRs
+	// so the bounded sweep can rediscover the merge and finish the retirement.
+	for _, index := range []map[string]map[string]time.Time{st.CoActivity, st.CoAnswers} {
+		for candidate := range index {
+			candidateRepo, pr, ok := parseHoldKey(candidate)
+			if !ok || NormalizeRepo(candidateRepo) != key || open[pr] {
+				continue
+			}
+			if st.Round(candidateRepo, pr) == nil {
+				terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
+			}
+		}
+	}
+	for candidate := range st.ReviewedHeads {
+		candidateRepo, pr, ok := parseHoldKey(candidate)
+		if !ok || NormalizeRepo(candidateRepo) != key || open[pr] {
+			continue
+		}
+		if st.Round(candidateRepo, pr) == nil {
+			terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
 		}
 	}
 	// Active work is bounded by the live queue and should be retired promptly.
-	// Terminal rounds are historical dedupe markers and grow without bound, so
-	// inspect only one per repository and rotate across passes.
-	sort.Slice(terminal, func(i, j int) bool { return terminal[i].PR < terminal[j].PR })
-	if len(terminal) > 0 {
+	// Terminal PR evidence grows without bound, so inspect only one per
+	// repository and rotate across passes.
+	terminalPRs := make([]int, 0, len(terminal))
+	for pr := range terminal {
+		terminalPRs = append(terminalPRs, pr)
+	}
+	sort.Ints(terminalPRs)
+	if len(terminalPRs) > 0 {
 		if s.lastClosedSweep == nil {
 			s.lastClosedSweep = map[string]int{}
 		}
-		next := terminal[0]
-		for _, r := range terminal {
-			if r.PR > s.lastClosedSweep[key] {
-				next = r
+		next := terminalPRs[0]
+		for _, pr := range terminalPRs {
+			if pr > s.lastClosedSweep[key] {
+				next = pr
 				break
 			}
 		}
-		s.lastClosedSweep[key] = next.PR
-		stale = append(stale, next)
+		s.lastClosedSweep[key] = next
+		stale = append(stale, terminal[next])
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
 	var failures []error
@@ -1908,20 +1936,25 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		if pull.State == "open" && !pull.Merged {
 			continue
 		}
-		reason := NoteMerged
-		if !pull.Merged {
-			// Preserve completed markers and in-flight work for a merely closed PR:
-			// unlike a merge, it may reopen under changed reviewer requirements.
-			if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
-				continue
+		if pull.Merged {
+			if err := s.retireMerged(ctx, r.Repo, r.PR); err != nil && !errors.Is(err, ErrNoChange) {
+				return err
 			}
-			reason = "pr closed"
+			if s.log != nil {
+				s.log.Printf("watch: %s#%d left the queue: %s", r.Repo, r.PR, NoteMerged)
+			}
+			continue
 		}
-		if _, err := s.abandonRound(ctx, r, reason, "skipped"); err != nil {
+		// Preserve completed markers and in-flight work for a merely closed PR:
+		// unlike a merge, it may reopen under changed reviewer requirements.
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		if _, err := s.abandonRound(ctx, r, "pr closed", "skipped"); err != nil {
 			return err
 		}
 		if s.log != nil {
-			s.log.Printf("watch: %s#%d left the queue: %s", r.Repo, r.PR, reason)
+			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
 		}
 	}
 	if s.cfg.DryRun {

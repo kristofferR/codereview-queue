@@ -142,6 +142,82 @@ func TestRetireClosedRoundsBoundsHistoricalPullReads(t *testing.T) {
 	}
 }
 
+func TestRetireClosedRoundsIncludesIndexOnlyMergedPRs(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 4
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		// This is the state left when an older rolling-upgrade peer resurrects
+		// evidence from a merged archive entry and that entry is later evicted.
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoAnswers = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		st.CoAnswers[key] = map[string]time.Time{"cursor": now}
+		st.ReviewedHeads[key] = []string{"abcdef123"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.CoActivity[key]; ok {
+		t.Fatal("merged PR kept its index-only activity evidence")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its index-only answer evidence")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its index-only review ledger")
+	}
+	if got := gh.pullReads[fakeKey(repo, pr)]; got != 1 {
+		t.Fatalf("index-only PR reads = %d, want 1", got)
+	}
+}
+
+func TestRetireClosedRoundsPreservesIndexOnlyClosedPRs(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 5
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CoActivity[key]["cursor"]; !got.Equal(now) {
+		t.Fatalf("closed PR activity = %v, want %v", got, now)
+	}
+}
+
 func TestRetireClosedRoundsContinuesAfterUnreadablePR(t *testing.T) {
 	ctx := context.Background()
 	repo := "owner/thing"

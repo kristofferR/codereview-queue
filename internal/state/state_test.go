@@ -940,3 +940,26 @@ func TestNormalizeStillRebuildsIndexesForClosedUnmergedPR(t *testing.T) {
 		t.Fatalf("closed PR activity = %v, want %v (a closed PR may reopen)", got, seen)
 	}
 }
+
+func TestNormalizeRecognizesLegacyMergedNote(t *testing.T) {
+	seen := t0.Add(time.Second)
+	key := Key("owner/repo", 23)
+	s := State{
+		Archive: []Round{{Repo: "owner/repo", PR: 23, Head: "abcdef123", Phase: PhaseAbandoned, Note: "pr merged",
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}},
+		CoActivity: map[string]map[string]time.Time{key: {"cursor": seen}},
+		CoAnswers:  map[string]map[string]time.Time{key: {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if !s.Archive[0].Merged() {
+		t.Fatal("legacy merge note was not recognized")
+	}
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize kept activity for a legacy merged PR")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize kept answers for a legacy merged PR")
+	}
+}

@@ -570,6 +570,9 @@ func (s *Service) RetireMergedVerified(ctx context.Context, repo string, pr int)
 }
 
 func (s *Service) retireMerged(ctx context.Context, repo string, pr int) error {
+	if s.cfg.DryRun {
+		return nil
+	}
 	repo = NormalizeRepo(repo)
 	st, err := s.store.Update(ctx, func(st *State) error {
 		changed := false
@@ -578,17 +581,6 @@ func (s *Service) retireMerged(ctx context.Context, repo string, pr int) error {
 			st.EndRound(repo, pr, NoteMerged)
 			releaseSlot(st, QueueKey(repo, pr), token)
 			changed = true
-		} else {
-			for i := len(st.Archive) - 1; i >= 0; i-- {
-				round := &st.Archive[i]
-				if NormalizeRepo(round.Repo) != repo || round.PR != pr {
-					continue
-				}
-				if !round.Merged() {
-					round.Abandon(NoteMerged)
-					changed = true
-				}
-			}
 		}
 		if st.ClearOnePassProgress(repo, pr) {
 			changed = true

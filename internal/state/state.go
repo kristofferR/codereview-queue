@@ -1324,27 +1324,36 @@ func (s *State) ClearReviewBudget(repo string, pr int) {
 // request, so evidence kept for a possible reopen can be retired with it.
 const NoteMerged = "merged"
 
+const legacyNoteMerged = "pr merged"
+
 // Merged reports whether the round ended because its pull request merged.
 func (r Round) Merged() bool {
-	return r.Phase == PhaseAbandoned && r.Note == NoteMerged
+	return r.Phase == PhaseAbandoned && (r.Note == NoteMerged || r.Note == legacyNoteMerged)
 }
 
 // RetireMerged forgets what crq keeps per pull request once it merged: the
 // review-round ledger and the co-reviewer activity and answer indexes. Those
 // indexes are unbounded precisely so a closed PR can reopen with its evidence
 // intact; a merged one cannot, so keeping them would only grow the state ref
-// for ever. Call it after the round has been ended, since archiving a round
-// folds its activity back into the indexes. Reports whether anything was
-// removed.
+// for ever. Matching archive entries are marked first so Normalize cannot
+// rebuild the retired indexes. Reports whether anything changed.
 func (s *State) RetireMerged(repo string, pr int) bool {
 	key := Key(repo, pr)
 	_, ledger := s.ReviewedHeads[key]
 	_, activity := s.CoActivity[key]
 	_, answers := s.CoAnswers[key]
+	changed := ledger || activity || answers
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && !round.Merged() {
+			round.Abandon(NoteMerged)
+			changed = true
+		}
+	}
 	delete(s.ReviewedHeads, key)
 	delete(s.CoActivity, key)
 	delete(s.CoAnswers, key)
-	return ledger || activity || answers
+	return changed
 }
 
 // mergedKeys lists the pull requests whose archived rounds record a merge.

@@ -2234,6 +2234,47 @@ func TestPumpDryRunDoesNotSweepReviewing(t *testing.T) {
 	}
 }
 
+func TestPumpDryRunDoesNotRetireMergedSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, time.Now().UTC(), 5)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.RememberCoAnswer("owner/repo", 12, "cursor[bot]", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" {
+		t.Fatalf("dry-run merged slot result = %#v, want cleared preview", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseFired {
+		t.Fatalf("dry-run retired the merged round: %#v", round)
+	}
+	if st.FireSlot == nil {
+		t.Fatal("dry-run released the merged round's fire slot")
+	}
+	if !st.CoReviewerAnswered("owner/repo", 12, "cursor[bot]") {
+		t.Fatal("dry-run deleted the merged PR's reviewer evidence")
+	}
+	if len(st.Archive) != 0 {
+		t.Fatalf("dry-run archived the merged round: %+v", st.Archive)
+	}
+}
+
 func TestPumpTreatsExistingReviewAdoptionRaceAsLostRace(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
@@ -3016,6 +3057,10 @@ func TestPumpRemovesMergedHoldWithoutARound(t *testing.T) {
 	service := NewService(cfg, gh, store, nil)
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.Hold("owner/repo", 62, "waiting on a decision", "operator", time.Now().UTC())
+		st.Archive = append(st.Archive, Round{
+			Repo: "owner/repo", PR: 62, Head: "abcdef123", Phase: PhaseAbandoned, Note: "pr closed",
+		})
+		st.RememberCoAnswer("owner/repo", 62, "cursor[bot]", time.Now().UTC())
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -3034,6 +3079,12 @@ func TestPumpRemovesMergedHoldWithoutARound(t *testing.T) {
 	}
 	if _, held := st.HeldPR("owner/repo", 62); held {
 		t.Fatal("merged PR's standalone hold was not removed")
+	}
+	if len(st.Archive) != 1 || !st.Archive[0].Merged() {
+		t.Fatalf("standalone hold did not mark archived history as merged: %+v", st.Archive)
+	}
+	if st.CoReviewerAnswered("owner/repo", 62, "cursor[bot]") {
+		t.Fatal("standalone hold cleanup kept the merged PR's reviewer evidence")
 	}
 }
 

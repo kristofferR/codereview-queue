@@ -1860,7 +1860,7 @@ func sessionLogTimestamp(name string) string {
 // from a merely closed PR, whose evidence must survive a possible reopen.
 func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
 	key := NormalizeRepo(repo)
-	var stale []Round
+	var stale, terminal []Round
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
@@ -1869,15 +1869,40 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		if NormalizeRepo(r.Repo) != key || open[r.PR] {
 			continue
 		}
-		stale = append(stale, r)
+		if r.Active() {
+			stale = append(stale, r)
+		} else {
+			terminal = append(terminal, r)
+		}
 	}
-	// Ordered, so a pass that is interrupted has done a prefix of the work
-	// rather than an arbitrary subset.
+	// Active work is bounded by the live queue and should be retired promptly.
+	// Terminal rounds are historical dedupe markers and grow without bound, so
+	// inspect only one per repository and rotate across passes.
+	sort.Slice(terminal, func(i, j int) bool { return terminal[i].PR < terminal[j].PR })
+	if len(terminal) > 0 {
+		if s.lastClosedSweep == nil {
+			s.lastClosedSweep = map[string]int{}
+		}
+		next := terminal[0]
+		for _, r := range terminal {
+			if r.PR > s.lastClosedSweep[key] {
+				next = r
+				break
+			}
+		}
+		s.lastClosedSweep[key] = next.PR
+		stale = append(stale, next)
+	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
+	var failures []error
 	for _, r := range stale {
 		pull, err := s.gh.GetPull(ctx, r.Repo, r.PR)
 		if err != nil {
-			return err
+			if abortsPass(err) || ctx.Err() != nil {
+				return err
+			}
+			failures = append(failures, fmt.Errorf("%s#%d: %w", r.Repo, r.PR, err))
+			continue
 		}
 		// The PR may have reopened since the pass listed it.
 		if pull.State == "open" && !pull.Merged {
@@ -1900,7 +1925,7 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 	}
 	if s.cfg.DryRun {
-		return nil
+		return errors.Join(failures...)
 	}
 	var invalidated []int
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -1921,7 +1946,7 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 			s.log.Printf("watch: %s#%d retired its one-pass merge hand-off: pr closed", repo, pr)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // noteSessionDetail records what a running session is working on, for the

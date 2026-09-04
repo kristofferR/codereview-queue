@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,80 @@ func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
 	}
 	if r := st.Round(repo, 1); r == nil || !r.Active() {
 		t.Errorf("the open PR's round was retired too: %+v", r)
+	}
+}
+
+func TestRetireClosedRoundsBoundsHistoricalPullReads(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	for pr := 1; pr <= 3; pr++ {
+		seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, int64(pr))
+		gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed"}
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	for pr := 1; pr <= 3; pr++ {
+		reads += gh.pullReads[fakeKey(repo, pr)]
+	}
+	if reads != 1 {
+		t.Fatalf("historical pull reads in one pass = %d, want 1", reads)
+	}
+
+	for range 2 {
+		if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for pr := 1; pr <= 3; pr++ {
+		if got := gh.pullReads[fakeKey(repo, pr)]; got != 1 {
+			t.Errorf("PR %d reads after one rotation = %d, want 1", pr, got)
+		}
+	}
+}
+
+func TestRetireClosedRoundsContinuesAfterUnreadablePR(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey(repo, 1)] = errors.New("repository unavailable")
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, 1, "aaaaaaaaa", PhaseQueued, now, 0)
+	seedRound(t, store, cfg, repo, 2, "bbbbbbbbb", PhaseQueued, now, 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, 3, "ccccccccc", "basebase1", "test", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := svc.retireClosedRounds(ctx, repo, map[int]bool{})
+	if err == nil || !errors.Is(err, gh.pullErrs[fakeKey(repo, 1)]) {
+		t.Fatalf("retire error = %v, want the unreadable PR reported", err)
+	}
+	st, _, loadErr := store.Load(ctx)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if st.Round(repo, 1) == nil {
+		t.Fatal("unreadable PR was retired without evidence")
+	}
+	if st.Round(repo, 2) != nil {
+		t.Fatal("merged PR after the unreadable one was not retired")
+	}
+	if progress, ok := st.OnePassProgressFor(repo, 3); !ok || progress.ReadyHead != "" {
+		t.Fatalf("closed one-pass hand-off was not invalidated after the pull-read failure: %+v", progress)
 	}
 }
 

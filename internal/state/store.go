@@ -96,6 +96,10 @@ func (c StoreConfig) requireDashboard() error {
 type Revision struct {
 	CommitSHA string
 	TreeSHA   string
+
+	// normalizedMergedEvidence is set when loading removed per-PR evidence for
+	// an archived merge. It is process-local metadata, not persisted state.
+	normalizedMergedEvidence bool
 }
 
 // StateStore is the persistence surface crq consumes. Load reads the current
@@ -282,7 +286,7 @@ func (s *GitStateStore) decodeState(raw []byte, rev Revision) (State, Revision, 
 		return State{}, Revision{}, s.refuse("holds a v"+strconv.Itoa(probe.Version)+" payload this binary cannot decode", err)
 	}
 	st.Version = SchemaVersion
-	st.Normalize(time.Now().UTC())
+	rev.normalizedMergedEvidence = st.normalize(time.Now().UTC())
 	return st, rev, nil
 }
 
@@ -314,10 +318,12 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 			return State{}, err
 		}
 		if err := mutate(&st); err != nil {
-			if errors.Is(err, ErrNoChange) {
+			if errors.Is(err, ErrNoChange) && !rev.normalizedMergedEvidence {
 				return st, nil
 			}
-			return State{}, err
+			if !errors.Is(err, ErrNoChange) {
+				return State{}, err
+			}
 		}
 		now := time.Now().UTC()
 		st.Rev++

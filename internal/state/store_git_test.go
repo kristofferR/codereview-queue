@@ -50,6 +50,15 @@ func TestRunGitForcesStableDiagnosticLocale(t *testing.T) {
 
 func seedGitStateRemote(t *testing.T) (string, State) {
 	t.Helper()
+	st := New()
+	st.Account.Scope = "owner"
+	st.Account.Source = "seed"
+	st.Normalize(time.Now().UTC())
+	return seedGitStateRemoteWithState(t, st), st
+}
+
+func seedGitStateRemoteWithState(t *testing.T, st State) string {
+	t.Helper()
 	root := t.TempDir()
 	remote := filepath.Join(root, "state.git")
 	work := filepath.Join(root, "seed")
@@ -58,10 +67,6 @@ func seedGitStateRemote(t *testing.T) (string, State) {
 	mustGit(t, "-C", work, "config", "user.name", "seed")
 	mustGit(t, "-C", work, "config", "user.email", "seed@example.invalid")
 
-	st := New()
-	st.Account.Scope = "owner"
-	st.Account.Source = "seed"
-	st.Normalize(time.Now().UTC())
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +83,7 @@ func seedGitStateRemote(t *testing.T) (string, State) {
 	mustGit(t, "-C", work, "add", statePath, dashboardPath, "preserve.txt")
 	mustGit(t, "-C", work, "commit", "--quiet", "-m", "seed state")
 	mustGit(t, "-C", work, "push", "--quiet", remote, "HEAD:refs/heads/crq-state-v3")
-	return remote, st
+	return remote
 }
 
 func newGitFallbackTestStore(t *testing.T, remote string) *GitStateStore {
@@ -137,6 +142,44 @@ func TestGitFallbackLoadsAndUpdatesStateRef(t *testing.T) {
 	}
 	if got := mustGit(t, "--git-dir", remote, "show", "-s", "--format=%an <%ae>", "refs/heads/crq-state-v3"); got != gitStateAuthorName+" <"+gitStateAuthorEmail+">" {
 		t.Fatalf("state commit identity = %q, want public noreply identity", got)
+	}
+}
+
+func TestGitFallbackUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testing.T) {
+	t.Setenv(gitFallbackEnv, "1")
+	key := Key("owner/repo", 21)
+	merged := New()
+	merged.Archive = []Round{{
+		Repo: "owner/repo", PR: 21, Head: "abcdef123", Phase: PhaseAbandoned, Note: NoteMerged,
+	}}
+	merged.ReviewedHeads = map[string][]string{key: {"abcdef123"}}
+	merged.CoActivity = map[string]map[string]time.Time{key: {"cursor": time.Now().UTC()}}
+	merged.CoAnswers = map[string]map[string]time.Time{key: {"cursor": time.Now().UTC()}}
+	remote := seedGitStateRemoteWithState(t, merged)
+	store := newGitFallbackTestStore(t, remote)
+	before := mustGit(t, "--git-dir", remote, "rev-parse", "refs/heads/crq-state-v3")
+
+	if _, err := store.Update(context.Background(), func(*State) error { return ErrNoChange }); err != nil {
+		t.Fatal(err)
+	}
+	after := mustGit(t, "--git-dir", remote, "rev-parse", "refs/heads/crq-state-v3")
+	if after == before {
+		t.Fatal("ErrNoChange mutation did not persist normalized merged retirement")
+	}
+
+	raw := mustGit(t, "--git-dir", remote, "show", "refs/heads/crq-state-v3:"+statePath)
+	var persisted State
+	if err := json.Unmarshal([]byte(raw), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.ReviewedHeads[key]; ok {
+		t.Fatal("persisted state kept the merged PR review ledger")
+	}
+	if _, ok := persisted.CoActivity[key]; ok {
+		t.Fatal("persisted state kept the merged PR activity index")
+	}
+	if _, ok := persisted.CoAnswers[key]; ok {
+		t.Fatal("persisted state kept the merged PR answer index")
 	}
 }
 

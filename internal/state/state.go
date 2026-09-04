@@ -2547,6 +2547,13 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
 // do), and a FireSlot no round holds and no orphaned hold keeps alive.
 func (s *State) Normalize(now time.Time) {
+	s.normalize(now)
+}
+
+// normalize reports whether it retired merged-PR evidence while repairing the
+// loaded state. The git store uses that signal to persist this specific repair
+// even when the requested mutation is otherwise a no-op.
+func (s *State) normalize(now time.Time) (retiredMergedEvidence bool) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
 	}
@@ -2608,6 +2615,15 @@ func (s *State) Normalize(now time.Time) {
 	// on purpose and must not be resurrected from their own archived rounds.
 	merged := s.mergedKeys()
 	for key := range merged {
+		if _, ok := s.ReviewedHeads[key]; ok {
+			retiredMergedEvidence = true
+		}
+		if _, ok := s.CoActivity[key]; ok {
+			retiredMergedEvidence = true
+		}
+		if _, ok := s.CoAnswers[key]; ok {
+			retiredMergedEvidence = true
+		}
 		delete(s.ReviewedHeads, key)
 		delete(s.CoActivity, key)
 		delete(s.CoAnswers, key)
@@ -2660,6 +2676,7 @@ func (s *State) Normalize(now time.Time) {
 			s.NoteReviewedHead(current.Repo, current.PR, current.Head)
 		}
 	}
+	return retiredMergedEvidence
 }
 
 func roundHasReviewEvidence(r Round) bool {

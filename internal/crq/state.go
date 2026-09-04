@@ -50,6 +50,7 @@ const (
 	PhaseCompleted     = crqstate.PhaseCompleted
 	PhaseExpired       = crqstate.PhaseExpired
 	PhaseAbandoned     = crqstate.PhaseAbandoned
+	NoteMerged         = crqstate.NoteMerged
 
 	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
 	DispatchTTL = crqstate.DispatchTTL

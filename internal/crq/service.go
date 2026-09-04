@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"sort"
 	"strings"
@@ -3261,12 +3262,12 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 			return ErrNoChange
 		}
 		current.Unhold(repo, pr)
-		current.ClearReviewBudget(repo, pr)
 		if round := current.Round(repo, pr); round != nil {
 			token := round.Token
-			current.EndRound(repo, pr, "pr merged")
+			current.EndRound(repo, pr, NoteMerged)
 			releaseSlot(current, QueueKey(repo, pr), token)
 		}
+		current.RetireMerged(repo, pr)
 		removed = true
 		return nil
 	})
@@ -3334,14 +3335,16 @@ func withoutMergedHold(st State, repo string, pr int) State {
 	for key, heads := range st.ReviewedHeads {
 		updated.ReviewedHeads[key] = append([]string(nil), heads...)
 	}
+	updated.CoActivity = maps.Clone(st.CoActivity)
+	updated.CoAnswers = maps.Clone(st.CoAnswers)
 
 	updated.Unhold(repo, pr)
-	updated.ClearReviewBudget(repo, pr)
 	if round := updated.Round(repo, pr); round != nil {
 		token := round.Token
-		updated.EndRound(repo, pr, "pr merged")
+		updated.EndRound(repo, pr, NoteMerged)
 		releaseSlot(&updated, QueueKey(repo, pr), token)
 	}
+	updated.RetireMerged(repo, pr)
 	return updated
 }
 

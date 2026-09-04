@@ -574,7 +574,7 @@ func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) 
 	st, err := s.store.Update(ctx, func(st *State) error {
 		changed := false
 		if st.Round(repo, pr) != nil {
-			st.EndRound(repo, pr, "merged")
+			st.EndRound(repo, pr, NoteMerged)
 			changed = true
 		} else {
 			for i := len(st.Archive) - 1; i >= 0; i-- {
@@ -582,8 +582,8 @@ func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) 
 				if NormalizeRepo(round.Repo) != repo || round.PR != pr {
 					continue
 				}
-				if round.Note != "merged" || round.Phase != PhaseAbandoned {
-					round.Abandon("merged")
+				if !round.Merged() {
+					round.Abandon(NoteMerged)
 					changed = true
 				}
 			}
@@ -591,8 +591,7 @@ func (s *Service) retireOnePassMerged(ctx context.Context, repo string, pr int) 
 		if st.ClearOnePassProgress(repo, pr) {
 			changed = true
 		}
-		if _, ok := st.ReviewedHeads[QueueKey(repo, pr)]; ok {
-			st.ClearReviewBudget(repo, pr)
+		if st.RetireMerged(repo, pr) {
 			changed = true
 		}
 		if !changed {

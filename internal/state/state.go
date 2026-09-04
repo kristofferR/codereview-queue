@@ -1319,6 +1319,45 @@ func (s *State) ClearReviewBudget(repo string, pr int) {
 	delete(s.ReviewedHeads, Key(repo, pr))
 }
 
+// NoteMerged is the abandon reason recorded when the pull request merged. A
+// merge is the one terminal outcome: GitHub never reopens a merged pull
+// request, so evidence kept for a possible reopen can be retired with it.
+const NoteMerged = "merged"
+
+// Merged reports whether the round ended because its pull request merged.
+func (r Round) Merged() bool {
+	return r.Phase == PhaseAbandoned && r.Note == NoteMerged
+}
+
+// RetireMerged forgets what crq keeps per pull request once it merged: the
+// review-round ledger and the co-reviewer activity and answer indexes. Those
+// indexes are unbounded precisely so a closed PR can reopen with its evidence
+// intact; a merged one cannot, so keeping them would only grow the state ref
+// for ever. Call it after the round has been ended, since archiving a round
+// folds its activity back into the indexes. Reports whether anything was
+// removed.
+func (s *State) RetireMerged(repo string, pr int) bool {
+	key := Key(repo, pr)
+	_, ledger := s.ReviewedHeads[key]
+	_, activity := s.CoActivity[key]
+	_, answers := s.CoAnswers[key]
+	delete(s.ReviewedHeads, key)
+	delete(s.CoActivity, key)
+	delete(s.CoAnswers, key)
+	return ledger || activity || answers
+}
+
+// mergedKeys lists the pull requests whose archived rounds record a merge.
+func (s *State) mergedKeys() map[string]bool {
+	merged := map[string]bool{}
+	for i := range s.Archive {
+		if s.Archive[i].Merged() {
+			merged[Key(s.Archive[i].Repo, s.Archive[i].PR)] = true
+		}
+	}
+	return merged
+}
+
 func (s *State) rememberCoActivity(r Round) {
 	key := Key(r.Repo, r.PR)
 	for login, co := range r.CoBots {
@@ -2555,9 +2594,16 @@ func (s *State) Normalize(now time.Time) {
 		s.FireSlot = nil
 		s.ClearSlotHold()
 	}
+	// Rebuild the per-PR indexes from the archive for state written by a binary
+	// that did not keep them — except for merged PRs, whose indexes were retired
+	// on purpose and must not be resurrected from their own archived rounds.
+	merged := s.mergedKeys()
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()
+		if merged[Key(s.Archive[i].Repo, s.Archive[i].PR)] {
+			continue
+		}
 		s.rememberCoActivity(s.Archive[i])
 	}
 	if len(s.Archive) > ArchiveMax {

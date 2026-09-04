@@ -942,6 +942,8 @@ func TestRetireMergedNormalizesEveryArchivedAttempt(t *testing.T) {
 			Round{Repo: repo, PR: pr, Head: "bbbbbbbb2", Phase: PhaseAbandoned, Note: "pr closed"},
 			Round{Repo: repo, PR: pr + 1, Head: "cccccccc3", Phase: PhaseAbandoned, Note: "pr closed"},
 		)
+		st.RememberCoAnswer(repo, pr, "cursor[bot]", base)
+		st.RememberCoAnswer(repo, pr+1, "cursor[bot]", base)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -960,6 +962,12 @@ func TestRetireMergedNormalizesEveryArchivedAttempt(t *testing.T) {
 	}
 	if got := st.Archive[len(st.Archive)-1].Note; got != "pr closed" {
 		t.Fatalf("unrelated archive note = %q, want pr closed", got)
+	}
+	if st.CoReviewerAnswered(repo, pr, "cursor[bot]") {
+		t.Fatal("merged PR kept its co-reviewer answer index")
+	}
+	if !st.CoReviewerAnswered(repo, pr+1, "cursor[bot]") {
+		t.Fatal("retiring one PR dropped another PR's answer index")
 	}
 }
 

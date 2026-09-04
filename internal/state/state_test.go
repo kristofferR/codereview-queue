@@ -879,3 +879,57 @@ func TestMoveToFrontReordersAndCanBeRepeated(t *testing.T) {
 		t.Fatalf("reserved round = %+v, want sequence %d unchanged", got, seq)
 	}
 }
+
+func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
+	s := New()
+	r, err := s.NewRound("owner/repo", 21, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	s.PutRound(*r)
+	s.NoteReviewedHead("owner/repo", 21, "abcdef123")
+	key := Key("owner/repo", 21)
+	if s.CoActivity[key] == nil || s.CoAnswers[key] == nil || len(s.ReviewedHeads[key]) != 1 {
+		t.Fatalf("fixture did not populate the per-PR indexes: %+v", s)
+	}
+
+	s.EndRound("owner/repo", 21, NoteMerged)
+	if !s.RetireMerged("owner/repo", 21) {
+		t.Fatal("RetireMerged reported nothing to remove")
+	}
+	if s.RetireMerged("owner/repo", 21) {
+		t.Fatal("RetireMerged is not idempotent")
+	}
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("merged PR kept its activity index")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its answer index")
+	}
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its review ledger")
+	}
+
+	// The archived round still carries the answer; loading must not put the
+	// retired evidence back from it.
+	s.Normalize(t0.Add(time.Minute))
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize resurrected activity for a merged PR from its archive")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize resurrected answers for a merged PR from its archive")
+	}
+}
+
+func TestNormalizeStillRebuildsIndexesForClosedUnmergedPR(t *testing.T) {
+	seen := t0.Add(time.Second)
+	s := State{Archive: []Round{{Repo: "owner/repo", PR: 22, Head: "abcdef123", Phase: PhaseAbandoned, Note: "pr closed",
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}}}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if got := s.CoActivity[Key("owner/repo", 22)]["cursor"]; !got.Equal(seen) {
+		t.Fatalf("closed PR activity = %v, want %v (a closed PR may reopen)", got, seen)
+	}
+}

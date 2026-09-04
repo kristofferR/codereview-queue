@@ -359,6 +359,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if s.log != nil {
 				s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 			}
+			if opts.Once {
+				failures = append(failures, fmt.Sprintf("%s: retiring closed rounds: %v", repo, err))
+			}
 		}
 	}
 	// Operator-prioritized PRs always lead the pass, ordered by their queue

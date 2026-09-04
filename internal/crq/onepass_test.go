@@ -969,6 +969,9 @@ func TestRetireMergedNormalizesEveryArchivedAttempt(t *testing.T) {
 	if !st.CoReviewerAnswered(repo, pr+1, "cursor[bot]") {
 		t.Fatal("retiring one PR dropped another PR's answer index")
 	}
+	if err := f.svc.RetireMergedVerified(f.ctx, repo, pr); err != nil {
+		t.Fatalf("repeated retirement = %v, want success", err)
+	}
 }
 
 func TestAlreadyMergedOnePassPropagatesRetirementFailure(t *testing.T) {

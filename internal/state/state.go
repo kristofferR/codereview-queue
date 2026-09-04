@@ -2626,6 +2626,10 @@ func (s *State) Normalize(now time.Time) {
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()
 		r.inferCoOnly()
+		if merged[key] {
+			s.Rounds[key] = r
+			continue
+		}
 		s.rememberCoActivity(r)
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
@@ -2640,6 +2644,9 @@ func (s *State) Normalize(now time.Time) {
 	// Presence, including an empty slice, means the cycle was already
 	// initialized or deliberately reset and must not be rebuilt.
 	for key, current := range s.Rounds {
+		if merged[key] {
+			continue
+		}
 		if _, initialized := s.ReviewedHeads[key]; initialized {
 			continue
 		}

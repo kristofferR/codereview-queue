@@ -593,6 +593,9 @@ func (s *Service) retireMerged(ctx context.Context, repo string, pr int) error {
 		}
 		return nil
 	})
+	if errors.Is(err, ErrNoChange) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

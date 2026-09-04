@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,6 +254,40 @@ func TestRetireClosedRoundsContinuesAfterUnreadablePR(t *testing.T) {
 	}
 	if progress, ok := st.OnePassProgressFor(repo, 3); !ok || progress.ReadyHead != "" {
 		t.Fatalf("closed one-pass hand-off was not invalidated after the pull-read failure: %+v", progress)
+	}
+}
+
+func TestWatchRotatesPastUnreadableTerminalPR(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey(repo, 1)] = errors.New("repository unavailable")
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, 1, "aaaaaaaaa", PhaseCompleted, now, 0)
+	seedRound(t, store, cfg, repo, 2, "bbbbbbbbb", PhaseCompleted, now, 0)
+
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
+		t.Fatalf("continuous watch stopped at unreadable PR: %v", err)
+	}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
+		t.Fatalf("continuous watch stopped before rotating: %v", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, 2) != nil {
+		t.Fatal("watch did not rotate to the merged PR after a partial read failure")
+	}
+
+	err = svc.watchPass(ctx, WatchOptions{Once: true}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), repo+"#1") {
+		t.Fatalf("one-shot watch error = %v, want unreadable terminal PR", err)
 	}
 }
 

@@ -941,6 +941,30 @@ func TestNormalizeStillRebuildsIndexesForClosedUnmergedPR(t *testing.T) {
 	}
 }
 
+func TestNormalizeDoesNotRebuildMergedIndexesFromLiveRound(t *testing.T) {
+	seen := t0.Add(time.Second)
+	key := Key("owner/repo", 24)
+	s := State{
+		Archive: []Round{{Repo: "owner/repo", PR: 24, Head: "abcdef123", Phase: PhaseAbandoned, Note: NoteMerged}},
+		Rounds: map[string]Round{key: {
+			Repo: "owner/repo", PR: 24, Head: "bbbbbbbbb", Phase: PhaseCompleted,
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, AnsweredAt: &seen}},
+		}},
+	}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize rebuilt merged activity from a live round")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize rebuilt merged answers from a live round")
+	}
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("Normalize rebuilt the merged review ledger from a live round")
+	}
+}
+
 func TestNormalizeRecognizesLegacyMergedNote(t *testing.T) {
 	seen := t0.Add(time.Second)
 	key := Key("owner/repo", 23)

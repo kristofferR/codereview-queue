@@ -1864,7 +1864,6 @@ func sessionLogTimestamp(name string) string {
 func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
 	key := NormalizeRepo(repo)
 	var stale []Round
-	terminal := map[int]Round{}
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
@@ -1875,54 +1874,10 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 		if r.Active() {
 			stale = append(stale, r)
-		} else {
-			terminal[r.PR] = r
 		}
 	}
-	// During a rolling upgrade, an older writer can rebuild these indexes from
-	// an archived merged round and later evict that round. Include index-only PRs
-	// so the bounded sweep can rediscover the merge and finish the retirement.
-	for _, index := range []map[string]map[string]time.Time{st.CoActivity, st.CoAnswers} {
-		for candidate := range index {
-			candidateRepo, pr, ok := parseHoldKey(candidate)
-			if !ok || NormalizeRepo(candidateRepo) != key || open[pr] {
-				continue
-			}
-			if st.Round(candidateRepo, pr) == nil {
-				terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
-			}
-		}
-	}
-	for candidate := range st.ReviewedHeads {
-		candidateRepo, pr, ok := parseHoldKey(candidate)
-		if !ok || NormalizeRepo(candidateRepo) != key || open[pr] {
-			continue
-		}
-		if st.Round(candidateRepo, pr) == nil {
-			terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
-		}
-	}
-	// Active work is bounded by the live queue and should be retired promptly.
-	// Terminal PR evidence grows without bound, so inspect only one per
-	// repository and rotate across passes.
-	terminalPRs := make([]int, 0, len(terminal))
-	for pr := range terminal {
-		terminalPRs = append(terminalPRs, pr)
-	}
-	sort.Ints(terminalPRs)
-	if len(terminalPRs) > 0 {
-		if s.lastClosedSweep == nil {
-			s.lastClosedSweep = map[string]int{}
-		}
-		next := terminalPRs[0]
-		for _, pr := range terminalPRs {
-			if pr > s.lastClosedSweep[key] {
-				next = pr
-				break
-			}
-		}
-		s.lastClosedSweep[key] = next
-		stale = append(stale, terminal[next])
+	if terminal, ok := s.nextTerminalRound(st, repo, open); ok {
+		stale = append(stale, terminal)
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
 	var failures []error
@@ -1983,6 +1938,63 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// nextTerminalRound returns one completed or index-only pull request for a
+// repository, rotating across passes. Terminal evidence grows with repository
+// age, so every housekeeping caller shares this bounded selection.
+func (s *Service) nextTerminalRound(st State, repo string, skip map[int]bool) (Round, bool) {
+	key := NormalizeRepo(repo)
+	terminal := map[int]Round{}
+	for _, r := range st.Rounds {
+		if NormalizeRepo(r.Repo) != key || skip[r.PR] || r.Active() {
+			continue
+		}
+		terminal[r.PR] = r
+	}
+	// During a rolling upgrade, an older writer can rebuild these indexes from
+	// an archived merged round and later evict that round. Include index-only PRs
+	// so the bounded sweep can rediscover the merge and finish the retirement.
+	for _, index := range []map[string]map[string]time.Time{st.CoActivity, st.CoAnswers} {
+		for candidate := range index {
+			candidateRepo, pr, ok := parseHoldKey(candidate)
+			if !ok || NormalizeRepo(candidateRepo) != key || skip[pr] {
+				continue
+			}
+			if st.Round(candidateRepo, pr) == nil {
+				terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
+			}
+		}
+	}
+	for candidate := range st.ReviewedHeads {
+		candidateRepo, pr, ok := parseHoldKey(candidate)
+		if !ok || NormalizeRepo(candidateRepo) != key || skip[pr] {
+			continue
+		}
+		if st.Round(candidateRepo, pr) == nil {
+			terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
+		}
+	}
+	terminalPRs := make([]int, 0, len(terminal))
+	for pr := range terminal {
+		terminalPRs = append(terminalPRs, pr)
+	}
+	sort.Ints(terminalPRs)
+	if len(terminalPRs) == 0 {
+		return Round{}, false
+	}
+	if s.lastClosedSweep == nil {
+		s.lastClosedSweep = map[string]int{}
+	}
+	next := terminalPRs[0]
+	for _, pr := range terminalPRs {
+		if pr > s.lastClosedSweep[key] {
+			next = pr
+			break
+		}
+	}
+	s.lastClosedSweep[key] = next
+	return terminal[next], true
 }
 
 // noteSessionDetail records what a running session is working on, for the

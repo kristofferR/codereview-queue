@@ -188,6 +188,53 @@ func TestRetireClosedRoundsIncludesIndexOnlyMergedPRs(t *testing.T) {
 	}
 }
 
+func TestAutoReviewRetiresMergedEvidenceWithoutWatcher(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 4
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoAnswers = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		st.CoAnswers[key] = map[string]time.Time{"cursor": now}
+		st.ReviewedHeads[key] = []string{"abcdef123"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, pr) != nil {
+		t.Fatal("autoreview kept the merged PR's completed round")
+	}
+	if _, ok := st.CoActivity[key]; ok {
+		t.Fatal("autoreview kept the merged PR's activity index")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("autoreview kept the merged PR's answer index")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("autoreview kept the merged PR's review ledger")
+	}
+}
+
 func TestRetireClosedRoundsPreservesIndexOnlyClosedPRs(t *testing.T) {
 	ctx := context.Background()
 	repo := "owner/thing"

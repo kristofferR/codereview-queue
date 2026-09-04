@@ -742,6 +742,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	if obs.pull.Merged {
+		if err := s.retireMerged(ctx, next.Repo, next.PR); err != nil {
+			return PumpResult{}, err
+		}
+		return PumpResult{Action: "skipped", Repo: next.Repo, PR: next.PR, Reason: "pr closed"}, nil
+	}
 	// Record a rate-limit notice before deciding, whichever round it answered.
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the

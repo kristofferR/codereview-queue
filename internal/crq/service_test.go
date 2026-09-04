@@ -2852,6 +2852,55 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 }
 
+func TestPumpRetiresPRMergedDuringDecisiveObservation(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	repo, pr := "owner/repo", 12
+	key := fakeKey(repo, pr)
+	open := ghapi.Pull{State: "open"}
+	open.Head.SHA = "abcdef1234567890"
+	merged := ghapi.Pull{State: "closed", Merged: true}
+	gh.pullResults = map[string]map[int]ghapi.Pull{key: {1: open, 2: merged}}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.RememberCoAnswer(repo, pr, "cursor[bot]", time.Now().UTC())
+		st.NoteReviewedHead(repo, pr, "abcdef123")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("merged observation result = %#v, want skipped/pr closed", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, pr) != nil {
+		t.Fatal("merged PR remained active")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its review ledger")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its co-reviewer answer index")
+	}
+	if len(st.Archive) == 0 || !st.Archive[len(st.Archive)-1].Merged() {
+		t.Fatalf("merged round was not archived with the merged outcome: %+v", st.Archive)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("must not post a review to a merged PR, posted %d", len(gh.posted))
+	}
+}
+
 func TestRetireClosedRoundsRetiresCompletedMergedPREvidence(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

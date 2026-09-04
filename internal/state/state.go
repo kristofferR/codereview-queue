@@ -2598,6 +2598,11 @@ func (s *State) Normalize(now time.Time) {
 	// that did not keep them — except for merged PRs, whose indexes were retired
 	// on purpose and must not be resurrected from their own archived rounds.
 	merged := s.mergedKeys()
+	for key := range merged {
+		delete(s.ReviewedHeads, key)
+		delete(s.CoActivity, key)
+		delete(s.CoAnswers, key)
+	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()

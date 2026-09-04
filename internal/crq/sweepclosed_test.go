@@ -85,6 +85,8 @@ func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
 	// Two merged PRs, neither of which ListPulls will return.
 	seedRound(t, store, cfg, repo, 2, "bbbbbbbb1", PhaseQueued, now, 0)
 	seedRound(t, store, cfg, repo, 3, "cccccccc1", PhaseQueued, now, 0)
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	gh.pulls[fakeKey(repo, 3)] = ghapi.Pull{State: "closed", Merged: true}
 
 	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
 		t.Fatal(err)

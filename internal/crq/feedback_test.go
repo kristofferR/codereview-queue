@@ -1661,6 +1661,11 @@ func TestLoopReportsClosedPRSkip(t *testing.T) {
 	if code != 0 || report.Status != "skipped" || report.Reason != "pr closed" {
 		t.Fatalf("closed PR should be a terminal skipped report, code=%d report=%#v", code, report)
 	}
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Feedback(ctx, "owner/repo", 12); err != nil {
+			t.Fatalf("repeated merged feedback %d: %v", i+1, err)
+		}
+	}
 }
 
 func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {

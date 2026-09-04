@@ -2811,6 +2811,49 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 }
 
+func TestRetireClosedRoundsRetiresCompletedMergedPREvidence(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	repo, pr := "owner/repo", 12
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, time.Now().UTC(), 0)
+	key := QueueKey(repo, pr)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.RememberCoAnswer(repo, pr, "cursor[bot]", time.Now().UTC())
+		st.NoteReviewedHead(repo, pr, "abcdef123")
+		st.MarkOnePassReady(repo, pr, "abcdef123", "basebase1", "test", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, pr) != nil {
+		t.Fatal("completed merged round was not retired")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its review ledger")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its co-reviewer answer index")
+	}
+	if _, ok := st.OnePassProgressFor(repo, pr); ok {
+		t.Fatal("merged PR kept its one-pass progress")
+	}
+	if len(st.Archive) == 0 || !st.Archive[len(st.Archive)-1].Merged() {
+		t.Fatalf("merged round was not archived with the merged outcome: %+v", st.Archive)
+	}
+}
+
 func TestPumpDropsMergedPRWhileHeld(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

@@ -912,13 +912,20 @@ func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
 	}
 
 	// The archived round still carries the answer; loading must not put the
-	// retired evidence back from it.
+	// retired evidence back from it, including state resurrected by an older
+	// binary during a rolling upgrade.
+	s.ReviewedHeads[key] = []string{"abcdef123"}
+	s.CoActivity[key] = map[string]time.Time{"cursor": t0}
+	s.CoAnswers[key] = map[string]time.Time{"cursor": t0}
 	s.Normalize(t0.Add(time.Minute))
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("Normalize kept the review ledger for a merged PR")
+	}
 	if _, ok := s.CoActivity[key]; ok {
-		t.Fatal("Normalize resurrected activity for a merged PR from its archive")
+		t.Fatal("Normalize kept activity for a merged PR")
 	}
 	if _, ok := s.CoAnswers[key]; ok {
-		t.Fatal("Normalize resurrected answers for a merged PR from its archive")
+		t.Fatal("Normalize kept answers for a merged PR")
 	}
 }
 

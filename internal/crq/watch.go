@@ -1853,12 +1853,11 @@ func sessionLogTimestamp(name string) string {
 }
 
 // retireClosedRounds abandons every waiting round of repo whose pull request is
-// not in the open set the pass just listed.
+// not in the open set the pass just listed, plus completed rounds that merged.
 //
-// It costs nothing extra: the list is the one watchPass already fetched, and it
-// is the same evidence a per-round `pullHead` would gather one PR at a time.
-// Rounds that are fired or reviewing are left alone — those are answered by
-// Progress, which has the round's own observation to reason from.
+// The open list establishes that the PR is no longer open; one targeted read
+// per stale round distinguishes a merge, whose per-PR evidence can be retired,
+// from a merely closed PR, whose evidence must survive a possible reopen.
 func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
 	key := NormalizeRepo(repo)
 	var stale []Round
@@ -1870,19 +1869,34 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		if NormalizeRepo(r.Repo) != key || open[r.PR] {
 			continue
 		}
-		if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
-			stale = append(stale, r)
-		}
+		stale = append(stale, r)
 	}
 	// Ordered, so a pass that is interrupted has done a prefix of the work
 	// rather than an arbitrary subset.
 	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
 	for _, r := range stale {
-		if _, err := s.abandonRound(ctx, r, "pr closed", "skipped"); err != nil {
+		pull, err := s.gh.GetPull(ctx, r.Repo, r.PR)
+		if err != nil {
+			return err
+		}
+		// The PR may have reopened since the pass listed it.
+		if pull.State == "open" && !pull.Merged {
+			continue
+		}
+		reason := NoteMerged
+		if !pull.Merged {
+			// Preserve completed markers and in-flight work for a merely closed PR:
+			// unlike a merge, it may reopen under changed reviewer requirements.
+			if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+				continue
+			}
+			reason = "pr closed"
+		}
+		if _, err := s.abandonRound(ctx, r, reason, "skipped"); err != nil {
 			return err
 		}
 		if s.log != nil {
-			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+			s.log.Printf("watch: %s#%d left the queue: %s", r.Repo, r.PR, reason)
 		}
 	}
 	if s.cfg.DryRun {

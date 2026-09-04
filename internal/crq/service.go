@@ -700,9 +700,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	// Terminal cleanup is independent of quota and pacing: drop a closed/merged
 	// PR before either gate so it leaves on this pump instead of lingering.
-	if _, open, err := s.pullHead(ctx, next.Repo, next.PR); err != nil {
+	if _, open, merged, err := s.pullHead(ctx, next.Repo, next.PR); err != nil {
 		return PumpResult{}, err
 	} else if !open {
+		if merged {
+			return s.abandonRound(ctx, *next, NoteMerged, "skipped")
+		}
 		return s.abandonRound(ctx, *next, "pr closed", "skipped")
 	}
 	// A dry-run pump reports decisions and writes nothing — that includes the
@@ -836,6 +839,12 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		if err != nil {
 			continue
 		}
+		if obs.pull.Merged {
+			if err := s.retireMerged(ctx, round.Repo, round.PR); err != nil {
+				return PumpResult{}, false, err
+			}
+			return PumpResult{Action: "skipped", Repo: round.Repo, PR: round.PR, Reason: "pr closed"}, true, nil
+		}
 		if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, round, obs, now); err != nil {
 			return PumpResult{}, false, err
 		} else if handled {
@@ -899,6 +908,12 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
+	}
+	if obs.pull.Merged {
+		if err := s.retireMerged(ctx, repo, pr); err != nil {
+			return PumpResult{}, false, err
+		}
+		return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, true, nil
 	}
 	if onePass, handled, err := s.dedupeConsumedOnePassReview(ctx, st, cfg, *round, obs, now); err != nil {
 		return PumpResult{}, false, err
@@ -1169,6 +1184,12 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
+	if obs.pull.Merged {
+		if err := s.retireMerged(ctx, slot.Repo, slot.PR); err != nil {
+			return PumpResult{}, err
+		}
+		return PumpResult{Action: "cleared", Repo: slot.Repo, PR: slot.PR, Reason: "pr closed"}, nil
+	}
 	s.selfHealCoReviewers(ctx, cfg, slot, obs.eng, now)
 	// Here as well as in the reviewing sweep: this observation can take the round
 	// straight from fired to completed, and a completed round is never looked at
@@ -1438,6 +1459,13 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		}
 		return st, nil
 	}
+	if obs.pull.Merged {
+		if err := s.retireMerged(ctx, target.Repo, target.PR); err != nil {
+			return st, err
+		}
+		updated, _, err := s.store.Load(ctx)
+		return updated, err
+	}
 	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
 	// A reviewing round no longer holds the fire slot. Persist an account block
 	// before the less-critical activity bookkeeping so a transient activity write
@@ -1646,7 +1674,13 @@ func mapFireNo(reason string) string {
 // readiness. The identity guard makes a concurrent cancel or supersede between
 // observe and write a benign lost race, never an abandon of a replacement round.
 func (s *Service) abandonRound(ctx context.Context, round Round, reason, action string) (PumpResult, error) {
-	result := PumpResult{Action: action, Repo: round.Repo, PR: round.PR, Reason: reason}
+	displayReason := reason
+	if reason == NoteMerged {
+		// Preserve the existing CLI result contract while recording the more
+		// precise terminal reason in state.
+		displayReason = "pr closed"
+	}
+	result := PumpResult{Action: action, Repo: round.Repo, PR: round.PR, Reason: displayReason}
 	if s.cfg.DryRun {
 		return result, nil
 	}
@@ -1656,7 +1690,12 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 			return ErrNoChange
 		}
 		st.EndRound(round.Repo, round.PR, reason)
-		st.ClearReviewBudget(round.Repo, round.PR)
+		if reason == NoteMerged {
+			st.ClearOnePassProgress(round.Repo, round.PR)
+			st.RetireMerged(round.Repo, round.PR)
+		} else {
+			st.ClearReviewBudget(round.Repo, round.PR)
+		}
 		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 		ended = true
 		return nil
@@ -2924,22 +2963,22 @@ func (s *Service) headShort(ctx context.Context, repo string, pr int) (string, e
 	return pull.Head.SHA[:9], nil
 }
 
-// pullHead returns the PR's short head SHA and whether it is still open (neither
-// closed nor merged), so a PR closed after it was queued is dropped instead of
-// firing a review at a dead PR.
-func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head string, open bool, err error) {
+// pullHead returns the PR's short head SHA, whether it is still open, and
+// whether its terminal state is a merge. Callers need the distinction because
+// closed PRs can reopen and retain their evidence, while merged PRs cannot.
+func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head string, open, merged bool, err error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	open = pull.State == "open" && !pull.Merged
 	if !open {
-		return "", false, nil
+		return "", false, pull.Merged, nil
 	}
 	if len(pull.Head.SHA) < 9 {
-		return "", open, fmt.Errorf("invalid head sha")
+		return "", open, false, fmt.Errorf("invalid head sha")
 	}
-	return pull.Head.SHA[:9], open, nil
+	return pull.Head.SHA[:9], open, false, nil
 }
 
 func (s *Service) sync(ctx context.Context, state State) {
@@ -3163,7 +3202,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: r.Head}, 0, nil
 		}
 		if !state.ContainsActive(repo, pr) {
-			head, open, herr := s.pullHead(ctx, repo, pr)
+			head, open, _, herr := s.pullHead(ctx, repo, pr)
 			if herr == nil && !open {
 				// PR closed/merged and dropped — nothing to review; stop the loop.
 				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
@@ -3388,7 +3427,7 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	s.lastParkedSweep = next
 	r := st.Rounds[next]
 	target := &r
-	_, open, err := s.pullHead(ctx, target.Repo, target.PR)
+	_, open, merged, err := s.pullHead(ctx, target.Repo, target.PR)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -3403,6 +3442,10 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 			Head:   target.Head,
 			Reason: "pr closed",
 		}, true, nil
+	}
+	if merged {
+		res, err := s.abandonRound(ctx, *target, NoteMerged, "skipped")
+		return res, true, err
 	}
 	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
 	return res, true, err

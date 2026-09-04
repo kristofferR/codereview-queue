@@ -153,7 +153,7 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// The stored round can be absent or still on the old head after a push that
 	// nothing has enqueued yet, so state alone cannot tell "no round for this
 	// head" from "the head moved". Ask GitHub once more.
-	if head, _, err := s.pullHead(ctx, repo, pr); err != nil {
+	if head, _, _, err := s.pullHead(ctx, repo, pr); err != nil {
 		return DismissResult{}, err
 	} else if head != feedback.Head {
 		return DismissResult{}, fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, head)

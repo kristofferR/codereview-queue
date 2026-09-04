@@ -235,6 +235,47 @@ func TestAutoReviewRetiresMergedEvidenceWithoutWatcher(t *testing.T) {
 	}
 }
 
+func TestAutoReviewDoesNotCleanUpRepositoriesThatAreOff(t *testing.T) {
+	ctx := context.Background()
+	const pr = 4
+	repos := []string{"owner/excluded", "owner/disabled"}
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.ExcludeRepos = map[string]bool{repos[0]: true}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	for _, repo := range repos {
+		seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, 0)
+		gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetEnrollment(repos[1], RepoEnrollment{Enabled: false, Reason: "paused"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range repos {
+		if st.Round(repo, pr) == nil {
+			t.Errorf("autoreview cleaned up opted-out repository %s", repo)
+		}
+		if reads := gh.pullReads[fakeKey(repo, pr)]; reads != 0 {
+			t.Errorf("autoreview read opted-out repository %s %d time(s)", repo, reads)
+		}
+	}
+}
+
 func TestRetireClosedRoundsPreservesIndexOnlyClosedPRs(t *testing.T) {
 	ctx := context.Background()
 	repo := "owner/thing"
@@ -266,7 +307,7 @@ func TestRetireClosedRoundsPreservesIndexOnlyClosedPRs(t *testing.T) {
 	}
 }
 
-func TestRetireClosedRoundsContinuesAfterUnreadablePR(t *testing.T) {
+func TestRetireClosedRoundsArchivesUnreadableWaitingPR(t *testing.T) {
 	ctx := context.Background()
 	repo := "owner/thing"
 	cfg := firingConfig()
@@ -293,11 +334,20 @@ func TestRetireClosedRoundsContinuesAfterUnreadablePR(t *testing.T) {
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	if st.Round(repo, 1) == nil {
-		t.Fatal("unreadable PR was retired without evidence")
+	if st.Round(repo, 1) != nil {
+		t.Fatal("unreadable closed PR remained active")
 	}
 	if st.Round(repo, 2) != nil {
 		t.Fatal("merged PR after the unreadable one was not retired")
+	}
+	var archivedClosed bool
+	for _, round := range st.Archive {
+		if round.Repo == repo && round.PR == 1 && round.Note == "pr closed" {
+			archivedClosed = true
+		}
+	}
+	if !archivedClosed {
+		t.Fatal("unreadable closed PR was not archived for later merge cleanup")
 	}
 	if progress, ok := st.OnePassProgressFor(repo, 3); !ok || progress.ReadyHead != "" {
 		t.Fatalf("closed one-pass hand-off was not invalidated after the pull-read failure: %+v", progress)

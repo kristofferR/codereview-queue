@@ -434,7 +434,8 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	// to do for it. Retire one terminal evidence record per covered repository
 	// here as well as in the autofix watcher, because either daemon can run alone.
 	cleanupErr := s.retireMergedEvidence(ctx, state, func(repo string) bool {
-		return repoTargets[NormalizeRepo(repo)] || scoped && repoInScope(fleetCfg, repo)
+		return s.reviewsRepo(state, repo) &&
+			(repoTargets[NormalizeRepo(repo)] || scoped && repoInScope(fleetCfg, repo))
 	})
 	if abortsPass(cleanupErr) {
 		return cleanupErr

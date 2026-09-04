@@ -1888,6 +1888,17 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 				return err
 			}
 			failures = append(failures, fmt.Errorf("%s#%d: %w", r.Repo, r.PR, err))
+			// The open-PR list already established that this PR is closed. A
+			// detail read is only needed to distinguish a merge, so do not leave
+			// waiting work at the front of the queue while that cleanup is retried.
+			if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
+				if _, abandonErr := s.abandonRound(ctx, r, "pr closed", "skipped"); abandonErr != nil {
+					return abandonErr
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+				}
+			}
 			continue
 		}
 		// The PR may have reopened since the pass listed it.

@@ -754,12 +754,14 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := Clone(m.state)
-	st.Normalize(m.clock())
+	normalizedMergedEvidence := st.normalize(m.clock())
 	if err := mutate(&st); err != nil {
-		if errors.Is(err, ErrNoChange) {
+		if errors.Is(err, ErrNoChange) && !normalizedMergedEvidence {
 			return st, nil
 		}
-		return State{}, err
+		if !errors.Is(err, ErrNoChange) {
+			return State{}, err
+		}
 	}
 	now := m.clock()
 	st.Rev++

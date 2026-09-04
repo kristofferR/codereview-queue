@@ -183,6 +183,35 @@ func TestGitFallbackUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testin
 	}
 }
 
+func TestMemoryStoreUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testing.T) {
+	now := time.Date(2026, time.September, 5, 12, 0, 0, 0, time.UTC)
+	key := Key("owner/repo", 21)
+	store := NewMemoryStore(StoreConfig{})
+	store.SetClock(func() time.Time { return now })
+	store.state.Archive = []Round{{
+		Repo: "owner/repo", PR: 21, Head: "abcdef123", Phase: PhaseAbandoned, Note: NoteMerged,
+	}}
+	store.state.ReviewedHeads = map[string][]string{key: {"abcdef123"}}
+	store.state.CoActivity = map[string]map[string]time.Time{key: {"cursor": now}}
+	store.state.CoAnswers = map[string]map[string]time.Time{key: {"cursor": now}}
+
+	if _, err := store.Update(context.Background(), func(*State) error { return ErrNoChange }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.state.ReviewedHeads[key]; ok {
+		t.Fatal("persisted state kept the merged PR review ledger")
+	}
+	if _, ok := store.state.CoActivity[key]; ok {
+		t.Fatal("persisted state kept the merged PR activity index")
+	}
+	if _, ok := store.state.CoAnswers[key]; ok {
+		t.Fatal("persisted state kept the merged PR answer index")
+	}
+	if store.rev != 1 {
+		t.Fatalf("revision = %d, want 1", store.rev)
+	}
+}
+
 func TestGitFallbackUsesConfiguredCommitIdentity(t *testing.T) {
 	t.Setenv(gitFallbackEnv, "1")
 	remote, _ := seedGitStateRemote(t)

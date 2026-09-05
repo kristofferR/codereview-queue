@@ -182,6 +182,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	repo = NormalizeRepo(repo)
 	now := s.clock()
 	round := st.Round(repo, pr)
+	// Retirement removes the persisted round, but this observation still belongs
+	// to its head and must honor the dismissal decisions made there.
+	dismissalRound := round
 
 	// One fetch drives both halves: observe() reads the pull, reviews and issue
 	// comments (plus reactions when the round has fired). Feedback parses its
@@ -256,6 +259,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// same observation cannot converge past the reviewer it just restored.
 			st = *updated
 			round = st.Round(repo, pr)
+			dismissalRound = round
 		}
 	}
 	onePassReviewed := onePassReviewEvidence(st, cfg, repo, pr, obs)
@@ -617,14 +621,14 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
 	// code are computed from this list, so filtering further out would leave a
 	// dismissed finding permanently actionable everywhere except `crq next`.
-	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+	if dismissalRound != nil && dismissalRound.Head == head && len(dismissalRound.Dismissed) > 0 {
 		kept := make([]dialect.Finding, 0, len(report.Findings))
 		for _, finding := range report.Findings {
 			// Only where the source itself cannot carry a thread. IDs hash the
 			// text, not the source, so a body finding later delivered as an inline
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
-			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
 				continue
 			}
 			kept = append(kept, finding)
@@ -635,7 +639,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		// comment a dismissal was made against leaves nothing to match, and
 		// reporting zero there would make a set-aside finding indistinguishable
 		// from one that was never reported at all.
-		report.Dismissed = len(round.Dismissed)
+		report.Dismissed = len(dismissalRound.Dismissed)
 	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {

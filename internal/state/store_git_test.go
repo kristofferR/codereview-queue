@@ -159,8 +159,15 @@ func TestGitFallbackUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testin
 	store := newGitFallbackTestStore(t, remote)
 	before := mustGit(t, "--git-dir", remote, "rev-parse", "refs/heads/crq-state-v3")
 
-	if _, err := store.Update(context.Background(), func(*State) error { return ErrNoChange }); err != nil {
+	updated, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.Source = "discarded callback mutation"
+		return ErrNoChange
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if updated.Account.Source == "discarded callback mutation" {
+		t.Fatal("ErrNoChange returned a callback mutation while persisting normalized retirement")
 	}
 	after := mustGit(t, "--git-dir", remote, "rev-parse", "refs/heads/crq-state-v3")
 	if after == before {
@@ -181,6 +188,9 @@ func TestGitFallbackUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testin
 	if _, ok := persisted.CoAnswers[key]; ok {
 		t.Fatal("persisted state kept the merged PR answer index")
 	}
+	if persisted.Account.Source == "discarded callback mutation" {
+		t.Fatal("ErrNoChange persisted a callback mutation with normalized retirement")
+	}
 }
 
 func TestMemoryStoreUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testing.T) {
@@ -195,8 +205,15 @@ func TestMemoryStoreUpdatePersistsNormalizedMergedRetirementOnNoChange(t *testin
 	store.state.CoActivity = map[string]map[string]time.Time{key: {"cursor": now}}
 	store.state.CoAnswers = map[string]map[string]time.Time{key: {"cursor": now}}
 
-	if _, err := store.Update(context.Background(), func(*State) error { return ErrNoChange }); err != nil {
+	updated, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.Source = "discarded callback mutation"
+		return ErrNoChange
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if updated.Account.Source == "discarded callback mutation" || store.state.Account.Source == "discarded callback mutation" {
+		t.Fatal("ErrNoChange kept a callback mutation while persisting normalized retirement")
 	}
 	if _, ok := store.state.ReviewedHeads[key]; ok {
 		t.Fatal("persisted state kept the merged PR review ledger")

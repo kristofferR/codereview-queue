@@ -317,6 +317,10 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 		if err != nil {
 			return State{}, err
 		}
+		var normalized State
+		if rev.normalizedMergedEvidence {
+			normalized = Clone(st)
+		}
 		if err := mutate(&st); err != nil {
 			if errors.Is(err, ErrNoChange) && !rev.normalizedMergedEvidence {
 				return st, nil
@@ -324,6 +328,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 			if !errors.Is(err, ErrNoChange) {
 				return State{}, err
 			}
+			st = normalized
 		}
 		now := time.Now().UTC()
 		st.Rev++
@@ -755,6 +760,10 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	defer m.mu.Unlock()
 	st := Clone(m.state)
 	normalizedMergedEvidence := st.normalize(m.clock())
+	var normalized State
+	if normalizedMergedEvidence {
+		normalized = Clone(st)
+	}
 	if err := mutate(&st); err != nil {
 		if errors.Is(err, ErrNoChange) && !normalizedMergedEvidence {
 			return st, nil
@@ -762,6 +771,7 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 		if !errors.Is(err, ErrNoChange) {
 			return State{}, err
 		}
+		st = normalized
 	}
 	now := m.clock()
 	st.Rev++

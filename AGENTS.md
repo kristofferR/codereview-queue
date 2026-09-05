@@ -58,8 +58,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   writers that would erase the dispatch scheduler's model and cooldown state.
   `CoActivity` and `CoAnswers` are the unbounded per-PR indexes that preserve
   generic reviewer activity and completed-review evidence separately after the
-  bounded round archive is evicted. They currently have no automatic pruning
-  rule, so their state footprint grows with the number of reviewed PRs.
+  bounded round archive is evicted. A merge is the one outcome that retires
+  them (`RetireMerged`), since a merged PR can never reopen; closed-unmerged
+  PRs keep theirs, and `Normalize` skips merged PRs when it rebuilds the
+  indexes from the archive so the retirement sticks across loads.
   `ReviewedHeads` is the per-PR, distinct-head ledger behind the incremental
   review circuit breaker. Closed/merged PRs clear it; an automatic budget hold
   keeps it until explicit unhold resets the next cycle.

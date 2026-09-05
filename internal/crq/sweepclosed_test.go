@@ -2,8 +2,10 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +87,8 @@ func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
 	// Two merged PRs, neither of which ListPulls will return.
 	seedRound(t, store, cfg, repo, 2, "bbbbbbbb1", PhaseQueued, now, 0)
 	seedRound(t, store, cfg, repo, 3, "cccccccc1", PhaseQueued, now, 0)
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	gh.pulls[fakeKey(repo, 3)] = ghapi.Pull{State: "closed", Merged: true}
 
 	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
 		t.Fatal(err)
@@ -100,6 +104,287 @@ func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
 	}
 	if r := st.Round(repo, 1); r == nil || !r.Active() {
 		t.Errorf("the open PR's round was retired too: %+v", r)
+	}
+}
+
+func TestRetireClosedRoundsBoundsHistoricalPullReads(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	for pr := 1; pr <= 3; pr++ {
+		seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, int64(pr))
+		gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed"}
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	for pr := 1; pr <= 3; pr++ {
+		reads += gh.pullReads[fakeKey(repo, pr)]
+	}
+	if reads != 1 {
+		t.Fatalf("historical pull reads in one pass = %d, want 1", reads)
+	}
+
+	for range 2 {
+		if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for pr := 1; pr <= 3; pr++ {
+		if got := gh.pullReads[fakeKey(repo, pr)]; got != 1 {
+			t.Errorf("PR %d reads after one rotation = %d, want 1", pr, got)
+		}
+	}
+}
+
+func TestRetireClosedRoundsIncludesIndexOnlyMergedPRs(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 4
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		// This is the state left when an older rolling-upgrade peer resurrects
+		// evidence from a merged archive entry and that entry is later evicted.
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoAnswers = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		st.CoAnswers[key] = map[string]time.Time{"cursor": now}
+		st.ReviewedHeads[key] = []string{"abcdef123"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.CoActivity[key]; ok {
+		t.Fatal("merged PR kept its index-only activity evidence")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its index-only answer evidence")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its index-only review ledger")
+	}
+	if got := gh.pullReads[fakeKey(repo, pr)]; got != 1 {
+		t.Fatalf("index-only PR reads = %d, want 1", got)
+	}
+}
+
+func TestAutoReviewRetiresMergedEvidenceWithoutWatcher(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 4
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoAnswers = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		st.CoAnswers[key] = map[string]time.Time{"cursor": now}
+		st.ReviewedHeads[key] = []string{"abcdef123"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, pr) != nil {
+		t.Fatal("autoreview kept the merged PR's completed round")
+	}
+	if _, ok := st.CoActivity[key]; ok {
+		t.Fatal("autoreview kept the merged PR's activity index")
+	}
+	if _, ok := st.CoAnswers[key]; ok {
+		t.Fatal("autoreview kept the merged PR's answer index")
+	}
+	if _, ok := st.ReviewedHeads[key]; ok {
+		t.Fatal("autoreview kept the merged PR's review ledger")
+	}
+}
+
+func TestAutoReviewDoesNotCleanUpRepositoriesThatAreOff(t *testing.T) {
+	ctx := context.Background()
+	const pr = 4
+	repos := []string{"owner/excluded", "owner/disabled"}
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	cfg.ExcludeRepos = map[string]bool{repos[0]: true}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	for _, repo := range repos {
+		seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseCompleted, now, 0)
+		gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed", Merged: true}
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetEnrollment(repos[1], RepoEnrollment{Enabled: false, Reason: "paused"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range repos {
+		if st.Round(repo, pr) == nil {
+			t.Errorf("autoreview cleaned up opted-out repository %s", repo)
+		}
+		if reads := gh.pullReads[fakeKey(repo, pr)]; reads != 0 {
+			t.Errorf("autoreview read opted-out repository %s %d time(s)", repo, reads)
+		}
+	}
+}
+
+func TestRetireClosedRoundsPreservesIndexOnlyClosedPRs(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	const pr = 5
+	key := QueueKey(repo, pr)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey(repo, pr)] = ghapi.Pull{State: "closed"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CoActivity = map[string]map[string]time.Time{}
+		st.CoActivity[key] = map[string]time.Time{"cursor": now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.retireClosedRounds(ctx, repo, map[int]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CoActivity[key]["cursor"]; !got.Equal(now) {
+		t.Fatalf("closed PR activity = %v, want %v", got, now)
+	}
+}
+
+func TestRetireClosedRoundsArchivesUnreadableWaitingPR(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey(repo, 1)] = errors.New("repository unavailable")
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, 1, "aaaaaaaaa", PhaseQueued, now, 0)
+	seedRound(t, store, cfg, repo, 2, "bbbbbbbbb", PhaseQueued, now, 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.MarkOnePassReady(repo, 3, "ccccccccc", "basebase1", "test", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := svc.retireClosedRounds(ctx, repo, map[int]bool{})
+	if err == nil || !errors.Is(err, gh.pullErrs[fakeKey(repo, 1)]) {
+		t.Fatalf("retire error = %v, want the unreadable PR reported", err)
+	}
+	st, _, loadErr := store.Load(ctx)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if st.Round(repo, 1) != nil {
+		t.Fatal("unreadable closed PR remained active")
+	}
+	if st.Round(repo, 2) != nil {
+		t.Fatal("merged PR after the unreadable one was not retired")
+	}
+	var archivedClosed bool
+	for _, round := range st.Archive {
+		if round.Repo == repo && round.PR == 1 && round.Note == "pr closed" {
+			archivedClosed = true
+		}
+	}
+	if !archivedClosed {
+		t.Fatal("unreadable closed PR was not archived for later merge cleanup")
+	}
+	if progress, ok := st.OnePassProgressFor(repo, 3); !ok || progress.ReadyHead != "" {
+		t.Fatalf("closed one-pass hand-off was not invalidated after the pull-read failure: %+v", progress)
+	}
+}
+
+func TestWatchRotatesPastUnreadableTerminalPR(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.pullErrs[fakeKey(repo, 1)] = errors.New("repository unavailable")
+	gh.pulls[fakeKey(repo, 2)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, 1, "aaaaaaaaa", PhaseCompleted, now, 0)
+	seedRound(t, store, cfg, repo, 2, "bbbbbbbbb", PhaseCompleted, now, 0)
+
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
+		t.Fatalf("continuous watch stopped at unreadable PR: %v", err)
+	}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
+		t.Fatalf("continuous watch stopped before rotating: %v", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round(repo, 2) != nil {
+		t.Fatal("watch did not rotate to the merged PR after a partial read failure")
+	}
+
+	err = svc.watchPass(ctx, WatchOptions{Once: true}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), repo+"#1") {
+		t.Fatalf("one-shot watch error = %v, want unreadable terminal PR", err)
 	}
 }
 

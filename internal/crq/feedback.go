@@ -182,6 +182,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	repo = NormalizeRepo(repo)
 	now := s.clock()
 	round := st.Round(repo, pr)
+	// Retirement removes the persisted round, but this observation still belongs
+	// to its head and must honor the dismissal decisions made there.
+	dismissalRound := round
 
 	// One fetch drives both halves: observe() reads the pull, reviews and issue
 	// comments (plus reactions when the round has fired). Feedback parses its
@@ -213,6 +216,16 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	if len(pull.Head.SHA) >= 9 {
 		head = pull.Head.SHA[:9]
 	}
+	if persist && pull.Merged {
+		if err := s.retireMerged(ctx, repo, pr); err != nil {
+			return FeedbackReport{}, fmt.Errorf("retiring merged pull request %s: %w", QueueKey(repo, pr), err)
+		}
+		st, _, err = s.store.Load(ctx)
+		if err != nil {
+			return FeedbackReport{}, err
+		}
+		round = nil
+	}
 	// A rate-limit notice is evidence about the ACCOUNT, and this is the only
 	// place that looks at a PR the queue is not about to fire. Pump records the
 	// notice on the round it selects; a notice sitting on a PR that was
@@ -220,7 +233,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// away, and the next fire went out inside a window the bot had already
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
-	if persist {
+	if persist && !pull.Merged {
 		if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
 			return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
 		} else if updated != nil {
@@ -246,10 +259,11 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// same observation cannot converge past the reviewer it just restored.
 			st = *updated
 			round = st.Round(repo, pr)
+			dismissalRound = round
 		}
 	}
 	onePassReviewed := onePassReviewEvidence(st, cfg, repo, pr, obs)
-	if persist && cfg.OnePass && onePassReviewed {
+	if persist && !pull.Merged && cfg.OnePass && onePassReviewed {
 		campaign := st.EffectiveSolver(repo).OnePassCampaign
 		updated, current, err := s.markOnePassReviewed(ctx, st, cfg, repo, pr, campaign, now)
 		if err != nil {
@@ -607,14 +621,14 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
 	// code are computed from this list, so filtering further out would leave a
 	// dismissed finding permanently actionable everywhere except `crq next`.
-	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+	if dismissalRound != nil && dismissalRound.Head == head && len(dismissalRound.Dismissed) > 0 {
 		kept := make([]dialect.Finding, 0, len(report.Findings))
 		for _, finding := range report.Findings {
 			// Only where the source itself cannot carry a thread. IDs hash the
 			// text, not the source, so a body finding later delivered as an inline
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
-			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
 				continue
 			}
 			kept = append(kept, finding)
@@ -625,7 +639,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		// comment a dismissal was made against leaves nothing to match, and
 		// reporting zero there would make a set-aside finding indistinguishable
 		// from one that was never reported at all.
-		report.Dismissed = len(round.Dismissed)
+		report.Dismissed = len(dismissalRound.Dismissed)
 	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
@@ -679,7 +693,7 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 	// An active wait for this head is different: extraction-only bots can answer
 	// before the required reviewer, and those findings must remain buffered until
 	// the configured reviewer gate completes.
-	head, open, err := s.pullHead(ctx, repo, pr)
+	head, open, _, err := s.pullHead(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
@@ -767,7 +781,7 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 	head = waitResult.Head
 	if head == "" {
 		var herr error
-		head, _, herr = s.pullHead(ctx, repo, pr)
+		head, _, _, herr = s.pullHead(ctx, repo, pr)
 		if herr != nil {
 			return FeedbackReport{}, 1, herr
 		}

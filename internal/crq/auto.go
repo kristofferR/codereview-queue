@@ -3,6 +3,8 @@ package crq
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -316,6 +318,10 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	// name — scanTargets returns the ones no owner in CRQ_SCOPE covers — so the
 	// two search shapes are mixed in one pass and each target says which it is.
 	targets, scoped := s.scanTargets(state)
+	repoTargets := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		repoTargets[NormalizeRepo(target)] = true
+	}
 	byRepo := func(target string) bool { return !scoped || strings.Contains(target, "/") }
 	if scoped {
 		targets = append(targets, fleetCfg.Scope...)
@@ -424,8 +430,74 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	// Titles first, in one write: they change nothing about scheduling, so a
 	// failure here must not stop the enqueue that does.
 	s.noteTitles(ctx, titles)
+	// A completed round never appears in the open-PR search and Pump has no work
+	// to do for it. Retire one terminal evidence record per covered repository
+	// here as well as in the autofix watcher, because either daemon can run alone.
+	cleanupErr := s.retireMergedEvidence(ctx, state, func(repo string) bool {
+		return s.reviewsRepo(state, repo) &&
+			(repoTargets[NormalizeRepo(repo)] || scoped && repoInScope(fleetCfg, repo))
+	})
+	if abortsPass(cleanupErr) {
+		return cleanupErr
+	}
 	// One batched write for the whole pass instead of N (#2).
-	return s.enqueueBatch(ctx, candidates)
+	return errors.Join(cleanupErr, s.enqueueBatch(ctx, candidates))
+}
+
+// retireMergedEvidence inspects at most one terminal PR per repository. It is
+// the autoreview-side housekeeping for deployments that do not run autofix.
+func (s *Service) retireMergedEvidence(ctx context.Context, st State, covered func(string) bool) error {
+	repos := map[string]bool{}
+	for _, round := range st.Rounds {
+		if !round.Active() && covered(round.Repo) {
+			repos[NormalizeRepo(round.Repo)] = true
+		}
+	}
+	for _, index := range []map[string]map[string]time.Time{st.CoActivity, st.CoAnswers} {
+		for key := range index {
+			repo, _, ok := parseHoldKey(key)
+			if ok && covered(repo) {
+				repos[NormalizeRepo(repo)] = true
+			}
+		}
+	}
+	for key := range st.ReviewedHeads {
+		repo, _, ok := parseHoldKey(key)
+		if ok && covered(repo) {
+			repos[NormalizeRepo(repo)] = true
+		}
+	}
+
+	ordered := make([]string, 0, len(repos))
+	for repo := range repos {
+		ordered = append(ordered, repo)
+	}
+	sort.Strings(ordered)
+	var failures []error
+	for _, repo := range ordered {
+		round, ok := s.nextTerminalRound(st, repo, nil)
+		if !ok {
+			continue
+		}
+		pull, err := s.gh.GetPull(ctx, round.Repo, round.PR)
+		if err != nil {
+			if abortsPass(err) || ctx.Err() != nil {
+				return err
+			}
+			failures = append(failures, fmt.Errorf("%s#%d: %w", round.Repo, round.PR, err))
+			continue
+		}
+		if !pull.Merged {
+			continue
+		}
+		if err := s.retireMerged(ctx, round.Repo, round.PR); err != nil {
+			return err
+		}
+		if s.log != nil {
+			s.log.Printf("autoreview: %s#%d retired merged evidence", round.Repo, round.PR)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // needsReview reports whether an open PR should be enqueued for review, and its

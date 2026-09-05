@@ -879,3 +879,111 @@ func TestMoveToFrontReordersAndCanBeRepeated(t *testing.T) {
 		t.Fatalf("reserved round = %+v, want sequence %d unchanged", got, seq)
 	}
 }
+
+func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
+	s := New()
+	r, err := s.NewRound("owner/repo", 21, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.NoteCoAnswer("cursor[bot]", t0.Add(time.Second))
+	s.PutRound(*r)
+	s.NoteReviewedHead("owner/repo", 21, "abcdef123")
+	key := Key("owner/repo", 21)
+	if s.CoActivity[key] == nil || s.CoAnswers[key] == nil || len(s.ReviewedHeads[key]) != 1 {
+		t.Fatalf("fixture did not populate the per-PR indexes: %+v", s)
+	}
+
+	s.EndRound("owner/repo", 21, NoteMerged)
+	if !s.RetireMerged("owner/repo", 21) {
+		t.Fatal("RetireMerged reported nothing to remove")
+	}
+	if s.RetireMerged("owner/repo", 21) {
+		t.Fatal("RetireMerged is not idempotent")
+	}
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("merged PR kept its activity index")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("merged PR kept its answer index")
+	}
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("merged PR kept its review ledger")
+	}
+
+	// The archived round still carries the answer; loading must not put the
+	// retired evidence back from it, including state resurrected by an older
+	// binary during a rolling upgrade.
+	s.ReviewedHeads[key] = []string{"abcdef123"}
+	s.CoActivity[key] = map[string]time.Time{"cursor": t0}
+	s.CoAnswers[key] = map[string]time.Time{"cursor": t0}
+	s.Normalize(t0.Add(time.Minute))
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("Normalize kept the review ledger for a merged PR")
+	}
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize kept activity for a merged PR")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize kept answers for a merged PR")
+	}
+}
+
+func TestNormalizeStillRebuildsIndexesForClosedUnmergedPR(t *testing.T) {
+	seen := t0.Add(time.Second)
+	s := State{Archive: []Round{{Repo: "owner/repo", PR: 22, Head: "abcdef123", Phase: PhaseAbandoned, Note: "pr closed",
+		CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}}}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if got := s.CoActivity[Key("owner/repo", 22)]["cursor"]; !got.Equal(seen) {
+		t.Fatalf("closed PR activity = %v, want %v (a closed PR may reopen)", got, seen)
+	}
+}
+
+func TestNormalizeDoesNotRebuildMergedIndexesFromLiveRound(t *testing.T) {
+	seen := t0.Add(time.Second)
+	key := Key("owner/repo", 24)
+	s := State{
+		Archive: []Round{{Repo: "owner/repo", PR: 24, Head: "abcdef123", Phase: PhaseAbandoned, Note: NoteMerged}},
+		Rounds: map[string]Round{key: {
+			Repo: "owner/repo", PR: 24, Head: "bbbbbbbbb", Phase: PhaseCompleted,
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen, AnsweredAt: &seen}},
+		}},
+	}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize rebuilt merged activity from a live round")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize rebuilt merged answers from a live round")
+	}
+	if _, ok := s.ReviewedHeads[key]; ok {
+		t.Fatal("Normalize rebuilt the merged review ledger from a live round")
+	}
+}
+
+func TestNormalizeRecognizesLegacyMergedNote(t *testing.T) {
+	seen := t0.Add(time.Second)
+	key := Key("owner/repo", 23)
+	s := State{
+		Archive: []Round{{Repo: "owner/repo", PR: 23, Head: "abcdef123", Phase: PhaseAbandoned, Note: "pr merged",
+			CoBots: map[string]CoBotRound{"cursor": {SeenActiveAt: &seen}}}},
+		CoActivity: map[string]map[string]time.Time{key: {"cursor": seen}},
+		CoAnswers:  map[string]map[string]time.Time{key: {"cursor": seen}},
+	}
+
+	s.Normalize(t0.Add(time.Minute))
+
+	if !s.Archive[0].Merged() {
+		t.Fatal("legacy merge note was not recognized")
+	}
+	if _, ok := s.CoActivity[key]; ok {
+		t.Fatal("Normalize kept activity for a legacy merged PR")
+	}
+	if _, ok := s.CoAnswers[key]; ok {
+		t.Fatal("Normalize kept answers for a legacy merged PR")
+	}
+}

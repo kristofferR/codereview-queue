@@ -466,8 +466,8 @@ func finishedRows(st state.State) []DoneRow {
 	out := []DoneRow{}
 	add := func(r state.Round) {
 		outcome := string(r.Phase)
-		if r.Note == "merged" {
-			outcome = "merged"
+		if r.Merged() {
+			outcome = state.NoteMerged
 		}
 		row := DoneRow{Key: state.Key(r.Repo, r.PR), Title: r.Title, Repo: r.Repo, PR: r.PR,
 			Head: r.Head, Outcome: outcome, Note: r.Note}

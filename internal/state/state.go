@@ -1319,6 +1319,54 @@ func (s *State) ClearReviewBudget(repo string, pr int) {
 	delete(s.ReviewedHeads, Key(repo, pr))
 }
 
+// NoteMerged is the abandon reason recorded when the pull request merged. A
+// merge is the one terminal outcome: GitHub never reopens a merged pull
+// request, so evidence kept for a possible reopen can be retired with it.
+const NoteMerged = "merged"
+
+const legacyNoteMerged = "pr merged"
+
+// Merged reports whether the round ended because its pull request merged.
+func (r Round) Merged() bool {
+	return r.Phase == PhaseAbandoned && (r.Note == NoteMerged || r.Note == legacyNoteMerged)
+}
+
+// RetireMerged forgets what crq keeps per pull request once it merged: the
+// review-round ledger and the co-reviewer activity and answer indexes. Those
+// indexes are unbounded precisely so a closed PR can reopen with its evidence
+// intact; a merged one cannot, so keeping them would only grow the state ref
+// for ever. Matching archive entries are marked first so Normalize cannot
+// rebuild the retired indexes. Reports whether anything changed.
+func (s *State) RetireMerged(repo string, pr int) bool {
+	key := Key(repo, pr)
+	_, ledger := s.ReviewedHeads[key]
+	_, activity := s.CoActivity[key]
+	_, answers := s.CoAnswers[key]
+	changed := ledger || activity || answers
+	for i := range s.Archive {
+		round := &s.Archive[i]
+		if Key(round.Repo, round.PR) == key && !round.Merged() {
+			round.Abandon(NoteMerged)
+			changed = true
+		}
+	}
+	delete(s.ReviewedHeads, key)
+	delete(s.CoActivity, key)
+	delete(s.CoAnswers, key)
+	return changed
+}
+
+// mergedKeys lists the pull requests whose archived rounds record a merge.
+func (s *State) mergedKeys() map[string]bool {
+	merged := map[string]bool{}
+	for i := range s.Archive {
+		if s.Archive[i].Merged() {
+			merged[Key(s.Archive[i].Repo, s.Archive[i].PR)] = true
+		}
+	}
+	return merged
+}
+
 func (s *State) rememberCoActivity(r Round) {
 	key := Key(r.Repo, r.PR)
 	for login, co := range r.CoBots {
@@ -2499,6 +2547,13 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
 // do), and a FireSlot no round holds and no orphaned hold keeps alive.
 func (s *State) Normalize(now time.Time) {
+	s.normalize(now)
+}
+
+// normalize reports whether it retired merged-PR evidence while repairing the
+// loaded state. The git store uses that signal to persist this specific repair
+// even when the requested mutation is otherwise a no-op.
+func (s *State) normalize(now time.Time) (retiredMergedEvidence bool) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
 	}
@@ -2555,9 +2610,30 @@ func (s *State) Normalize(now time.Time) {
 		s.FireSlot = nil
 		s.ClearSlotHold()
 	}
+	// Rebuild the per-PR indexes from the archive for state written by a binary
+	// that did not keep them — except for merged PRs, whose indexes were retired
+	// on purpose and must not be resurrected from their own archived rounds.
+	merged := s.mergedKeys()
+	for key := range merged {
+		if _, ok := s.ReviewedHeads[key]; ok {
+			retiredMergedEvidence = true
+		}
+		if _, ok := s.CoActivity[key]; ok {
+			retiredMergedEvidence = true
+		}
+		if _, ok := s.CoAnswers[key]; ok {
+			retiredMergedEvidence = true
+		}
+		delete(s.ReviewedHeads, key)
+		delete(s.CoActivity, key)
+		delete(s.CoAnswers, key)
+	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
 		s.Archive[i].inferCoOnly()
+		if merged[Key(s.Archive[i].Repo, s.Archive[i].PR)] {
+			continue
+		}
 		s.rememberCoActivity(s.Archive[i])
 	}
 	if len(s.Archive) > ArchiveMax {
@@ -2566,6 +2642,10 @@ func (s *State) Normalize(now time.Time) {
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()
 		r.inferCoOnly()
+		if merged[key] {
+			s.Rounds[key] = r
+			continue
+		}
 		s.rememberCoActivity(r)
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
@@ -2580,6 +2660,9 @@ func (s *State) Normalize(now time.Time) {
 	// Presence, including an empty slice, means the cycle was already
 	// initialized or deliberately reset and must not be rebuilt.
 	for key, current := range s.Rounds {
+		if merged[key] {
+			continue
+		}
 		if _, initialized := s.ReviewedHeads[key]; initialized {
 			continue
 		}
@@ -2593,6 +2676,7 @@ func (s *State) Normalize(now time.Time) {
 			s.NoteReviewedHead(current.Repo, current.PR, current.Head)
 		}
 	}
+	return retiredMergedEvidence
 }
 
 func roundHasReviewEvidence(r Round) bool {

@@ -359,6 +359,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if s.log != nil {
 				s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 			}
+			if opts.Once {
+				failures = append(failures, fmt.Sprintf("%s: retiring closed rounds: %v", repo, err))
+			}
 		}
 	}
 	// Operator-prioritized PRs always lead the pass, ordered by their queue
@@ -1853,12 +1856,11 @@ func sessionLogTimestamp(name string) string {
 }
 
 // retireClosedRounds abandons every waiting round of repo whose pull request is
-// not in the open set the pass just listed.
+// not in the open set the pass just listed, plus completed rounds that merged.
 //
-// It costs nothing extra: the list is the one watchPass already fetched, and it
-// is the same evidence a per-round `pullHead` would gather one PR at a time.
-// Rounds that are fired or reviewing are left alone — those are answered by
-// Progress, which has the round's own observation to reason from.
+// The open list establishes that the PR is no longer open; one targeted read
+// per stale round distinguishes a merge, whose per-PR evidence can be retired,
+// from a merely closed PR, whose evidence must survive a possible reopen.
 func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
 	key := NormalizeRepo(repo)
 	var stale []Round
@@ -1870,14 +1872,53 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		if NormalizeRepo(r.Repo) != key || open[r.PR] {
 			continue
 		}
-		if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
+		if r.Active() {
 			stale = append(stale, r)
 		}
 	}
-	// Ordered, so a pass that is interrupted has done a prefix of the work
-	// rather than an arbitrary subset.
+	if terminal, ok := s.nextTerminalRound(st, repo, open); ok {
+		stale = append(stale, terminal)
+	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
+	var failures []error
 	for _, r := range stale {
+		pull, err := s.gh.GetPull(ctx, r.Repo, r.PR)
+		if err != nil {
+			if abortsPass(err) || ctx.Err() != nil {
+				return err
+			}
+			failures = append(failures, fmt.Errorf("%s#%d: %w", r.Repo, r.PR, err))
+			// The open-PR list already established that this PR is closed. A
+			// detail read is only needed to distinguish a merge, so do not leave
+			// waiting work at the front of the queue while that cleanup is retried.
+			if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
+				if _, abandonErr := s.abandonRound(ctx, r, "pr closed", "skipped"); abandonErr != nil {
+					return abandonErr
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+				}
+			}
+			continue
+		}
+		// The PR may have reopened since the pass listed it.
+		if pull.State == "open" && !pull.Merged {
+			continue
+		}
+		if pull.Merged {
+			if err := s.retireMerged(ctx, r.Repo, r.PR); err != nil && !errors.Is(err, ErrNoChange) {
+				return err
+			}
+			if s.log != nil {
+				s.log.Printf("watch: %s#%d left the queue: %s", r.Repo, r.PR, NoteMerged)
+			}
+			continue
+		}
+		// Preserve completed markers and in-flight work for a merely closed PR:
+		// unlike a merge, it may reopen under changed reviewer requirements.
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
 		if _, err := s.abandonRound(ctx, r, "pr closed", "skipped"); err != nil {
 			return err
 		}
@@ -1886,7 +1927,7 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 	}
 	if s.cfg.DryRun {
-		return nil
+		return errors.Join(failures...)
 	}
 	var invalidated []int
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -1907,7 +1948,64 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 			s.log.Printf("watch: %s#%d retired its one-pass merge hand-off: pr closed", repo, pr)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
+}
+
+// nextTerminalRound returns one completed or index-only pull request for a
+// repository, rotating across passes. Terminal evidence grows with repository
+// age, so every housekeeping caller shares this bounded selection.
+func (s *Service) nextTerminalRound(st State, repo string, skip map[int]bool) (Round, bool) {
+	key := NormalizeRepo(repo)
+	terminal := map[int]Round{}
+	for _, r := range st.Rounds {
+		if NormalizeRepo(r.Repo) != key || skip[r.PR] || r.Active() {
+			continue
+		}
+		terminal[r.PR] = r
+	}
+	// During a rolling upgrade, an older writer can rebuild these indexes from
+	// an archived merged round and later evict that round. Include index-only PRs
+	// so the bounded sweep can rediscover the merge and finish the retirement.
+	for _, index := range []map[string]map[string]time.Time{st.CoActivity, st.CoAnswers} {
+		for candidate := range index {
+			candidateRepo, pr, ok := parseHoldKey(candidate)
+			if !ok || NormalizeRepo(candidateRepo) != key || skip[pr] {
+				continue
+			}
+			if st.Round(candidateRepo, pr) == nil {
+				terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
+			}
+		}
+	}
+	for candidate := range st.ReviewedHeads {
+		candidateRepo, pr, ok := parseHoldKey(candidate)
+		if !ok || NormalizeRepo(candidateRepo) != key || skip[pr] {
+			continue
+		}
+		if st.Round(candidateRepo, pr) == nil {
+			terminal[pr] = Round{Repo: candidateRepo, PR: pr, Phase: PhaseCompleted}
+		}
+	}
+	terminalPRs := make([]int, 0, len(terminal))
+	for pr := range terminal {
+		terminalPRs = append(terminalPRs, pr)
+	}
+	sort.Ints(terminalPRs)
+	if len(terminalPRs) == 0 {
+		return Round{}, false
+	}
+	if s.lastClosedSweep == nil {
+		s.lastClosedSweep = map[string]int{}
+	}
+	next := terminalPRs[0]
+	for _, pr := range terminalPRs {
+		if pr > s.lastClosedSweep[key] {
+			next = pr
+			break
+		}
+	}
+	s.lastClosedSweep[key] = next
+	return terminal[next], true
 }
 
 // noteSessionDetail records what a running session is working on, for the

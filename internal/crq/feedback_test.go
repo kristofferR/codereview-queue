@@ -1661,6 +1661,68 @@ func TestLoopReportsClosedPRSkip(t *testing.T) {
 	if code != 0 || report.Status != "skipped" || report.Reason != "pr closed" {
 		t.Fatalf("closed PR should be a terminal skipped report, code=%d report=%#v", code, report)
 	}
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Feedback(ctx, "owner/repo", 12); err != nil {
+			t.Fatalf("repeated merged feedback %d: %v", i+1, err)
+		}
+	}
+}
+
+func TestMergedFeedbackStillFiltersDismissedFindings(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+	}
+	gh := newFakeGitHub()
+	repo, pr, head := "owner/repo", 13, "abcdef1234567890"
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	review := ghapi.Review{
+		ID: 901, CommitID: head, State: "COMMENTED", SubmittedAt: time.Now().UTC(),
+		Body: corpusMessage(t, "coderabbit/findings-outside-diff.md"),
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, repo, pr, head[:9], PhaseCompleted, review.SubmittedAt, 0)
+	svc := NewService(cfg, gh, store, nil)
+
+	before, err := svc.Feedback(ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Findings) == 0 {
+		t.Fatal("fixture did not produce a threadless finding")
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		round := st.Round(repo, pr)
+		if round == nil {
+			t.Fatal("fixture lost its round")
+		}
+		for _, finding := range before.Findings {
+			if finding.ThreadID != "" || !round.Dismiss(finding.ID, "already handled") {
+				t.Fatal("fixture did not record a threadless dismissal")
+			}
+		}
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pull.State = "closed"
+	pull.Merged = true
+	gh.pulls[fakeKey(repo, pr)] = pull
+
+	after, err := svc.Feedback(ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Findings) != 0 || after.Dismissed != len(before.Findings) {
+		t.Fatalf("merged feedback resurfaced a dismissed finding: %+v", after)
+	}
 }
 
 func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {

@@ -315,17 +315,29 @@ var (
 	// Line headers come backticked in "Outside diff range comments" (`12-15`:) and
 	// un-backticked in "Comments failed to post" (12-15:) — accept both.
 	detailHeaderRE = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
-	promptBlockRE  = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
-	promptFileRE   = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
-	promptBulletRE = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
+	// Per-finding summaries carry a full location below the summary instead of
+	// grouping line-only headers beneath a "<path> (N)" summary.
+	detailLocationRE = regexp.MustCompile("^`([^`]+):([0-9]+)(?:\\s*-\\s*[0-9]+)?`$")
+	promptBlockRE    = regexp.MustCompile("(?is)<summary>[^<]*(?:Prompt for all review comments with AI agents|Prompt to fix review comments)[^<]*</summary>.*?```\\s*(.*?)\\s*```")
+	promptFileRE     = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
+	promptBulletRE   = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
 )
 
 func ParseDetailedReviewFindings(body string, review ReviewMeta, bot string) []Finding {
 	lines := strings.Split(body, "\n")
 	var out []Finding
 	currentPath := ""
+	inFence := false
+	codeRabbit := NormalizeBotName(bot) == NormalizeBotName(CodeRabbitLogin)
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 		if match := detailSummaryRE.FindStringSubmatch(line); match != nil {
 			summary := strings.TrimSpace(match[1])
 			if LooksLikePath(summary) {
@@ -333,20 +345,35 @@ func ParseDetailedReviewFindings(body string, review ReviewMeta, bot string) []F
 			}
 			continue
 		}
-		match := detailHeaderRE.FindStringSubmatch(line)
-		if match == nil || currentPath == "" {
+		path, lineNumber, meta := currentPath, "", ""
+		if match := detailLocationRE.FindStringSubmatch(line); codeRabbit && match != nil && LooksLikePath(match[1]) {
+			path, lineNumber = match[1], match[2]
+		} else if match := detailHeaderRE.FindStringSubmatch(line); match != nil {
+			lineNumber, meta = match[1], strings.TrimSpace(match[3])
+		}
+		if lineNumber == "" || path == "" {
 			continue
 		}
-		startLine, _ := strconv.Atoi(match[1])
-		meta := strings.TrimSpace(match[3])
+		startLine, _ := strconv.Atoi(lineNumber)
 		if IsNonActionableText(meta) {
 			continue
 		}
 		start := i + 1
 		end := len(lines)
+		depth, blockFence := 0, false
 		for j := start; j < len(lines); j++ {
 			next := strings.TrimSpace(lines[j])
-			if detailHeaderRE.MatchString(next) || detailSummaryRE.MatchString(next) {
+			if strings.HasPrefix(next, "```") {
+				blockFence = !blockFence
+				continue
+			}
+			if blockFence {
+				continue
+			}
+			// Nested AI prompts belong to this finding; the enclosing details
+			// close ends it, before later findings or review metadata can leak in.
+			depth += strings.Count(next, "<details>") - strings.Count(next, "</details>")
+			if depth < 0 || detailHeaderRE.MatchString(next) || (codeRabbit && detailLocationRE.MatchString(next)) || detailSummaryRE.MatchString(next) {
 				end = j
 				break
 			}
@@ -360,7 +387,7 @@ func ParseDetailedReviewFindings(body string, review ReviewMeta, bot string) []F
 		finding := Finding{
 			Bot:       bot,
 			Severity:  SeverityOf(meta + "\n" + block),
-			Path:      strings.TrimPrefix(currentPath, "@"),
+			Path:      strings.TrimPrefix(path, "@"),
 			Line:      startLine,
 			Title:     title,
 			Body:      bodyText,
@@ -373,6 +400,7 @@ func ParseDetailedReviewFindings(body string, review ReviewMeta, bot string) []F
 		if IsActionableFinding(finding) {
 			out = append(out, finding)
 		}
+		i = end - 1
 	}
 	return out
 }

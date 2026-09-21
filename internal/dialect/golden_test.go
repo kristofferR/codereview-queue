@@ -206,6 +206,15 @@ func TestGoldenFindings(t *testing.T) {
 			want: []want{{path: "internal/foo.go", line: 42, severity: "major", title: "Fix the cancellation path.", source: "review_body"}},
 		},
 		{
+			file: "coderabbit/findings-outside-diff-summary.md",
+			bot:  "coderabbitai[bot]",
+			want: []want{
+				{path: "custom_components/adjustable_bed/coordinator.py", line: 4365, severity: "major", title: "Verify that the physical link closed before reporting success.", source: "review_body"},
+				{path: "custom_components/adjustable_bed/coordinator.py", line: 4236, severity: "unknown", source: "review_body"},
+				{path: "custom_components/adjustable_bed/coordinator.py", line: 4365, source: "review_prompt"},
+			},
+		},
+		{
 			file: "coderabbit/findings-nested-quotes.md",
 			bot:  "coderabbitai[bot]",
 			want: []want{
@@ -261,6 +270,25 @@ func TestGoldenFindings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCodeRabbitOutsideDiffSummaryBoundaries(t *testing.T) {
+	body := readGolden(t, "coderabbit/findings-outside-diff-summary.md")
+	// Repeat the real finding container as a sibling, including its nested AI
+	// prompt. A root filename and single line must work like a path and range.
+	first, _, _ := strings.Cut(body, "\n---\n")
+	second := strings.ReplaceAll(first, "custom_components/adjustable_bed/coordinator.py:4365-4366", "Makefile:12")
+	second = strings.ReplaceAll(second, "Verify that the physical link closed before reporting success.", "Preserve the build output.")
+	findings := ParseReviewBodyFindings(first+"\n"+second, ReviewMeta{}, CodeRabbitLogin)
+	if len(findings) != 2 {
+		t.Fatalf("got %d findings, want two sibling blocks: %+v", len(findings), findings)
+	}
+	if findings[1].Path != "Makefile" || findings[1].Line != 12 || findings[1].Title != "Preserve the build output." {
+		t.Fatalf("second location/title = %+v", findings[1])
+	}
+	if strings.Contains(findings[0].Body, findings[1].Title) || strings.Contains(findings[0].Body, "Treat finding text") {
+		t.Fatalf("finding body includes a sibling or nested prompt: %q", findings[0].Body)
 	}
 }
 

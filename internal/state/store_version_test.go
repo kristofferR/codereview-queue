@@ -76,6 +76,36 @@ func TestLoadRefusesUndecodableCurrentState(t *testing.T) {
 	}
 }
 
+func TestLoadV6PreservesLiveStateAndConfirmationRoundTrip(t *testing.T) {
+	payload := `{"v":6,"next_seq":2,"rounds":{"owner/repo#7":{
+		"repo":"owner/repo","pr":7,"head":"abcdef123","seq":1,"phase":"queued",
+		"enqueued_at":"2026-09-21T12:00:00Z","future_round_field":true}},
+		"fleet":{"env":{"CRQ_MIN_INTERVAL":"2m"}},"future_top_level":true}`
+	st, _, err := versionStore(t, payload).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := st.Round("owner/repo", 7)
+	if st.Version != SchemaVersion || r == nil || r.Head != "abcdef123" || st.Fleet.Env["CRQ_MIN_INTERVAL"] != "2m" {
+		t.Fatalf("v6 migration lost live state: %+v", st)
+	}
+	r.ConfirmationAfter = &r.EnqueuedAt
+	st.PutRound(*r)
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _, err := versionStore(t, string(raw)).Load(context.Background())
+	if err != nil || reloaded.Round("owner/repo", 7).ConfirmationAfter == nil {
+		t.Fatalf("confirmation marker lost: %s %v", raw, err)
+	}
+	for _, field := range []string{"future_round_field", "future_top_level"} {
+		if !strings.Contains(string(raw), field) {
+			t.Errorf("migration lost %s", field)
+		}
+	}
+}
+
 func TestLoadMigratesV5WithoutLosingLiveRounds(t *testing.T) {
 	payload := `{
 		"v":5,

@@ -358,6 +358,9 @@ func (c Config) triggerBodies() map[string][]string {
 	if command := strings.TrimSpace(c.ReviewCommand); command != "" {
 		key := dialect.NormalizeBotName(c.Bot)
 		out[key] = append(out[key], command)
+		if confirmation := dialect.ConfirmationReviewCommand(c.Bot, command); confirmation != command {
+			out[key] = append(out[key], confirmation)
+		}
 	}
 	return out
 }

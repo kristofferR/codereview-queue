@@ -69,6 +69,9 @@ type NextInput struct {
 	// yet (uncommitted, or committed but unpushed). It is what separates "push
 	// your fixes" from "nothing left to do".
 	LocalWork bool
+	// ConfirmationRequired means this head's latest findings were cleared by
+	// a fixer rather than by a subsequent review.
+	ConfirmationRequired bool
 	// Deferred marks a CodeRabbit rate-limit degrade: the co-reviewers answered
 	// and CodeRabbit's review is still owed, firing at DeferredUntil.
 	Deferred      bool
@@ -208,8 +211,8 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 	}
 
-	// 3. Required reviewers still pending: the head must not move. Resolving a
-	//    thread does not restart a review; pushing does.
+	// 3. Required reviewers still pending: the head must not move. Confirmation
+	//    after a dismissal waits until this review finishes too.
 	if !in.Completion.Done {
 		// ...unless the wait already expired. Progress retires that round to keep
 		// the queue moving, but missing required evidence still must not read as
@@ -255,6 +258,12 @@ func NextAction(in NextInput, now time.Time) Action {
 	}
 	if in.LocalWork {
 		return Action{Kind: ActionPush, Reason: "all required reviewers answered on this head"}
+	}
+	if in.ConfirmationRequired {
+		if in.Round.ConfirmationAfter != nil {
+			return Action{Kind: ActionBlocked, Reason: "confirmation review findings were dismissed again; human review or a code change is required"}
+		}
+		return Action{Kind: ActionWait, Reason: "resolved or dismissed findings need a fresh confirmation review", At: in.nextCheck(now, nil, pending)}
 	}
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
 }

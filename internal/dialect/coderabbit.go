@@ -17,6 +17,16 @@ type CodeRabbit struct {
 	CalibrationMarker string
 }
 
+// ConfirmationReviewCommand asks CodeRabbit to re-read an unchanged head.
+// The normal review command is incremental and can refuse already-read code.
+// Explicit custom commands and other reviewers retain their configured wording.
+func ConfirmationReviewCommand(bot, command string) string {
+	if NormalizeBotName(bot) == "coderabbitai" && strings.TrimSpace(command) == "@coderabbitai review" {
+		return "@coderabbitai full review"
+	}
+	return command
+}
+
 // Default CodeRabbit dialect vocabulary. These literals live here — the one
 // package that owns bot-message text — so crq/config and the engine inject them
 // without spelling out the "rate limit" wording themselves.

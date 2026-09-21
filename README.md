@@ -654,7 +654,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v6, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v7, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together. Existing v5/v6 rounds migrate in place |
 | `CRQ_STATE_GIT_AUTHOR_NAME` | `kristofferR` | optional author name for commits made by the Git state fallback |
 | `CRQ_STATE_GIT_AUTHOR_EMAIL` | public GitHub noreply address | optional author email for commits made by the Git state fallback; use a non-private address |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
@@ -802,6 +802,14 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   drains the shared REST quota the daemon and every other agent are also spending.
 - **Never choose when to push.** `hold` vs `push` is crq's answer, and it already accounts for the
   rate-limit degrade and the quiet period after a review lands.
+- **Clearing findings is not reviewer confirmation.** If findings from the latest review are
+  resolved or dismissed without changing the commit, `next`, `wait`, `loop` and autofix request
+  one fresh confirmation pass through the normal queue and quota gates. CodeRabbit gets
+  `full review`, since its ordinary command checks only new changes. Old same-head evidence
+  cannot finish this pass. If its findings are dismissed again, `next` returns `blocked`
+  (`feedback`/`loop`: `held`) for human review or a code change. A new commit resets the
+  allowance. A reviewer's explicit withdrawal needs no extra pass; one-pass campaigns remain
+  one-pass. `feedback` alone never requests the confirmation.
 - **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...` (pass them all at
   once). If you're declining one, `crq decline <thread-id> --reason "…"` — that resolves it too,
   because a thread left open keeps its finding actionable; `--keep-open` overrides.

@@ -176,6 +176,16 @@ func (s *Service) nextDriven(ctx context.Context, repo string, pr int, allowFina
 	if s.cfg.DryRun {
 		return report, nil
 	}
+	if feedback.confirmationRequired && !feedback.config.OnePass {
+		if action.Kind == engine.ActionBlocked {
+			return report, nil
+		}
+		if action.Kind == engine.ActionWait && s.confirmationReady(feedback) {
+			if _, err := s.queueConfirmation(ctx, feedback); err != nil {
+				return report, err
+			}
+		}
+	}
 
 	// Nothing left to clear, so record the round for this head (idempotent;
 	// supersedes on a new head) and advance the queue one step.
@@ -335,10 +345,11 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		// evidence under one login while the verdict was decided under another —
 		// holding a degraded round through the account-block window, and blaming
 		// an expired wait on a bot that was never the primary.
-		Primary:       feedback.config.Bot,
-		LocalWork:     report.LocalWork,
-		Deferred:      feedback.CodeRabbitDeferred,
-		DeferredUntil: feedback.DeferredUntil,
+		Primary:              feedback.config.Bot,
+		LocalWork:            report.LocalWork,
+		ConfirmationRequired: feedback.confirmationRequired && !feedback.config.OnePass,
+		Deferred:             feedback.CodeRabbitDeferred,
+		DeferredUntil:        feedback.DeferredUntil,
 		DeferredReady: feedback.CodeRabbitDeferred && engine.DoneExceptWithEvidence(
 			feedback.ReviewedBy, feedback.config.Bot, dialect.CodexBotLogin,
 		),

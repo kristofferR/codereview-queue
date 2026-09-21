@@ -1029,24 +1029,7 @@ func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 		th.IsOutdated = outdated
 		th.Path = "internal/foo.go"
 		th.Line = 42
-		c := struct {
-			DatabaseID   int64     `json:"databaseId"`
-			Body         string    `json:"body"`
-			URL          string    `json:"url"`
-			Path         string    `json:"path"`
-			Line         int       `json:"line"`
-			OriginalLine int       `json:"originalLine"`
-			CreatedAt    time.Time `json:"createdAt"`
-			Author       struct {
-				Login string `json:"login"`
-			} `json:"author"`
-			Commit struct {
-				OID string `json:"oid"`
-			} `json:"commit"`
-			OriginalCommit struct {
-				OID string `json:"oid"`
-			} `json:"originalCommit"`
-		}{Body: "**Potential issue** still unfixed.", Line: 42}
+		c := reviewThreadComment{Body: "**Potential issue** still unfixed.", Line: 42}
 		c.Author.Login = "coderabbitai[bot]"
 		c.Commit.OID = oid
 		th.Comments.Nodes = append(th.Comments.Nodes, c)
@@ -1447,24 +1430,7 @@ func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
 	th.Line = 7
 	c := th.Comments.Nodes[:0:0]
 	_ = c
-	node := struct {
-		DatabaseID   int64     `json:"databaseId"`
-		Body         string    `json:"body"`
-		URL          string    `json:"url"`
-		Path         string    `json:"path"`
-		Line         int       `json:"line"`
-		OriginalLine int       `json:"originalLine"`
-		CreatedAt    time.Time `json:"createdAt"`
-		Author       struct {
-			Login string `json:"login"`
-		} `json:"author"`
-		Commit struct {
-			OID string `json:"oid"`
-		} `json:"commit"`
-		OriginalCommit struct {
-			OID string `json:"oid"`
-		} `json:"originalCommit"`
-	}{Body: "**Potential issue** fix this", Line: 7}
+	node := reviewThreadComment{Body: "**Potential issue** fix this", Line: 7}
 	node.Author.Login = "coderabbitai" // GraphQL form, no [bot]
 	th.Comments.Nodes = append(th.Comments.Nodes, node)
 
@@ -2166,29 +2132,9 @@ func TestCodexCleanSummaryFormats(t *testing.T) {
 	}
 }
 
-// addThreadComment appends a comment to a reviewThread (the node type is
-// anonymous, so this hides the verbose literal).
+// addThreadComment appends a reviewer or agent reply.
 func addThreadComment(th *reviewThread, id int64, login, body string) {
-	node := th.Comments.Nodes[:0:0]
-	_ = node
-	var n struct {
-		DatabaseID   int64     `json:"databaseId"`
-		Body         string    `json:"body"`
-		URL          string    `json:"url"`
-		Path         string    `json:"path"`
-		Line         int       `json:"line"`
-		OriginalLine int       `json:"originalLine"`
-		CreatedAt    time.Time `json:"createdAt"`
-		Author       struct {
-			Login string `json:"login"`
-		} `json:"author"`
-		Commit struct {
-			OID string `json:"oid"`
-		} `json:"commit"`
-		OriginalCommit struct {
-			OID string `json:"oid"`
-		} `json:"originalCommit"`
-	}
+	var n reviewThreadComment
 	n.DatabaseID = id
 	n.Body = body
 	n.Author.Login = login

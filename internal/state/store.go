@@ -111,10 +111,10 @@ type StateStore interface {
 	SyncDashboard(context.Context, State) error
 }
 
-// GitStateStore persists v4 state as state.json in a git ref, with the same
+// GitStateStore persists state.json in a git ref, with the same
 // compare-and-swap mechanism as v3 (12 retries on UpdateRef 409/422).
 //
-// V3 is migrated in place; still older payloads are discarded because crq is
+// V5 and v6 are migrated in place; older payloads are discarded because crq is
 // pre-release and they describe a world this binary cannot act on. A NEWER one
 // is refused. The fleet runs mixed binary versions during a rolling deploy, so
 // reinitializing there would mean the first old binary to wake up erases every
@@ -267,11 +267,11 @@ func (s *GitStateStore) decodeState(raw []byte, rev Revision) (State, Revision, 
 		return State{}, Revision{}, s.refuse(
 			fmt.Sprintf("holds schema v%d, which this binary (v%d) does not understand", probe.Version, SchemaVersion), nil)
 	}
-	if probe.Version < SchemaVersion-1 {
+	if probe.Version < 5 {
 		s.logf("state ref %s holds schema v%d (want v%d) — reinitializing to a fresh state (no migration; crq is pre-release)", s.cfg.StateRef, probe.Version, SchemaVersion)
 		return s.fresh(), rev, nil
 	}
-	if probe.Version == SchemaVersion-1 {
+	if probe.Version == 5 {
 		migrated, err := migrateV5State(raw)
 		if err != nil {
 			return State{}, Revision{}, s.refuse("holds a v5 fleet policy this binary cannot migrate", err)

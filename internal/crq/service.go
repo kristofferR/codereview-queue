@@ -1911,7 +1911,11 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 	// decided for. Posting this host's startup value instead asked the previous
 	// primary for a review the round is not waiting for, and the round then timed
 	// out waiting for a bot nobody addressed.
-	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, cfg.ReviewCommand)
+	command := cfg.ReviewCommand
+	if round.ConfirmationAfter != nil {
+		command = dialect.ConfirmationReviewCommand(cfg.Bot, command)
+	}
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, command)
 	if err != nil {
 		updated, uerr := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
@@ -1956,7 +1960,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 	}
 	s.sync(ctx, updated)
 	if s.log != nil {
-		s.log.Printf("fire %s@%s (posted %s)", key, round.Head, strings.TrimSpace(cfg.ReviewCommand))
+		s.log.Printf("fire %s@%s (posted %s)", key, round.Head, strings.TrimSpace(command))
 	}
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head}, nil
 }

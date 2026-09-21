@@ -43,6 +43,10 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	if o.eng.Open && len(pull.Head.SHA) >= 9 {
 		o.eng.Head = pull.Head.SHA[:9]
 	}
+	confirmationAt := confirmationCutoff(round, o.eng.Head)
+	if !confirmationAt.IsZero() {
+		cfg.ReviewCommand = dialect.ConfirmationReviewCommand(cfg.Bot, cfg.ReviewCommand)
+	}
 
 	// Once the pull establishes the head, these reads are independent. Keeping
 	// them serial made one observation cost a full GitHub round trip per
@@ -112,8 +116,11 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// Reviews and issue comments are fetched even for a closed PR: the daemon's
 	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its
 	// findings, and the extra two reads on a to-be-dropped round are negligible.
-	o.reviews = reviews
 	for _, review := range reviews {
+		if !confirmationFresh(review.SubmittedAt, confirmationAt) {
+			continue
+		}
+		o.reviews = append(o.reviews, review)
 		// CodeRabbit submits empty-bodied COMMENTED review objects as carriers
 		// for its inline-comment batches, minutes before the real review (the
 		// one with an "Actionable comments posted" body) lands. A shell is not
@@ -133,7 +140,6 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		})
 	}
 
-	o.comments = comments
 	classifier := dialect.Classifier{
 		CodeRabbit:    s.cr,
 		Bot:           cfg.Bot,
@@ -144,13 +150,26 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	presentComments := make(map[int64]bool, len(comments))
 	for _, c := range comments {
 		presentComments[c.ID] = true
-		o.eng.Events = append(o.eng.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
+		ev := classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt)
+		if confirmationEvent(ev, confirmationAt) {
+			if !confirmationFresh(ev.ObservedTime(), confirmationAt) && ev.SummaryOnly {
+				// Preserve the plan restriction, never its old completion marker.
+				ev.Kind = dialect.EvOther
+			}
+			o.eng.Events = append(o.eng.Events, ev)
+		}
+		if confirmationFresh(ev.ObservedTime(), confirmationAt) {
+			o.comments = append(o.comments, c)
+		}
 	}
 	// Tidy removes spent trigger comments, but command/reply pairing still needs
 	// their place in the chronological FIFO. PostedCommands is the persisted
 	// proof of the comments crq wrote, so restore only commands no longer on the
 	// PR; a live comment remains classified from its actual body above.
 	for _, cmd := range posted {
+		if !confirmationFresh(cmd.CreatedAt, confirmationAt) {
+			continue
+		}
 		if presentComments[cmd.ID] {
 			continue
 		}
@@ -185,6 +204,9 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 			}
 		} else {
 			for _, run := range runs {
+				if run.Status == "completed" && !confirmationFresh(run.CompletedAt, confirmationAt) {
+					continue
+				}
 				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
 				if verdict == dialect.CheckUnrelated || !cfg.coBotEnabled(login) {
 					continue
@@ -248,7 +270,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 
 	// Adoptable commands are only consulted for a fire-eligible round.
 	if round != nil && round.FireEligible(now) {
-		cr, co, err := s.reviewCommands(ctx, cfg, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
+		cr, co, err := s.reviewCommands(ctx, cfg, repo, pr, o.eng, confirmationCommandFloor(round, adoptCutoff(*round)), pull, comments, reviews)
 		if err != nil {
 			return observation{}, err
 		}

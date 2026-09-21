@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v6: one Round per tracked PR,
+// Package state defines crq's persisted schema v7: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -185,6 +185,11 @@ type Round struct {
 	// need one immediate trigger on an existing round. Once their command is
 	// recorded, normal per-bot dedupe makes the force harmless.
 	ForceCoReviewers []string `json:"force_co_reviewers,omitempty"`
+
+	// ConfirmationAfter starts the single allowed same-head confirmation pass.
+	// Evidence predating it cannot confirm a fixer's dismissal. A replacement
+	// head gets a new round and therefore a new confirmation allowance.
+	ConfirmationAfter *time.Time `json:"confirmation_after,omitempty"`
 
 	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
 	// ByHost identifies the PROCESS that reserved this round, in the writer form
@@ -523,7 +528,7 @@ func (l LeaderCapabilityLease) HasCapability(want string) bool {
 	return false
 }
 
-// State is schema v6. It persists as state.json in the existing git state ref;
+// State is schema v7. It persists as state.json in the existing git state ref;
 // v4 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
 	Version int   `json:"v"` // 5
@@ -677,11 +682,13 @@ func (s State) LeaderHasCapability(want string) bool {
 		s.LeaderCapabilities.HasCapability(want)
 }
 
-const SchemaVersion = 6
+// Schema v7 fences clients that would accept stale same-head review evidence
+// during a confirmation pass. Unknown-field preservation alone is insufficient.
+const SchemaVersion = 7
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 17
+const WriterCaps = 18
 
 // CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
 // daemons do not recognise that terminal same-head marker and could otherwise

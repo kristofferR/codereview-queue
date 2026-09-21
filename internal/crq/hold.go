@@ -76,7 +76,7 @@ func neutralizeMentions(text string) string {
 // neutralizeReviewCommands prevents a hold reason from triggering any configured
 // or registered review command when rendered in a pull request comment.
 func neutralizeReviewCommands(text string, cfg Config) string {
-	commands := []string{cfg.ReviewCommand}
+	commands := []string{cfg.ReviewCommand, dialect.ConfirmationReviewCommand(cfg.Bot, cfg.ReviewCommand)}
 	for _, co := range cfg.CoBots {
 		commands = append(commands, co.Command)
 	}

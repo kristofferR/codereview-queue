@@ -153,6 +153,17 @@ same-head round without re-firing it, even if no interactive `crq loop` remains 
 timeout. This preserves the dedup marker and prevents one silent review from starving cleanup of
 later rounds.
 
+Resolving or dismissing the latest findings without changing the head requires one fresh
+confirmation pass. `next`, `wait`, `loop` and autofix queue it after the current reviewers finish
+and settle, respecting the usual reviewer policy and quota. CodeRabbit uses `full review` for
+this unchanged commit. Old reviews, comments, checks and trigger commands cannot complete or
+suppress the new pass. Its findings are actionable again, even if their text matches an earlier
+dismissal. Dismissing them a second time returns `blocked` from `next` (`held` from
+`feedback`/`loop`); involve a human or change the code. A new head resets the allowance.
+Explicit reviewer withdrawal counts as confirmation. One-pass campaigns keep their single-pass
+limit. `feedback` remains non-triggering. Schema v7 preserves v5/v6 state but fences older clients
+that would accept stale evidence, so upgrade every fleet host together.
+
 Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
 nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
 `.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
@@ -476,9 +487,10 @@ crq dismiss REPO PR FINDING_ID [FINDING_ID...] --reason "why this is set aside"
 ```
 
 `FINDING_ID` is `.findings[].id` — content-derived, not a GitHub node ID, which is why the repo and
-PR are required. The dismissal covers the current head only; after a push the next reviewer must
-report it again. `crq next` and `crq feedback` report `dismissed: N` so a set-aside finding never
-looks lost, and `crq loop` converges on the same filtered list. A finding that HAS a thread is
+PR are required. The dismissal covers the current review pass only; after a push or confirmation
+pass the next reviewer must report it again. `crq next` and `crq feedback` report `dismissed: N`
+for decisions in the current round. Starting confirmation archives those decisions rather than
+silencing a fresh report. A finding that HAS a thread is
 refused: resolve or decline it instead, so the decision lands where the bot can answer it.
 
 For a SKIPPED review specifically, the two remedies differ: narrowing the PR addresses why the

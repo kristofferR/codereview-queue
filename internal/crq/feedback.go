@@ -81,7 +81,9 @@ type FeedbackReport struct {
 	// onePassReviewed is the campaign's PR-wide evidence predicate evaluated
 	// from this report's single GitHub observation. It is deliberately not part
 	// of the stable feedback JSON contract.
-	onePassReviewed bool
+	onePassReviewed      bool
+	confirmationRequired bool
+	confirmationRoundSeq int64
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -295,6 +297,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		},
 		onePassReviewed: onePassReviewed,
 	}
+	if round != nil {
+		report.confirmationRoundSeq = round.Seq
+	}
 
 	// The completion anchor is the current round only when it still tracks this
 	// head. Before enqueue, preview the replacement round so durable activity
@@ -368,10 +373,20 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// duplicates below. Convergence (engine.Completion) stays gated to a review
 	// whose commit matches the head, so the loop still waits for a real review.
 	latestReview := map[string]ghapi.Review{}
+	confirmationReviews := map[string]ghapi.Review{}
 	for _, review := range obs.reviews {
 		login := review.User.Login
 		if !dialect.InBots(extractBots, login) {
 			continue
+		}
+		// Empty carrier reviews and pending drafts are not a subsequent verdict
+		// on a resolved thread. GraphQL and REST spell bot logins differently.
+		if !strings.EqualFold(review.State, "PENDING") &&
+			!(strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "") {
+			key := dialect.NormalizeBotName(login)
+			if cur, ok := confirmationReviews[key]; !ok || reviewNewer(review, cur) {
+				confirmationReviews[key] = review
+			}
 		}
 		// Once a fresh review round has started for this head, a body submitted
 		// before that round belongs to the previous head. Unresolved threads are
@@ -452,6 +467,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			}
 		}
 		for _, thread := range threads {
+			if resolvedLatestReview(thread, confirmationReviews, obs.reviews, head) {
+				report.confirmationRequired = true
+			}
 			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)
 			// A resolved/outdated inline thread emits no finding, but CodeRabbit's
 			// "Prompt for AI agents" block still lists the same location. Record it so
@@ -629,6 +647,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
 			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
+				if finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
+					report.confirmationRequired = true
+				}
 				continue
 			}
 			kept = append(kept, finding)
@@ -651,6 +672,10 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		return report.Findings[i].Line < report.Findings[j].Line
 	})
 	report.Converged = engine.Converged(report.Findings, completion)
+	if report.confirmationRequired && !cfg.OnePass && report.Open {
+		report.Converged = false
+		report.Reason = "resolved or dismissed findings need a fresh confirmation review"
+	}
 	// Degrade detection: a live rate-limit window plus observed Codex
 	// responsiveness means this round runs Codex-only for now. Converged is
 	// structurally false here (CodeRabbit has no review evidence), so a
@@ -672,6 +697,10 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	switch {
 	case report.Converged:
 		report.Status = "converged"
+	case report.confirmationRequired && !cfg.OnePass && len(report.Findings) == 0 &&
+		allReviewed(report.ReviewedBy) && !confirmationCutoff(&completionRound, head).IsZero():
+		report.Status = "held"
+		report.Reason = "confirmation review findings were dismissed again; human review or a code change is required"
 	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
 		engine.DoneExceptWithEvidence(report.ReviewedBy, cfg.Bot, dialect.CodexBotLogin):
 		report.Status = "deferred"
@@ -730,6 +759,17 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 					report.Status = "feedback"
 					report.Reason = "unresolved findings must be addressed before a new review round"
 					return report, 10, nil
+				}
+				if s.confirmationReady(report) {
+					if blocked, err := s.confirmationBlocked(ctx, report); err != nil {
+						return report, 1, err
+					} else if blocked {
+						report.Status, report.Reason = "held", "confirmation review findings were dismissed again; human review or a code change is required"
+						return report, 0, nil
+					}
+					if _, err := s.queueConfirmation(ctx, report); err != nil {
+						return report, 1, err
+					}
 				}
 				break
 			}
@@ -851,6 +891,23 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 				report.Reason = "hold current head: fix locally, but do not commit or push until every required reviewer finishes"
 			}
 			return report, 10, nil
+		}
+		if s.confirmationReady(report) {
+			if blocked, err := s.confirmationBlocked(ctx, report); err != nil {
+				return report, 1, err
+			} else if blocked {
+				report.Status, report.Reason = "held", "confirmation review findings were dismissed again; human review or a code change is required"
+				return report, 0, nil
+			}
+			if !s.cfg.DryRun {
+				if queued, err := s.queueConfirmation(ctx, report); err != nil {
+					return report, 1, err
+				} else if queued {
+					// Restart around the new round and its own deadline. Only one
+					// confirmation can be queued, so this cannot recurse again.
+					return s.loopClaimed(ctx, repo, pr)
+				}
+			}
 		}
 		if report.Converged || report.Status == "deferred" {
 			// Don't trust the first converged observation: bots deliver in waves
@@ -1299,26 +1356,31 @@ type reviewThread struct {
 	Path       string `json:"path"`
 	Line       int    `json:"line"`
 	Comments   struct {
-		TotalCount int `json:"totalCount"`
-		Nodes      []struct {
-			DatabaseID   int64     `json:"databaseId"`
-			Body         string    `json:"body"`
-			URL          string    `json:"url"`
-			Path         string    `json:"path"`
-			Line         int       `json:"line"`
-			OriginalLine int       `json:"originalLine"`
-			CreatedAt    time.Time `json:"createdAt"`
-			Author       struct {
-				Login string `json:"login"`
-			} `json:"author"`
-			Commit struct {
-				OID string `json:"oid"`
-			} `json:"commit"`
-			OriginalCommit struct {
-				OID string `json:"oid"`
-			} `json:"originalCommit"`
-		} `json:"nodes"`
+		TotalCount int                   `json:"totalCount"`
+		Nodes      []reviewThreadComment `json:"nodes"`
 	} `json:"comments"`
+}
+
+type reviewThreadComment struct {
+	DatabaseID   int64     `json:"databaseId"`
+	Body         string    `json:"body"`
+	URL          string    `json:"url"`
+	Path         string    `json:"path"`
+	Line         int       `json:"line"`
+	OriginalLine int       `json:"originalLine"`
+	CreatedAt    time.Time `json:"createdAt"`
+	Author       struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Commit struct {
+		OID string `json:"oid"`
+	} `json:"commit"`
+	OriginalCommit struct {
+		OID string `json:"oid"`
+	} `json:"originalCommit"`
+	PullRequestReview struct {
+		DatabaseID int64 `json:"databaseId"`
+	} `json:"pullRequestReview"`
 }
 
 func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]reviewThread, error) {
@@ -1357,6 +1419,7 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
               author { login }
               commit { oid }
               originalCommit { oid }
+              pullRequestReview { databaseId }
             }
           }
         }

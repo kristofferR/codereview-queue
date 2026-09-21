@@ -96,6 +96,16 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 					if round.IsDismissed(id) {
 						alreadyDone[id] = true
 					}
+					// A confirmation archives the original dismissal. Retried
+					// commands remain idempotent, but a fresh report of the same
+					// content must be judged again.
+					if _, present := current[id]; !present && round.ConfirmationAfter != nil {
+						for _, previous := range st.Archive {
+							if previous.Repo == repo && previous.PR == pr && previous.Head == feedback.Head && previous.IsDismissed(id) {
+								alreadyDone[id] = true
+							}
+						}
+					}
 				}
 			}
 		}

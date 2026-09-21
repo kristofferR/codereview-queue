@@ -36,7 +36,7 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   ordinary path to api.github.com: short-lived CLI processes proxy REST/GraphQL through it, sharing
   one ETag cache, retry/backoff owner, and same-URL GET coalescer. Command semantics stay in `crq`;
   `serve` receives narrow interfaces wired by `cmd/crq`.
-- `internal/state/` — persisted schema v6: one `Round` per PR, one global
+- `internal/state/` — persisted schema v7: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
   per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,
   `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped
@@ -56,6 +56,8 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   schema bump. Schema v4 deliberately fenced older v3 pumping clients that
   could not enforce administrative holds. Schema v5 similarly fences v4
   writers that would erase the dispatch scheduler's model and cooldown state.
+  Schema v7 fences v6 clients that would reuse old evidence during a same-head
+  confirmation. Upgrade all fleet hosts together; v5/v6 live state is preserved.
   `CoActivity` and `CoAnswers` are the unbounded per-PR indexes that preserve
   generic reviewer activity and completed-review evidence separately after the
   bounded round archive is evicted. A merge is the one outcome that retires
@@ -101,11 +103,19 @@ r.Head == head → skip`. A completed round stays as the "this head was reviewed
 dedup marker. A rate-limited requeue parks the round in `awaiting_retry` (keeping
 its head/attempts/history), it does not delete a fired marker.
 
-The one exception to that skip is `Round.ReviewersChanged`: a reviewer change
+One exception to that skip is `Round.ReviewersChanged`: a reviewer change
 requeues the repository's completed rounds, but only for PRs that are open —
 marking the closed ones instead of handing Pump dead work. A marked round is
 reopened by whichever enqueue path next sees the PR alive, so reopening a PR
 picks up the requirements it missed while it was shut.
+
+The other exception is confirmation after a fixer resolves or dismisses the
+latest findings without changing the head. `next`/`loop` archive that round and
+queue one same-head pass with `ConfirmationAfter`. `observe` excludes older
+review, comment, check and command evidence for that pass. CodeRabbit uses a
+full review; co-reviewers retain their configured trigger policy. A second
+dismissal blocks instead of looping or claiming convergence. A new head resets
+the allowance. Explicit one-pass campaigns do not request confirmation.
 
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to

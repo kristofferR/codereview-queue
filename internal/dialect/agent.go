@@ -130,9 +130,11 @@ func (e agentEvent) codexUsageLimitMessage() string {
 			message = failure.Message
 		}
 	}
-	if strings.HasPrefix(message, "You’ve hit your usage limit.") ||
-		strings.HasPrefix(message, "You've hit your usage limit.") {
-		return message
+	for _, prefix := range []string{"You’ve hit your usage limit", "You've hit your usage limit"} {
+		if suffix, ok := strings.CutPrefix(message, prefix); ok &&
+			(strings.HasPrefix(suffix, ".") || strings.HasPrefix(suffix, " for ")) {
+			return message
+		}
 	}
 	return ""
 }

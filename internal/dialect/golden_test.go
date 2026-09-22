@@ -36,6 +36,8 @@ func TestGoldenAgentFailures(t *testing.T) {
 			time.Date(2026, 9, 22, 19, 50, 59, 0, time.Local)},
 		{"codex/exec-usage-limit.jsonl", time.Date(2026, 9, 27, 17, 15, 0, 0, time.Local),
 			time.Date(2026, 9, 27, 17, 22, 0, 0, time.Local)},
+		{"codex/exec-model-usage-limit.jsonl", time.Date(2026, 9, 22, 19, 35, 59, 0, time.Local),
+			time.Date(2026, 9, 22, 19, 50, 59, 0, time.Local)},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			body := readGolden(t, tc.file)

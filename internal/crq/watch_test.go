@@ -387,6 +387,74 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	}
 }
 
+func TestCodexUsageLimitResumesAfterEarlyReset(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 18, sha
+	gh.pulls[fakeKey(repo, 18)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Date(2026, 9, 22, 19, 35, 59, 0, time.Local)
+	svc.now = func() time.Time { return now }
+	seedRound(t, store, cfg, repo, 18, sha, PhaseQueued, now, 0)
+
+	fixture, err := os.ReadFile("../dialect/testdata/codex/exec-usage-limit.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat <<'CRQ_USAGE_EVENT'\n"+
+		string(fixture)+"CRQ_USAGE_EVENT\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := NextReport{Repo: repo, PR: 18, Head: sha, Action: "fix"}
+	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 1}
+	if ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "limited", 1); !ok {
+		t.Fatal(why)
+	}
+	if ok, why := svc.dispatch(ctx, opts, report, "limited"); ok || !strings.Contains(why, "temporarily unavailable") {
+		t.Fatalf("usage exhaustion = %v, %q", ok, why)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := st.Round(repo, 18).Dispatch
+	reset := now.Add(15 * time.Minute)
+	if claim.Attempts != 0 || claim.Live(now) || !claim.UnavailableModels[claim.Model].Equal(reset) {
+		t.Fatalf("quota wait = %+v, want refunded attempt and reset %s", claim, reset)
+	}
+
+	// A fresh watcher probes again before the advertised September 27 reset,
+	// including for the default model. A banked or unscheduled reset can restore
+	// capacity without a manual unhold or attempt reset in crq.
+	resumed := NewService(cfg, gh, store, nil)
+	resumed.now = func() time.Time { return reset.Add(-time.Second) }
+	if ok, why, byDesign := resumed.claimDispatch(ctx, report, "early", 1); ok || !byDesign ||
+		!strings.Contains(why, "temporarily unavailable") {
+		t.Fatalf("before reset = %v, %q, byDesign %v", ok, why, byDesign)
+	}
+	resumed.now = func() time.Time { return reset }
+	if ok, why, _, _ := resumed.claimDispatchModels(ctx, &report, "resumed", 1); !ok {
+		t.Fatalf("reset did not release autofix: %s", why)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := resumed.dispatch(ctx, opts, report, "resumed"); !ok {
+		t.Fatalf("resumed session did not run: %s", why)
+	}
+}
+
 func TestProviderOutageReleasesAnArchivedDispatchClaim(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

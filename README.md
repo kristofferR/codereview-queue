@@ -473,7 +473,10 @@ Built to be left running:
   exhausted attempt cycle backs off with an increasing cooldown instead of retrying forever.
 - **Model failover.** `crq solver set <repo> --models opus,sonnet,haiku` is an ordered ranking: a
   provider outage parks that model until its reported reset and moves to the next, without spending
-  the attempt budget.
+  the attempt budget. After Codex token exhaustion, autofix retries every 15 minutes so an early
+  reset, a banked reset you use, or added credits can resume work automatically. A sooner reported
+  reset shortens that wait, with a minute of margin for its rounded local timestamp. Retries run
+  on the watcher's next pass after the wait.
 - **Tunable per repository.** `crq solver` controls the model ranking, effort, which severities are
   handed to the unattended agent, how readily it stops to ask a human instead of guessing
   (`--ask`), and a standing extra prompt ("This project uses bun, never npm.").

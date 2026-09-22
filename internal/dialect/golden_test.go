@@ -26,6 +26,32 @@ func readGolden(t *testing.T, name string) string {
 	return string(data)
 }
 
+func TestGoldenAgentFailures(t *testing.T) {
+	for _, tc := range []struct {
+		file  string
+		now   time.Time
+		reset time.Time
+	}{
+		{"codex/exec-usage-limit.jsonl", time.Date(2026, 9, 22, 19, 35, 59, 0, time.Local),
+			time.Date(2026, 9, 22, 19, 50, 59, 0, time.Local)},
+		{"codex/exec-usage-limit.jsonl", time.Date(2026, 9, 27, 17, 15, 0, 0, time.Local),
+			time.Date(2026, 9, 27, 17, 22, 0, 0, time.Local)},
+		{"codex/exec-model-usage-limit.jsonl", time.Date(2026, 9, 22, 19, 35, 59, 0, time.Local),
+			time.Date(2026, 9, 22, 19, 50, 59, 0, time.Local)},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			body := readGolden(t, tc.file)
+			// Either event can be the only one retained in the bounded log tail.
+			for _, log := range append(strings.Split(strings.TrimSpace(body), "\n"), body) {
+				got := ClassifyAgentFailure([]byte(log), tc.now)
+				if !got.Unavailable || !got.RetryAt.Equal(tc.reset) {
+					t.Fatalf("failure = %+v, want unavailable until %s", got, tc.reset)
+				}
+			}
+		})
+	}
+}
+
 // TestGoldenClassification pins one corpus file per known bot-message format.
 // When a bot ships a new phrasing, add a file and a row — the row IS the spec.
 func TestGoldenClassification(t *testing.T) {

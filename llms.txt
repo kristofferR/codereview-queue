@@ -385,7 +385,9 @@ code. `crq solver set REPO --inherit one-pass,merge` removes campaign hand-offs 
 unrelated repository solver overrides; `crq solver clear REPO` discards every repo solver override.
 
 Incremental loops default to ten distinct reviewed heads per PR. Before an eleventh reviewer trigger,
-crq creates a silent shared-state hold so a person can inspect scope. `crq unhold REPO PR` resets the
+crq creates a shared-state hold and posts one PR comment tagging the owner of `CRQ_REPO`
+(`@kristofferR - ` in Kris's setup). The comment explains the limit and how to resume. A comment
+posting failure leaves the hold intact and returns a warning. `crq unhold REPO PR` resets the
 counter and grants another cycle. `crq solver set REPO --rounds N` overrides the limit; zero is
 explicitly unlimited, while `--inherit rounds` returns to the fleet/env value.
 

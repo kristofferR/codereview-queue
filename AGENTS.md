@@ -1,5 +1,18 @@
 # crq architecture
 
+## Contributor pull requests
+
+- PRs from contributors other than `kristofferR` must include `AI models used: None`
+  if no AI helped create or edit the contribution. Otherwise, list every
+  model used to create or edit code, tests, or PR text by its most specific
+  available name and version, for example `AI models used: GPT-6 Astra`.
+- Include each model's reasoning level or effort when the tool exposes it, for
+  example `Reasoning levels: GPT-6 Astra: high`. If unavailable, say
+  `Reasoning levels: Unavailable (not exposed by tool)`. Never guess.
+  Missing or unavailable reasoning levels do not block a PR.
+- Routine automated review bots need not be listed. Put this disclosure in
+  the PR description, never in commit authorship or co-author trailers.
+
 crq coordinates CodeRabbit/Codex PR reviews through one account-wide queue so
 the fleet never double-fires a review or races the shared rate limit. This is a
 map of how the code is laid out and the invariants that keep it correct. For the

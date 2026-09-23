@@ -61,6 +61,10 @@ func holdComment(repo string, pr int, reason string, cfg Config) string {
 	return fmt.Sprintf("<!-- crq:hold -->\n⏸️ crq will not request further automated reviews for this pull request.\n\n**Reason:** %s\n\nResume with `crq unhold %s %d`.", neutralizeReviewCommands(reason, cfg), repo, pr)
 }
 
+func reviewBudgetHoldComment(repo string, pr, count, limit int, cfg Config) string {
+	return fmt.Sprintf("@%s - crq paused automated review and autofix for this PR after %d reviewed revisions (limit: %d).\n\nInspect the remaining feedback and scope before continuing. Resume with `crq unhold %s %d` to grant another cycle.\n\n<!-- crq:hold -->", ownerOf(cfg.GateRepo), count, limit, repo, pr)
+}
+
 func unholdComment() string {
 	return "<!-- crq:unhold -->\n▶️ The administrative hold has been released. crq may request automated reviews again."
 }

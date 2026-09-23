@@ -492,8 +492,11 @@ the head that session released once GitHub reports it conflict-free. Restore ord
 behavior afterwards with `crq solver set <repo> --inherit one-pass,merge`.
 
 Ordinary incremental review loops have a separate PR-wide circuit breaker. By default, after ten
-distinct heads have received reviews, crq silently holds the PR before posting another reviewer
-trigger. Inspect whether the work still serves the PR's stated goal, then `crq unhold <repo> <pr>`
+distinct heads have received reviews, crq holds the PR before posting another reviewer trigger.
+It posts one comment mentioning the queue repository's owner (`@kristofferR - ` for
+`CRQ_REPO=kristofferR/crq-state`), with the count, limit, and resume command. Posting failures
+leave the hold intact and return a warning. Inspect whether the work still serves the PR's
+stated goal, then `crq unhold <repo> <pr>`
 to grant another ten-round cycle. Set a repository or fleet default with `--rounds <n>`;
 `--rounds 0` explicitly disables the cap.
 

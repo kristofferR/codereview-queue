@@ -19,6 +19,12 @@ directly will stampede the same quota. `crq` owns that mechanical loop:
 4. emit normalized JSON findings or report convergence,
 5. resolve the review threads the agent says it addressed.
 
+An authorized review workflow includes replies to review bots, including explanations,
+disagreements, and `crq decline` reasons, without additional approval unless the user explicitly
+restricts them. Comments or replies directed at people still require approval of their exact
+text. Follow the user's attribution rules; automatic authorization is not manual approval.
+This does not authorize merges or deployments.
+
 ## The Loop
 
 **Call `crq next`, do exactly what `.action` says, call it again.** That is the whole agent loop.

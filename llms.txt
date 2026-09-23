@@ -53,6 +53,12 @@ failures are still logged and skipped).
 
 ## Agent Loop
 
+An authorized review workflow includes replies to review bots, including explanations,
+disagreements, and `crq decline` reasons, without additional approval unless the user explicitly
+restricts them. Comments or replies directed at people still require approval of their exact
+text. Follow the user's attribution rules; automatic authorization is not manual approval.
+This does not authorize merges or deployments.
+
 **Call `crq next`, do exactly what `.action` says, call it again.** That is the entire loop. Every
 judgement an agent used to make — how long to wait, whether the head may move, whether the round is
 finished — is a value crq computes.

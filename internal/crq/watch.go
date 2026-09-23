@@ -1113,6 +1113,7 @@ func appendAutofixPolicy(prompt string, severities map[string]bool, askMode stri
 	instruction := "Autofix policy:\n- Work only on findings passed to this session (configured severities: " +
 		strings.Join(allowed, ", ") + ").\n"
 	instruction += "- Judge every finding against the pull request's stated goal. Fix genuine shortcomings within that goal; decline unrelated refactors, new features, speculative hardening, and follow-up suggestions that expand the original scope.\n"
+	instruction += "- This authorized review workflow permits replies to review bots, including explanations, disagreements, and crq decline reasons, without additional approval unless the user explicitly restricts them. Comments or replies directed at people still require approval of their exact text. Follow the user's attribution rules; automatic authorization is not manual approval. This does not authorize merges or deployments.\n"
 	switch askMode {
 	case "ambiguous":
 		instruction += "- Stop at the first meaningful ambiguity: if multiple reasonable solutions would change behavior differently, do not guess.\n"

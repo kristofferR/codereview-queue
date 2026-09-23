@@ -1609,19 +1609,18 @@ A comment is removed only when all three hold:
     and not one the round adopted: a person's "@coderabbitai review" is their
     decision to ask and not crq's to erase. crq posts under your own account, so
     a recorded comment someone has since edited is their words, and it stays.
-  * the round that asked has PROGRESSED. A live round keeps its command, because
-    that is the comment crq adopts instead of posting another one.
-  * the bot answered it, and it predates the current head. Adoption only ever
-    considers commands newer than the head commit, so deleting one of those
-    would make the next pump post a duplicate and buy a second review; a head
-    crq cannot read leaves the check unevaluable, and everything stays. Only a
-    request crq's own retry replaced is spent whatever its timestamp says.
+  * the bot answered it. A current round can release one reviewer's command
+    once that reviewer has finished the current head, even while another waits.
+  * the command is too old to adopt again, or its reviewer has finished this
+    head. An unanswered command newer than the head commit stays so the next
+    pump does not post a duplicate. A request crq's own retry replaced is
+    spent whatever its timestamp says.
 
 It never deletes the bots' own comments. An auto-generated reply can be a
 rate-limit or skipped-review notice, which crq reads as evidence and surfaces as
 a finding — deleting those would destroy feedback nobody had read yet.
 
-Set CRQ_TIDY=1 to run it automatically as rounds progress under crq autoreview.
+Set CRQ_TIDY=1 to run it automatically as reviewers finish under crq autoreview.
 --dry-run reports what it would remove.
 `)
 	case "reviewers":

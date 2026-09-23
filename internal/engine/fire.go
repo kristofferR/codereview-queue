@@ -60,6 +60,12 @@ func (p Policy) CoReviewerPolicies() []CoReviewerPolicy { return p.coReviewers()
 // feedback layer surfaces it as per-bot status.
 func CoReviewedHead(obs Observation, login string) bool { return coReviewedHead(obs, login) }
 
+// CoReviewedHeadAt also returns when the newest head-bound completion arrived.
+// Cleanup uses that time to keep a later request from borrowing an older answer.
+func CoReviewedHeadAt(obs Observation, login string) (time.Time, bool) {
+	return coReviewedHeadAt(obs, login)
+}
+
 // CoReviewedRound reports completed review evidence that binds to this round.
 // In addition to explicit head evidence, it accepts legacy SHA-less reviews and
 // clean summaries after the round's evidence floor. Participation alone — a

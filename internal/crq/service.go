@@ -3505,7 +3505,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	if len(active) == 0 && !primary {
 		return nil, nil
 	}
+	newSettledCommand := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
+		newSettledCommand = false
 		budgetChanged := reviewed && st.NoteReviewedHead(round.Repo, round.PR, round.Head)
 		noteHistorical := func(r *Round) {
 			for _, login := range active {
@@ -3572,6 +3574,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		for _, login := range active {
 			switch {
 			case answered[dialect.NormalizeBotName(login)]:
+				if co := r.Co(login); co.CommandID != 0 && co.AnsweredAt == nil {
+					newSettledCommand = true
+				}
 				r.NoteCoAnswer(login, now)
 			case engine.CoParticipatedRound(*r, obs, login):
 				r.NoteCoParticipation(login, now)
@@ -3580,6 +3585,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			}
 		}
 		if primary {
+			if r.CommandID != 0 && r.PrimaryAnsweredAt == nil {
+				newSettledCommand = true
+			}
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
 		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged {
@@ -3593,6 +3601,11 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
 		}
 		return nil, err
+	}
+	if newSettledCommand && cfg.Tidy {
+		// The other reviewers may keep this round queued for hours. Remove the
+		// completed reviewer's command now, while this observation is fresh.
+		_ = s.tidyProgressed(ctx, updated, round.Repo, round.PR)
 	}
 	return &updated, nil
 }

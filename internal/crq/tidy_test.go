@@ -7,8 +7,113 @@ import (
 	"time"
 
 	"github.com/kristofferR/codereview-queue/internal/dialect"
+	"github.com/kristofferR/codereview-queue/internal/engine"
 	ghapi "github.com/kristofferR/codereview-queue/internal/gh"
 )
+
+func TestSettledCommandsNeedsReviewAfterRequest(t *testing.T) {
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.RequiredBots = append(cfg.RequiredBots, dialect.CodexBotLogin)
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	round := &Round{Head: "aaaaaaaa1"}
+	round.SetCoCommand(dialect.CodexBotLogin, 100, base.Add(time.Minute))
+	obs := engine.Observation{
+		Head: "aaaaaaaa1",
+		Reviews: []engine.ReviewSeen{{
+			Bot: dialect.CodexBotLogin, Commit: "aaaaaaaa1", SubmittedAt: base,
+		}},
+	}
+	commands := []engine.CommandComment{{ID: 100, Bot: dialect.CodexBotLogin, CreatedAt: base.Add(time.Minute)}}
+	if settledCommands(round, obs, cfg, commands)[100] {
+		t.Fatal("an earlier review of the same head cannot answer a later request")
+	}
+	obs.Reviews[0].SubmittedAt = base.Add(2 * time.Minute)
+	if !settledCommands(round, obs, cfg, commands)[100] {
+		t.Fatal("review after the request should settle it")
+	}
+}
+
+func TestTidyRemovesAnsweredCodexCommandWhilePrimaryIsQueued(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Tidy = true
+	cfg.RequiredBots = append(cfg.RequiredBots, dialect.CodexBotLogin)
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Date(2026, 9, 23, 23, 0, 0, 0, time.UTC)
+	repo, pr, head := "o/r", 298, "aaaaaaaa12345678"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits[head] = commitAt(now.Add(-2 * time.Minute))
+	command := ghapi.IssueComment{ID: 100, Body: dialect.CodexReviewCommand, CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}
+	command.User.Login = "kristofferR"
+	manual := command
+	manual.ID = 101
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{command, manual}
+	review := ghapi.Review{ID: 900, CommitID: head, State: "COMMENTED", SubmittedAt: now, Body: "review complete"}
+	review.User.Login = dialect.CodexBotLogin
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, head[:9], now.Add(-2*time.Minute))
+		if err != nil {
+			return err
+		}
+		r.SetCoCommand(dialect.CodexBotLogin, command.ID, command.CreatedAt)
+		r.RecordPosted(dialect.CodexBotLogin, command.ID, command.CreatedAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	obs, err := svc.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.noteCoAnswers(ctx, cfg, *round, obs.eng, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.deleted) != 1 || gh.deleted[0] != command.ID {
+		t.Fatalf("deleted = %v, want only crq's answered command", gh.deleted)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round(repo, pr); got == nil || got.Phase != PhaseQueued {
+		t.Fatalf("primary round changed while tidying: %+v", got)
+	}
+}
+
+func TestCollectPostedKeepsOwnershipAfterArchiveEviction(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	st := State{}
+	st.Normalize(now)
+	r, err := st.NewRound("o/r", 1, "aaaaaaaa1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RecordPosted(dialect.CodexBotLogin, 77, now)
+	st.PutRound(*r)
+	if _, err := st.Supersede("o/r", 1, "bbbbbbbb2", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	st.Archive = nil
+	posted := collectPosted(st, "o/r", 1)
+	if len(posted.commands) != 1 || posted.commands[0].ID != 77 {
+		t.Fatalf("ownership lost after archive eviction: %+v", posted.commands)
+	}
+}
 
 // Tidy deletes, so what it must NOT touch matters more than what it does. A PR
 // with a spent command from a superseded round, the live round's own command,

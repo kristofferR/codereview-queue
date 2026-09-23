@@ -653,6 +653,10 @@ type State struct {
 	// for as long as the PR conversation exists, and command/reply FIFO pairing
 	// still needs the deleted command's chronological position.
 	TidiedCommands map[string][]PostedCommand `json:"tidied_commands,omitempty"`
+	// WrittenCommands keeps proof that crq posted a trigger after its round
+	// falls out of the bounded archive. Tidy must never infer authorship from
+	// the comment body: a person can post the same command under this account.
+	WrittenCommands map[string][]PostedCommand `json:"written_commands,omitempty"`
 	// TidyReactionCursors rotate the bounded scan of unanswered Codex commands
 	// so old candidates are not reread on every housekeeping pass and newer
 	// candidates are not starved.
@@ -1226,6 +1230,7 @@ func (s *State) PutRound(r Round) {
 		s.Rounds = map[string]Round{}
 	}
 	s.rememberCoActivity(r)
+	s.rememberWritten(r)
 	s.Rounds[Key(r.Repo, r.PR)] = r
 }
 
@@ -1349,7 +1354,8 @@ func (s *State) RetireMerged(repo string, pr int) bool {
 	_, ledger := s.ReviewedHeads[key]
 	_, activity := s.CoActivity[key]
 	_, answers := s.CoAnswers[key]
-	changed := ledger || activity || answers
+	_, written := s.WrittenCommands[key]
+	changed := ledger || activity || answers || written
 	for i := range s.Archive {
 		round := &s.Archive[i]
 		if Key(round.Repo, round.PR) == key && !round.Merged() {
@@ -1360,6 +1366,7 @@ func (s *State) RetireMerged(repo string, pr int) bool {
 	delete(s.ReviewedHeads, key)
 	delete(s.CoActivity, key)
 	delete(s.CoAnswers, key)
+	delete(s.WrittenCommands, key)
 	return changed
 }
 
@@ -2281,6 +2288,28 @@ func (r *Round) RecordPosted(bot string, id int64, at time.Time) {
 	r.PostedCommands = posted
 }
 
+func (s *State) rememberWritten(r Round) {
+	if len(r.PostedCommands) == 0 {
+		return
+	}
+	if s.WrittenCommands == nil {
+		s.WrittenCommands = map[string][]PostedCommand{}
+	}
+	key := Key(r.Repo, r.PR)
+	have := make(map[int64]bool, len(s.WrittenCommands[key]))
+	for _, command := range s.WrittenCommands[key] {
+		have[command.ID] = true
+	}
+	for _, command := range r.PostedCommands {
+		if command.ID == 0 || have[command.ID] {
+			continue
+		}
+		command.At = command.At.UTC()
+		s.WrittenCommands[key] = append(s.WrittenCommands[key], command)
+		have[command.ID] = true
+	}
+}
+
 // RecordTidied remembers a trigger before Tidy removes it from GitHub. It is
 // idempotent because a CAS retry may apply the same mutation more than once.
 func (s *State) RecordTidied(repo string, pr int, commands ...PostedCommand) {
@@ -2631,9 +2660,13 @@ func (s *State) normalize(now time.Time) (retiredMergedEvidence bool) {
 		if _, ok := s.CoAnswers[key]; ok {
 			retiredMergedEvidence = true
 		}
+		if _, ok := s.WrittenCommands[key]; ok {
+			retiredMergedEvidence = true
+		}
 		delete(s.ReviewedHeads, key)
 		delete(s.CoActivity, key)
 		delete(s.CoAnswers, key)
+		delete(s.WrittenCommands, key)
 	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
@@ -2642,6 +2675,7 @@ func (s *State) normalize(now time.Time) (retiredMergedEvidence bool) {
 			continue
 		}
 		s.rememberCoActivity(s.Archive[i])
+		s.rememberWritten(s.Archive[i])
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
@@ -2654,6 +2688,7 @@ func (s *State) normalize(now time.Time) (retiredMergedEvidence bool) {
 			continue
 		}
 		s.rememberCoActivity(r)
+		s.rememberWritten(r)
 		// During a rolling upgrade, an older writer can archive a round while
 		// preserving SeenActiveAt as an unknown member, then create its
 		// replacement without copying it. Repair that replacement on load, unless

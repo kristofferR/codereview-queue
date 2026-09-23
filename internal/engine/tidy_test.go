@@ -40,6 +40,17 @@ func TestStaleCommands(t *testing.T) {
 			},
 		},
 		{
+			name: "a finished reviewer releases its own command while another reviewer waits",
+			in: TidyInput{
+				AdoptableFrom: head,
+				AnsweredAt:    map[string]time.Time{"codex": head.Add(2 * time.Minute)},
+				Live:          map[int64]bool{9: true},
+				Settled:       map[int64]bool{9: true},
+				Commands:      []CommandComment{{ID: 9, Bot: "codex", CreatedAt: head.Add(time.Minute)}},
+			},
+			want: []int64{9},
+		},
+		{
 			name: "a reaction target keeps its completion evidence",
 			in: TidyInput{
 				AdoptableFrom:   head,

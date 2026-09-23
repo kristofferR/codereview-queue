@@ -329,17 +329,17 @@ Creating a hold posts its reason on the pull request. A merged pull request's ho
 automatically; a merely closed pull request keeps it in case it is reopened.
 
 With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
-rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
+reviewers finish. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
 
 ```bash
 crq tidy REPO PR [--dry-run]
 ```
 
 Only comments crq posted (never one it adopted — that comment is someone else's), only while the
-comment still reads as that one-line command (an edited one is someone's words), only from rounds
-that have progressed, only after the bot answered, only once the comment is too old for crq to adopt
-again — older than the head commit, or than a later force-push (a command crq's own retry replaced is
-spent regardless, and an unreadable head keeps everything),
+comment still reads as that one-line command (an edited one is someone's words), and only after the
+bot answered. A current round can release one reviewer's command when that reviewer has finished
+the current head. Otherwise the command must be too old to adopt again — older than the head commit
+or a later force-push (a command crq's own retry replaced is spent regardless),
 and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
 
 Estimate what a round costs before firing it:

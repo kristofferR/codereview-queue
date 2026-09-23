@@ -55,7 +55,8 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped
   whenever one of those records starts changing decisions, so a fleet running
   two binary versions can name the hosts that will ignore a new one. Round transition
-  methods, durable tombstones for tidied trigger comments, the CAS store, and
+  methods, durable tombstones for tidied trigger comments, a per-PR index of
+  commands crq wrote that survives archive eviction, the CAS store, and
   dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across

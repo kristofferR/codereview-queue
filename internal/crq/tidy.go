@@ -34,8 +34,8 @@ type TidyFailure struct {
 	Error string `json:"error"`
 }
 
-// Tidy removes the review-trigger comments crq posted that nothing needs any
-// more: the bot answered them, and the round that asked has progressed.
+// Tidy removes review-trigger comments crq posted once their reviewer has
+// finished this head or their round has progressed past them.
 //
 // A PR driven through a dozen rounds accumulates a dozen "@coderabbitai review"
 // comments and a dozen acknowledgements, which buries the conversation a human
@@ -45,9 +45,10 @@ type TidyFailure struct {
 //
 // Only comments CRQ POSTED. A human's "@coderabbitai review" is someone's
 // decision to ask, and not crq's to erase; the candidate list is built from the
-// comments each round recorded WRITING (Round.PostedCommands), not by matching
-// text and not from the round's CommandID — a round records an adopted command
-// there too, and adoption is exactly how a person's request gets into it.
+// comments each round recorded WRITING (Round.PostedCommands, retained in the
+// PR-wide WrittenCommands index), not by matching text or CommandID. A round
+// records adopted commands there too, and adoption is how a person's request
+// gets into it.
 //
 // Only comments that STILL READ as a trigger. A recorded ID says crq wrote that
 // comment, not that it is still the one-line command crq wrote: anyone with
@@ -152,6 +153,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		Live:          posted.live,
 		Superseded:    posted.superseded,
 		AdoptableFrom: adoptableFrom,
+		Settled:       settledCommands(st.Round(repo, pr), obs.eng, cfg, commands),
 	}
 	cursor := st.TidyReactionCursors[QueueKey(repo, pr)]
 	in.AnsweredAt, in.ReactionTargets, cursor, err = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
@@ -289,8 +291,8 @@ type postedCommands struct {
 	firedOn map[int64]int64
 }
 
-// collectPosted gathers the trigger comments crq posted for repo#pr, from the
-// open round and from every archived round of the same PR.
+// collectPosted gathers crq's trigger comments from the current round, archive,
+// and durable PR-wide indexes. The archive alone forgets old authorship proof.
 func collectPosted(st State, repo string, pr int) postedCommands {
 	out := postedCommands{live: map[int64]bool{}, superseded: map[int64]bool{}, firedOn: map[int64]int64{}}
 	seen := map[int64]bool{}
@@ -336,6 +338,11 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 			collect(archived, true)
 		}
 	}
+	for _, command := range st.WrittenCommands[QueueKey(repo, pr)] {
+		appendCommand(engine.CommandComment{
+			ID: command.ID, Bot: dialect.NormalizeBotName(command.Bot), CreatedAt: command.At.UTC(),
+		})
+	}
 	for _, command := range st.TidiedCommands[QueueKey(repo, pr)] {
 		appendCommand(engine.CommandComment{
 			ID: command.ID, Bot: dialect.NormalizeBotName(command.Bot), CreatedAt: command.At.UTC(),
@@ -348,6 +355,33 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 		return out.commands[i].ID < out.commands[j].ID
 	})
 	return out
+}
+
+// A reviewer can finish while this head's round still waits for another bot.
+// Only head-bound completion lets tidy release that round's own command early.
+func settledCommands(round *Round, obs engine.Observation, cfg Config, commands []engine.CommandComment) map[int64]bool {
+	settled := map[int64]bool{}
+	if round == nil || round.Head != obs.Head {
+		return settled
+	}
+	postedAt := map[int64]time.Time{}
+	for _, command := range commands {
+		postedAt[command.ID] = command.CreatedAt
+	}
+	completedAfter := func(login string, id int64) bool {
+		at, ok := engine.CoReviewedHeadAt(obs, login)
+		return ok && !at.Before(postedAt[id])
+	}
+	if round.CommandID != 0 && !round.CoOnly &&
+		(completedAfter(cfg.Bot, round.CommandID) || engine.PrimaryCompletedRound(*round, obs, cfg.policy())) {
+		settled[round.CommandID] = true
+	}
+	for _, co := range cfg.CoBots {
+		if id := round.Co(co.Login).CommandID; id != 0 && completedAfter(co.Login, id) {
+			settled[id] = true
+		}
+	}
+	return settled
 }
 
 // triggerBodies maps each reviewer (normalized login) to the comment bodies

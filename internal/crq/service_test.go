@@ -1161,6 +1161,7 @@ func TestReviewBudgetHoldsBeforePostingAndUnholdResetsIt(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.MaxReviewRounds = 2
+	cfg.GateRepo = "kristofferR/crq-state"
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, gh, store, nil)
@@ -1188,9 +1189,16 @@ func TestReviewBudgetHoldsBeforePostingAndUnholdResetsIt(t *testing.T) {
 	if result.Action != "held" || !strings.Contains(result.Reason, "limit of 2") {
 		t.Fatalf("budget result = %+v", result)
 	}
-	if len(gh.posted) != 0 {
-		t.Fatalf("automatic budget hold posted a GitHub comment: %v", gh.posted)
+	assertOnlyHoldComment(t, gh)
+	for _, want := range []string{"#7:@kristofferR - ", "2 reviewed revisions (limit: 2)", "crq unhold owner/repo 7"} {
+		if !strings.Contains(gh.posted[0], want) {
+			t.Fatalf("budget notice = %q, missing %q", gh.posted[0], want)
+		}
 	}
+	if _, err := svc.applyFire(ctx, cfg, round, engine.Observation{Head: round.Head, Open: true}, engine.FireDecision{Verdict: engine.FirePost}, now); err != nil {
+		t.Fatal(err)
+	}
+	assertOnlyHoldComment(t, gh)
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1205,6 +1213,19 @@ func TestReviewBudgetHoldsBeforePostingAndUnholdResetsIt(t *testing.T) {
 	st, _, _ = store.Load(ctx)
 	if got := st.ReviewRoundCount("owner/repo", 7); got != 0 {
 		t.Fatalf("unhold review round count = %d, want a fresh cycle", got)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.NoteReviewedHead("owner/repo", 7, "head-d")
+		st.NoteReviewedHead("owner/repo", 7, "head-e")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.applyFire(ctx, cfg, round, engine.Observation{Head: round.Head, Open: true}, engine.FireDecision{Verdict: engine.FirePost}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 3 || !strings.Contains(gh.posted[2], "@kristofferR - ") {
+		t.Fatalf("new cycle must post a new notice after hold and release: %v", gh.posted)
 	}
 }
 

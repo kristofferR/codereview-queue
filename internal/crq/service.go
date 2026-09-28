@@ -219,7 +219,14 @@ func (s *Service) hold(
 		return HoldResult{}, err
 	}
 	s.sync(ctx, state)
-	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, holdComment(repo, pr, reason, s.cfgFor(state, repo)))
+	return s.postHoldNotice(ctx, result, token, holdComment(repo, pr, reason, s.cfgFor(state, repo))), nil
+}
+
+// postHoldNotice shares failure reporting and stale-notice cleanup between
+// operator holds and the automatic review-budget circuit breaker.
+func (s *Service) postHoldNotice(ctx context.Context, result HoldResult, token, body string) HoldResult {
+	repo, pr, reason := result.Repo, result.PR, result.Reason
+	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, body)
 	if commentErr != nil {
 		// The hold is the safety boundary and has already committed. A missing
 		// notice must be visible to the caller, but must not roll the hold back and
@@ -245,7 +252,7 @@ func (s *Service) hold(
 			s.log.Printf("%s#%d held: %s", repo, pr, reason)
 		}
 	}
-	return result, nil
+	return result
 }
 
 func (s *Service) reconcileHoldNotice(
@@ -617,11 +624,12 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 }
 
 type PumpResult struct {
-	Action string `json:"action"`
-	Repo   string `json:"repo,omitempty"`
-	PR     int    `json:"pr,omitempty"`
-	Head   string `json:"head,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Action  string `json:"action"`
+	Repo    string `json:"repo,omitempty"`
+	PR      int    `json:"pr,omitempty"`
+	Head    string `json:"head,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Warning string `json:"warning,omitempty"`
 }
 
 // Pump advances the queue by one observe → engine → apply step: it progresses
@@ -1600,8 +1608,7 @@ func decisionPostsReview(d engine.FireDecision) bool {
 }
 
 // enforceReviewBudget is the final gate before any path posts a new reviewer
-// trigger. It writes only shared state: automatic circuit breaking must not
-// impersonate an operator by adding a GitHub comment.
+// trigger. The CAS winner records the hold before posting a single PR notice.
 func (s *Service) enforceReviewBudget(
 	ctx context.Context,
 	round Round,
@@ -1632,6 +1639,7 @@ func (s *Service) enforceReviewBudget(
 	if s.cfg.DryRun {
 		return result, true, nil
 	}
+	token := randomToken()
 	held := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		held = false
@@ -1650,7 +1658,7 @@ func (s *Service) enforceReviewBudget(
 		count = st.ReviewRoundCount(round.Repo, round.PR)
 		limit = live.MaxReviewRounds
 		result.Reason = fmt.Sprintf("%s %d reviewed heads reached the limit of %d; inspect scope, then unhold to grant another cycle", reviewBudgetHoldPrefix, count, live.MaxReviewRounds)
-		st.Hold(round.Repo, round.PR, result.Reason, "crq", now)
+		st.HoldWithToken(round.Repo, round.PR, result.Reason, "crq", now, token)
 		held = true
 		return nil
 	})
@@ -1661,8 +1669,15 @@ func (s *Service) enforceReviewBudget(
 		return PumpResult{Action: "lost_race", Repo: round.Repo, PR: round.PR, Head: round.Head}, true, nil
 	}
 	s.sync(ctx, updated)
-	if s.log != nil {
-		s.log.Printf("%s#%d held after %d reviewed heads (limit %d)", round.Repo, round.PR, count, limit)
+	notice := s.postHoldNotice(ctx, HoldResult{
+		Repo: round.Repo, PR: round.PR, Held: true, Reason: result.Reason, By: "crq", At: &now,
+	}, token, reviewBudgetHoldComment(round.Repo, round.PR, count, limit, s.cfgFor(updated, round.Repo)))
+	result.Warning = notice.Warning
+	if !notice.Held {
+		result.Action = "lost_race"
+		result.Reason = "review budget hold was released before its notice completed"
+	} else {
+		result.Reason = notice.Reason
 	}
 	return result, true, nil
 }

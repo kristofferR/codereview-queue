@@ -166,9 +166,9 @@ func modelChoicesFor(agent string, selected []string) []string {
 	case "claude":
 		known = []string{"opus", "sonnet", "haiku", "fable"}
 	case "codex":
-		known = []string{"gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"}
+		known = []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "codex-auto-review"}
 	default:
-		known = []string{"gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review", "opus", "sonnet", "haiku", "fable"}
+		known = []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "codex-auto-review", "opus", "sonnet", "haiku", "fable"}
 	}
 	out := make([]string, 0, len(selected)+len(known))
 	seen := map[string]bool{}

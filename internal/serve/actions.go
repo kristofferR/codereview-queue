@@ -62,7 +62,7 @@ type Actor interface {
 	// finding GitHub gives no way to close.
 	ResolveThreads(ctx context.Context, threadIDs []string) error
 	DeclineThreads(ctx context.Context, threadIDs []string, reason string, resolve bool) error
-	DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) error
+	DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) (warning string, err error)
 }
 
 type actionRequest struct {
@@ -310,7 +310,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = s.needPR(req, func() error {
-			return s.actor.DismissFindings(ctx, req.Repo, req.PR, req.FindingIDs, req.Reason)
+			warning, err = s.actor.DismissFindings(ctx, req.Repo, req.PR, req.FindingIDs, req.Reason)
+			return err
 		})
 	default:
 		http.NotFound(w, r)

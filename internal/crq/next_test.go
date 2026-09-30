@@ -678,7 +678,7 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "already handled in an earlier commit"); err != nil {
 		t.Fatal(err)
 	}
-	// Dismissing is a record, not a review: it must post nothing of its own,
+	// Dismissing is a record, not a review: it must not post a review command,
 	// even though it enqueues so the decision has a round to live on.
 	if got := f.reviewsPosted(repo, pr); got != posted {
 		t.Fatalf("dismissing posted a review: %d -> %d", posted, got)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kristofferR/codereview-queue/internal/dialect"
@@ -21,6 +22,10 @@ type DismissResult struct {
 	Dismissed []string `json:"dismissed"`
 	Already   []string `json:"already_dismissed,omitempty"`
 	Reason    string   `json:"reason"`
+	// CommentURL is the PR comment naming what this call dismissed, and Warning
+	// says why it is missing when posting failed. The dismissal stands either way.
+	CommentURL string `json:"comment_url,omitempty"`
+	Warning    string `json:"warning,omitempty"`
 }
 
 // Dismiss records that an agent has accounted for findings GitHub gives it no
@@ -88,7 +93,9 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// agree.
 	alreadyDone := map[string]bool{}
 	var seenSeq int64
+	var cfg Config
 	if st, _, err := s.store.Load(ctx); err == nil {
+		cfg = s.cfgFor(st, repo)
 		if round := st.Round(repo, pr); round != nil {
 			seenSeq = round.Seq
 			if round.Head == feedback.Head {
@@ -181,7 +188,75 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		}
 		s.log.Printf("%s#%d %s %d finding(s) at %s: %s", repo, pr, verb, len(out.Dismissed), out.Head, reason)
 	}
+	if !s.cfg.DryRun {
+		out = s.postDismissNotice(ctx, out, current, cfg)
+	}
 	return out, nil
+}
+
+// dismissComment renders one notice for every finding a call dismissed. It is
+// a human's comment to crq: the author is never a feedback bot, and the text is
+// neutralized so quoted finding data or reasons cannot trigger or ping a reviewer.
+func dismissComment(head string, findings []dialect.Finding, reason string, cfg Config) string {
+	var b strings.Builder
+	noun := "finding"
+	if len(findings) != 1 {
+		noun = "findings"
+	}
+	fmt.Fprintf(&b, "<!-- crq:dismiss -->\nDismissed %d %s at `%s`:\n\n", len(findings), noun, shortSHA(head))
+	for _, finding := range findings {
+		line := dialect.NormalizeBotName(finding.Bot) + ": " + noticeTitle(finding.Title)
+		var refs []string
+		if finding.Path != "" {
+			where := finding.Path
+			if finding.Line > 0 {
+				where += ":" + strconv.Itoa(finding.Line)
+			}
+			refs = append(refs, dismissPath(where))
+		}
+		if finding.URL != "" {
+			refs = append(refs, "[source]("+finding.URL+")")
+		}
+		if len(refs) > 0 {
+			line += " (" + strings.Join(refs, ", ") + ")"
+		}
+		b.WriteString("- " + line + "\n")
+	}
+	b.WriteString("\n**Reason:** " + reason)
+	return neutralizeReviewCommands(b.String(), cfg)
+}
+
+// dismissPath keeps a path on one line and inside a Markdown code span, even
+// when the filename contains backticks.
+func dismissPath(path string) string {
+	path = strings.Join(strings.Fields(path), " ")
+	longest, run := 0, 0
+	for _, r := range path {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	delimiter := strings.Repeat("`", longest+1)
+	if longest > 0 {
+		path = " " + path + " "
+	}
+	return delimiter + path + delimiter
+}
+
+// noticeTitle fits a finding title on one list line.
+func noticeTitle(title string) string {
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return "(untitled)"
+	}
+	const limit = 160
+	if runes := []rune(title); len(runes) > limit {
+		return string(runes[:limit-1]) + "…"
+	}
+	return title
 }
 
 // dismissibleSources are the finding kinds that intrinsically have no review

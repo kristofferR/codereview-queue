@@ -41,7 +41,8 @@ Then:
    reviewed commit, so `crq dismiss` rejects it after a push changes the current
    head. Once you have judged it:
      crq dismiss "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" <finding-id>... --reason "why"
-   A real reason is required. Do not dismiss a threadless finding carried from
+   A real reason is required, and it is posted on the PR. Pass every ID in one
+   call so they share one comment. Do not dismiss a threadless finding carried from
    an older commit: the push already superseded it.
 6. Ask crq whether the head may move, then push:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"

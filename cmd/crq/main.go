@@ -1691,6 +1691,11 @@ Finding IDs come from .findings[].id. They are content-derived, not GitHub node
 IDs, so the repo and PR are required. A dismissal covers the current head only:
 push, and the next reviewer has to report it again.
 
+Each call posts one PR comment naming the findings it dismissed and the reason,
+so the PR shows they were judged. Pass every ID in one call to get one comment;
+a replay posts nothing. If the comment cannot be posted, the output carries a
+warning and the dismissal still stands.
+
 Use it for a finding you have judged and set aside. Fix what is real instead — and
 for a review crq was told was SKIPPED, narrowing the PR fixes the cause, while
 dismissing only records that you decided to live with it at this head.
@@ -2876,9 +2881,9 @@ func (a prActor) DeclineThreads(ctx context.Context, threadIDs []string, reason 
 	return err
 }
 
-func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) error {
-	_, err := a.svc.Dismiss(ctx, repo, pr, ids, reason)
-	return err
+func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) (string, error) {
+	result, err := a.svc.Dismiss(ctx, repo, pr, ids, reason)
+	return result.Warning, err
 }
 
 // repoDiscoverer lists the repositories in CRQ_SCOPE for the dashboard's

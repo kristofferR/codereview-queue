@@ -85,14 +85,14 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   // other.
   const [pending, setPending] = useState<"hold" | "cancel" | null>(null);
   const { run: runRoundOperation, running: acting, error: roundErr } = useOperation();
-  const [roundWarning, setRoundWarning] = useState<string | null>(null);
+  const [actionWarning, setActionWarning] = useState<string | null>(null);
   const liveCursor = useRef({ key: `${repo}#${pr}`, snapshot });
 
   const runRound = (kind: "hold" | "unhold" | "cancel", reason = "") => {
-    setRoundWarning(null);
+    setActionWarning(null);
     runRoundOperation(act(kind, { repo, pr, reason }), {
       onSuccess: ({ warning }) => {
-        setRoundWarning(warning ?? null);
+        setActionWarning(warning ?? null);
         setPending(null);
         load(true);
       },
@@ -111,8 +111,10 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
         : action.kind === "decline"
           ? act("decline", { repo, pr, thread_ids: threadIds, reason })
           : act("dismiss", { repo, pr, finding_ids: [f.id], reason });
+    setActionWarning(null);
     runFinding(program, {
-      onSuccess: () => {
+      onSuccess: ({ warning }) => {
+        setActionWarning(warning ?? null);
         setAction(null);
         load(true); // the finding list is GitHub's answer, so re-observe
       },
@@ -150,7 +152,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     const key = `${repo}#${pr}`;
     if (liveCursor.current.key !== key) {
       liveCursor.current = { key, snapshot };
-      setRoundWarning(null);
+      setActionWarning(null);
       return;
     }
     if (!isNewLiveSnapshot(liveCursor.current.snapshot, snapshot)) return;
@@ -273,12 +275,12 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
             </button>
           </div>
         )}
-        {roundWarning && (
+        {actionWarning && (
           <div
             role="status"
             className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn"
           >
-            {roundWarning}
+            {actionWarning}
           </div>
         )}
         {view.round && (
@@ -359,7 +361,8 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
             ) : (
               <>
                 For findings GitHub gives no way to close. It is recorded against{" "}
-                <b>this head only</b> — a new head may report it again.
+                <b>this head only</b>; a new head may report it again. Posts your reason and the
+                dismissed finding in a comment on the PR.
               </>
             )
           }
@@ -374,7 +377,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
           reasonLabel={
             action.kind === "decline"
               ? "Why you disagree (posted to the PR)"
-              : "Why (kept in state)"
+              : "Why (posted to the PR)"
           }
           busy={busy}
           error={actErr}

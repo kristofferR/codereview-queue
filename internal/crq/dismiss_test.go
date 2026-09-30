@@ -143,13 +143,14 @@ func TestDismissKeepsTheRecordWhenTheNoticeFails(t *testing.T) {
 	}
 }
 
-// Quoted titles and reasons must not ping or trigger a reviewer, which would
+// Quoted finding data and reasons must not ping or trigger a reviewer, which would
 // answer on the PR and could start a review nobody queued.
 func TestDismissCommentNeutralizesReviewCommands(t *testing.T) {
 	cfg := replayConfig()
 	body := dismissComment("0123456789abcdef", []dialect.Finding{{
 		Bot:   "coderabbitai[bot]",
 		Title: "Ask @coderabbitai\n  to recheck",
+		Path:  "src/`\n" + cfg.ReviewCommand + "\n``.ts",
 		URL:   "https://github.com/owner/repo/pull/1#pullrequestreview-9",
 	}}, "see "+cfg.ReviewCommand, cfg)
 
@@ -158,10 +159,19 @@ func TestDismissCommentNeutralizesReviewCommands(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Dismissed 1 finding at `012345678`",
-		"- coderabbitai: Ask @\u200bcoderabbitai to recheck ([source](https://github.com/owner/repo/pull/1#pullrequestreview-9))",
+		"- coderabbitai: Ask @\u200bcoderabbitai to recheck (``` src/` @\u200b\u200bcoderabbitai review ``.ts ```, [source](https://github.com/owner/repo/pull/1#pullrequestreview-9))",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("notice lacks %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestDismissCommentNeutralizesConfiguredCommandsInPaths(t *testing.T) {
+	cfg := replayConfig()
+	cfg.ReviewCommand = "/review now"
+	body := dismissComment("aaaaaaaa1", []dialect.Finding{{Path: "src/`\n/review now\n`.go"}}, "verified", cfg)
+	if strings.Contains(body, cfg.ReviewCommand) {
+		t.Fatalf("path can trigger a configured reviewer:\n%s", body)
 	}
 }

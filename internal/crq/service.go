@@ -1029,6 +1029,37 @@ func observedAccountBlockChanges(q AccountQuota, blk *engine.AccountBlock) bool 
 	return true
 }
 
+// postDismissNotice leaves the dismissal on the PR, the way decline leaves its
+// reason on the thread. Without it a reader sees a bot's findings with no answer
+// and cannot tell a judged finding from a missed one.
+//
+// Only the IDs this call newly recorded are named, so a replayed dismissal posts
+// nothing again. The state write already committed: a failed post is reported,
+// never rolled back.
+func (s *Service) postDismissNotice(ctx context.Context, out DismissResult, current map[string]dialect.Finding, cfg Config) DismissResult {
+	findings := make([]dialect.Finding, 0, len(out.Dismissed))
+	for _, id := range out.Dismissed {
+		// An ID absent here was dismissed before, at this head, and archived by a
+		// confirmation pass; its notice was posted then.
+		if finding, ok := current[id]; ok {
+			findings = append(findings, finding)
+		}
+	}
+	if len(findings) == 0 {
+		return out
+	}
+	comment, err := s.gh.PostIssueComment(ctx, out.Repo, out.PR, dismissComment(out.Head, findings, out.Reason, cfg))
+	if err != nil {
+		out.Warning = "dismissal recorded, but its PR comment could not be posted: " + err.Error()
+		if s.log != nil {
+			s.log.Printf("warning: %s#%d dismissal recorded but its PR comment could not be posted: %v", out.Repo, out.PR, err)
+		}
+		return out
+	}
+	out.CommentURL = comment.URL
+	return out
+}
+
 // recordDismissal is the effects executor for `crq dismiss`: the CAS write that
 // records which findings a round has accounted for. Dismiss decides WHETHER a
 // dismissal is legitimate; this performs it, so the write surface stays in one

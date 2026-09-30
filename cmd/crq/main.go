@@ -2881,9 +2881,9 @@ func (a prActor) DeclineThreads(ctx context.Context, threadIDs []string, reason 
 	return err
 }
 
-func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) error {
-	_, err := a.svc.Dismiss(ctx, repo, pr, ids, reason)
-	return err
+func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) (string, error) {
+	result, err := a.svc.Dismiss(ctx, repo, pr, ids, reason)
+	return result.Warning, err
 }
 
 // repoDiscoverer lists the repositories in CRQ_SCOPE for the dashboard's

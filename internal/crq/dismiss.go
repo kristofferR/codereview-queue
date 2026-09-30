@@ -194,40 +194,9 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	return out, nil
 }
 
-// postDismissNotice leaves the dismissal on the PR, the way decline leaves its
-// reason on the thread. Without it a reader sees a bot's findings with no answer
-// and cannot tell a judged finding from a missed one.
-//
-// Only the IDs this call newly recorded are named, so a replayed dismissal posts
-// nothing again. The state write already committed: a failed post is reported,
-// never rolled back.
-func (s *Service) postDismissNotice(ctx context.Context, out DismissResult, current map[string]dialect.Finding, cfg Config) DismissResult {
-	findings := make([]dialect.Finding, 0, len(out.Dismissed))
-	for _, id := range out.Dismissed {
-		// An ID absent here was dismissed before, at this head, and archived by a
-		// confirmation pass; its notice was posted then.
-		if finding, ok := current[id]; ok {
-			findings = append(findings, finding)
-		}
-	}
-	if len(findings) == 0 {
-		return out
-	}
-	comment, err := s.gh.PostIssueComment(ctx, out.Repo, out.PR, dismissComment(out.Head, findings, out.Reason, cfg))
-	if err != nil {
-		out.Warning = "dismissal recorded, but its PR comment could not be posted: " + err.Error()
-		if s.log != nil {
-			s.log.Printf("warning: %s#%d dismissal recorded but its PR comment could not be posted: %v", out.Repo, out.PR, err)
-		}
-		return out
-	}
-	out.CommentURL = comment.URL
-	return out
-}
-
 // dismissComment renders one notice for every finding a call dismissed. It is
 // a human's comment to crq: the author is never a feedback bot, and the text is
-// neutralized so a quoted title or reason cannot trigger or ping a reviewer.
+// neutralized so quoted finding data or reasons cannot trigger or ping a reviewer.
 func dismissComment(head string, findings []dialect.Finding, reason string, cfg Config) string {
 	var b strings.Builder
 	noun := "finding"
@@ -236,14 +205,14 @@ func dismissComment(head string, findings []dialect.Finding, reason string, cfg 
 	}
 	fmt.Fprintf(&b, "<!-- crq:dismiss -->\nDismissed %d %s at `%s`:\n\n", len(findings), noun, shortSHA(head))
 	for _, finding := range findings {
-		line := dialect.NormalizeBotName(finding.Bot) + ": " + neutralizeReviewCommands(noticeTitle(finding.Title), cfg)
+		line := dialect.NormalizeBotName(finding.Bot) + ": " + noticeTitle(finding.Title)
 		var refs []string
 		if finding.Path != "" {
 			where := finding.Path
 			if finding.Line > 0 {
 				where += ":" + strconv.Itoa(finding.Line)
 			}
-			refs = append(refs, "`"+where+"`")
+			refs = append(refs, dismissPath(where))
 		}
 		if finding.URL != "" {
 			refs = append(refs, "[source]("+finding.URL+")")
@@ -253,8 +222,28 @@ func dismissComment(head string, findings []dialect.Finding, reason string, cfg 
 		}
 		b.WriteString("- " + line + "\n")
 	}
-	b.WriteString("\n**Reason:** " + neutralizeReviewCommands(reason, cfg))
-	return b.String()
+	b.WriteString("\n**Reason:** " + reason)
+	return neutralizeReviewCommands(b.String(), cfg)
+}
+
+// dismissPath keeps a path on one line and inside a Markdown code span, even
+// when the filename contains backticks.
+func dismissPath(path string) string {
+	path = strings.Join(strings.Fields(path), " ")
+	longest, run := 0, 0
+	for _, r := range path {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	delimiter := strings.Repeat("`", longest+1)
+	if longest > 0 {
+		path = " " + path + " "
+	}
+	return delimiter + path + delimiter
 }
 
 // noticeTitle fits a finding title on one list line.

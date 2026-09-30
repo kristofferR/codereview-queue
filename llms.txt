@@ -497,7 +497,11 @@ crq dismiss REPO PR FINDING_ID [FINDING_ID...] --reason "why this is set aside"
 `FINDING_ID` is `.findings[].id` — content-derived, not a GitHub node ID, which is why the repo and
 PR are required. The dismissal covers the current review pass only; after a push or confirmation
 pass the next reviewer must report it again. `crq next` and `crq feedback` report `dismissed: N`
-for decisions in the current round. Starting confirmation archives those decisions rather than
+for decisions in the current round. Each call that records something posts one PR comment naming
+the dismissed findings (bot, title, `path:line`, source link) and the reason, so the PR shows
+they were judged; pass every ID in one call to get one comment. A replay posts nothing. The
+result's `comment_url` links the comment; if posting fails, `warning` says so and the dismissal
+still stands. Starting confirmation archives those decisions rather than
 silencing a fresh report. A finding that HAS a thread is
 refused: resolve or decline it instead, so the decision lands where the bot can answer it.
 

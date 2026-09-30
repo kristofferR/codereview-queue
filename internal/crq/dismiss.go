@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kristofferR/codereview-queue/internal/dialect"
@@ -21,6 +22,10 @@ type DismissResult struct {
 	Dismissed []string `json:"dismissed"`
 	Already   []string `json:"already_dismissed,omitempty"`
 	Reason    string   `json:"reason"`
+	// CommentURL is the PR comment naming what this call dismissed, and Warning
+	// says why it is missing when posting failed. The dismissal stands either way.
+	CommentURL string `json:"comment_url,omitempty"`
+	Warning    string `json:"warning,omitempty"`
 }
 
 // Dismiss records that an agent has accounted for findings GitHub gives it no
@@ -88,7 +93,9 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// agree.
 	alreadyDone := map[string]bool{}
 	var seenSeq int64
+	var cfg Config
 	if st, _, err := s.store.Load(ctx); err == nil {
+		cfg = s.cfgFor(st, repo)
 		if round := st.Round(repo, pr); round != nil {
 			seenSeq = round.Seq
 			if round.Head == feedback.Head {
@@ -181,7 +188,86 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		}
 		s.log.Printf("%s#%d %s %d finding(s) at %s: %s", repo, pr, verb, len(out.Dismissed), out.Head, reason)
 	}
+	if !s.cfg.DryRun {
+		out = s.postDismissNotice(ctx, out, current, cfg)
+	}
 	return out, nil
+}
+
+// postDismissNotice leaves the dismissal on the PR, the way decline leaves its
+// reason on the thread. Without it a reader sees a bot's findings with no answer
+// and cannot tell a judged finding from a missed one.
+//
+// Only the IDs this call newly recorded are named, so a replayed dismissal posts
+// nothing again. The state write already committed: a failed post is reported,
+// never rolled back.
+func (s *Service) postDismissNotice(ctx context.Context, out DismissResult, current map[string]dialect.Finding, cfg Config) DismissResult {
+	findings := make([]dialect.Finding, 0, len(out.Dismissed))
+	for _, id := range out.Dismissed {
+		// An ID absent here was dismissed before, at this head, and archived by a
+		// confirmation pass; its notice was posted then.
+		if finding, ok := current[id]; ok {
+			findings = append(findings, finding)
+		}
+	}
+	if len(findings) == 0 {
+		return out
+	}
+	comment, err := s.gh.PostIssueComment(ctx, out.Repo, out.PR, dismissComment(out.Head, findings, out.Reason, cfg))
+	if err != nil {
+		out.Warning = "dismissal recorded, but its PR comment could not be posted: " + err.Error()
+		if s.log != nil {
+			s.log.Printf("warning: %s#%d dismissal recorded but its PR comment could not be posted: %v", out.Repo, out.PR, err)
+		}
+		return out
+	}
+	out.CommentURL = comment.URL
+	return out
+}
+
+// dismissComment renders one notice for every finding a call dismissed. It is
+// a human's comment to crq: the author is never a feedback bot, and the text is
+// neutralized so a quoted title or reason cannot trigger or ping a reviewer.
+func dismissComment(head string, findings []dialect.Finding, reason string, cfg Config) string {
+	var b strings.Builder
+	noun := "finding"
+	if len(findings) != 1 {
+		noun = "findings"
+	}
+	fmt.Fprintf(&b, "<!-- crq:dismiss -->\nDismissed %d %s at `%s`:\n\n", len(findings), noun, shortSHA(head))
+	for _, finding := range findings {
+		line := dialect.NormalizeBotName(finding.Bot) + ": " + neutralizeReviewCommands(noticeTitle(finding.Title), cfg)
+		var refs []string
+		if finding.Path != "" {
+			where := finding.Path
+			if finding.Line > 0 {
+				where += ":" + strconv.Itoa(finding.Line)
+			}
+			refs = append(refs, "`"+where+"`")
+		}
+		if finding.URL != "" {
+			refs = append(refs, "[source]("+finding.URL+")")
+		}
+		if len(refs) > 0 {
+			line += " (" + strings.Join(refs, ", ") + ")"
+		}
+		b.WriteString("- " + line + "\n")
+	}
+	b.WriteString("\n**Reason:** " + neutralizeReviewCommands(reason, cfg))
+	return b.String()
+}
+
+// noticeTitle fits a finding title on one list line.
+func noticeTitle(title string) string {
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return "(untitled)"
+	}
+	const limit = 160
+	if runes := []rune(title); len(runes) > limit {
+		return string(runes[:limit-1]) + "…"
+	}
+	return title
 }
 
 // dismissibleSources are the finding kinds that intrinsically have no review

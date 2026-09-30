@@ -339,6 +339,10 @@ the repo and PR are required. A dismissal covers the current head only — push,
 has to report it again. `crq next` and `crq feedback` both report `dismissed: N` so nothing looks
 silently dropped, and `crq loop` converges on the same filtered list.
 
+Each call also posts one PR comment naming the dismissed findings and the reason, the way `crq
+decline` replies on a thread. Pass every ID in one call to get one comment; a replay posts nothing.
+If posting fails, the JSON carries a `warning` and the dismissal still stands.
+
 Only a finding with no thread can be dismissed. One that has a `thread_id` is refused — resolve or
 decline it, so the decision lands on the PR where the bot can answer it.
 

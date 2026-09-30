@@ -822,7 +822,9 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   because a thread left open keeps its finding actionable; `--keep-open` overrides.
 - **Dismiss what has no thread:** a finding with no `thread_id` cannot be resolved or declined, and
   blocks every future round until it is accounted for: `crq dismiss <repo> <pr> <finding-id>
-  --reason "…"`. It covers the current head only. A `source: "review_comment"`
+  --reason "…"`. It covers the current head only, and posts one PR comment naming the
+  findings and the reason (pass every ID in one call; a replay posts nothing, and a failed post
+  is reported in `warning` without undoing the dismissal). A `source: "review_comment"`
   finding is refused: it lost its thread ID to crq's REST fallback and still has
   an open thread, so it needs `resolve`/`decline` once crq can read threads again. For a skipped review, narrowing the PR fixes the
   cause; dismissing only records that you chose to proceed.

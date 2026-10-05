@@ -1208,7 +1208,8 @@ type Pull struct {
 type RepoInfo struct {
 	DefaultBranch string `json:"default_branch"`
 	Permissions   struct {
-		Push bool `json:"push"`
+		Admin bool `json:"admin"`
+		Push  bool `json:"push"`
 	} `json:"permissions"`
 }
 

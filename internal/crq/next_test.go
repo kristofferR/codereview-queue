@@ -162,6 +162,31 @@ func TestAutofixAdmissionWaitsForActiveReviewersWithoutStartingAModel(t *testing
 // delay, never decides when the head may move, and never reads an exit code.
 // Each step asserts the instruction crq returns for a state an agent would
 // otherwise have to reason about on its own.
+// A contribution to someone else's project must not receive review triggers:
+// they would be posted as the token's user on a PR the maintainer owns.
+func TestNextPostsNothingOnARepositoryTheUserDoesNotAdminister(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "upstream/project", 77
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.gh.foreignRepos = map[string]bool{repo: true}
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionBlocked)
+	if !strings.Contains(report.Reason, "administer") {
+		t.Errorf("reason = %q, want it to say why nothing was requested", report.Reason)
+	}
+	if r := f.round(repo, pr); r != nil {
+		t.Errorf("round = %+v, want none for a repository the user does not administer", r)
+	}
+	if len(f.gh.posted) != 0 {
+		t.Errorf("posted = %q, want no comments", f.gh.posted)
+	}
+}
+
 func TestNextDrivesAReviewRound(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)

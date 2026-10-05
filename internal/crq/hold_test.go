@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -143,6 +144,57 @@ func TestHoldSurvivesACommentPostFailure(t *testing.T) {
 	}
 	if _, held := st.HeldPR("owner/repo", 12); !held {
 		t.Fatal("comment failure rolled back the safety-critical hold")
+	}
+}
+
+func TestHoldPostsNothingOnARepositoryTheUserDoesNotAdminister(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.foreignRepos = map[string]bool{"upstream/project": true}
+	store := NewMemoryStore(cfg)
+	setHoldCapableLeader(t, ctx, store, now)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	result, err := svc.Hold(ctx, "upstream/project", 12, "waiting for product approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("posted = %q, want no comment on a repository the user does not administer", gh.posted)
+	}
+	if !strings.Contains(result.Warning, "administer") {
+		t.Fatalf("warning = %q, want it to say why nothing was posted", result.Warning)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := st.HeldPR("upstream/project", 12); !held {
+		t.Fatal("the hold must still apply locally")
+	}
+}
+
+func TestDeclineRefusesAThreadOnARepositoryTheUserDoesNotAdminister(t *testing.T) {
+	gh := newFakeGitHub()
+	var queries []string
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		queries = append(queries, query)
+		return json.Unmarshal([]byte(`{"node":{"repository":{"nameWithOwner":"upstream/project","viewerCanAdminister":false}}}`), out)
+	}
+	cfg := firingConfig()
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	_, err := svc.DeclineThreads(context.Background(), []string{"PRRT_thread"}, "not applicable", true)
+	if !errors.Is(err, errNotAdministered) {
+		t.Fatalf("err = %v, want errNotAdministered", err)
+	}
+	for _, query := range queries {
+		if strings.Contains(query, "addPullRequestReviewThreadReply") || strings.Contains(query, "resolveReviewThread") {
+			t.Fatalf("declining on another project's PR must not reply or resolve: %s", query)
+		}
 	}
 }
 

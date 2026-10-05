@@ -58,6 +58,9 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	// foreignRepos are repositories the token user does not administer; every
+	// other repository reads as administered.
+	foreignRepos map[string]bool
 	// searches counts EachOpenPR calls, which is what says whether a pass went
 	// looking at all — an empty result set and a search never made are the same
 	// enqueue count and very different REST bills.
@@ -359,6 +362,15 @@ func (f *fakeGitHub) ListOwnerRepos(_ context.Context, owner string, _ int) ([]g
 	defer f.mu.Unlock()
 	f.owners = append(f.owners, owner)
 	return append([]ghapi.Repo(nil), f.ownerRepos...), nil
+}
+
+func (f *fakeGitHub) GetRepo(_ context.Context, repo string) (ghapi.RepoInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var info ghapi.RepoInfo
+	info.Permissions.Admin = !f.foreignRepos[NormalizeRepo(repo)]
+	info.Permissions.Push = info.Permissions.Admin
+	return info, nil
 }
 
 func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {

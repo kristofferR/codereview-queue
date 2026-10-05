@@ -1299,6 +1299,31 @@ func (s *Service) ResolveThreads(ctx context.Context, threadIDs []string) ([]Res
 	return out, nil
 }
 
+// requireAdministeredThread refuses a reply on a review thread whose repository
+// the token user does not administer, matching postPRComment for issue comments.
+func (s *Service) requireAdministeredThread(ctx context.Context, id string) error {
+	var thread struct {
+		Node struct {
+			Repository struct {
+				NameWithOwner       string `json:"nameWithOwner"`
+				ViewerCanAdminister bool   `json:"viewerCanAdminister"`
+			} `json:"repository"`
+		} `json:"node"`
+	}
+	err := s.gh.GraphQL(ctx, `query($id:ID!){
+  node(id:$id) {
+    ... on PullRequestReviewThread { repository { nameWithOwner viewerCanAdminister } }
+  }
+}`, map[string]any{"id": id}, &thread)
+	if err != nil {
+		return err
+	}
+	if !thread.Node.Repository.ViewerCanAdminister {
+		return fmt.Errorf("thread %s is on %s: %w", id, thread.Node.Repository.NameWithOwner, errNotAdministered)
+	}
+	return nil
+}
+
 type DeclinedThread struct {
 	ThreadID string `json:"thread_id"`
 	URL      string `json:"url,omitempty"`
@@ -1318,6 +1343,9 @@ func (s *Service) DeclineThreads(ctx context.Context, threadIDs []string, reason
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
+		}
+		if err := s.requireAdministeredThread(ctx, id); err != nil {
+			return out, err
 		}
 		var reply struct {
 			AddPullRequestReviewThreadReply struct {

@@ -50,6 +50,10 @@ type GitHubAPI interface {
 	// crq has — a conditional GET that costs no quota while the ref is
 	// unchanged — which is what `crq wait` idles on.
 	GetRef(context.Context, string, string) (string, error)
+	// GetRepo reads the token user's permissions on a repository. Enqueue asks
+	// it before requesting reviews: triggers go only to repositories that user
+	// administers.
+	GetRepo(context.Context, string) (ghapi.RepoInfo, error)
 }
 
 type Service struct {
@@ -226,7 +230,7 @@ func (s *Service) hold(
 // operator holds and the automatic review-budget circuit breaker.
 func (s *Service) postHoldNotice(ctx context.Context, result HoldResult, token, body string) HoldResult {
 	repo, pr, reason := result.Repo, result.PR, result.Reason
-	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, body)
+	comment, commentErr := s.postPRComment(ctx, repo, pr, body)
 	if commentErr != nil {
 		// The hold is the safety boundary and has already committed. A missing
 		// notice must be visible to the caller, but must not roll the hold back and
@@ -328,7 +332,7 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 	}
 	if released {
 		s.sync(ctx, state)
-		comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, unholdComment())
+		comment, commentErr := s.postPRComment(ctx, repo, pr, unholdComment())
 		if commentErr != nil {
 			result.Warning = "release comment could not be posted: " + commentErr.Error()
 			if s.log != nil {
@@ -446,12 +450,49 @@ type EnqueueResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// errNotAdministered refuses a pull-request comment on a repository the token
+// user does not administer.
+var errNotAdministered = errors.New("crq posts only on repositories you administer")
+
+// administers reports whether the token user administers repo. crq speaks as
+// that user, so it posts only where the user runs the project.
+func (s *Service) administers(ctx context.Context, repo string) (bool, error) {
+	info, err := s.gh.GetRepo(ctx, repo)
+	return info.Permissions.Admin, err
+}
+
+// postPRComment posts a notice on a pull request, refusing repositories the
+// token user does not administer. Callers already treat a failed notice as
+// non-fatal, so a refusal leaves their state change in place.
+func (s *Service) postPRComment(ctx context.Context, repo string, pr int, body string) (ghapi.IssueComment, error) {
+	administered, err := s.administers(ctx, repo)
+	if err != nil {
+		return ghapi.IssueComment{}, err
+	}
+	if !administered {
+		return ghapi.IssueComment{}, errNotAdministered
+	}
+	return s.gh.PostIssueComment(ctx, repo, pr, body)
+}
+
 // Enqueue records a review round for repo#pr's current head. A round already
 // tracking the head is reported (queued/deduped) instead of duplicated; a round
 // on a stale head is superseded to track the new one.
 func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResult, error) {
 	repo = NormalizeRepo(repo)
 	result := EnqueueResult{Repo: repo, PR: pr}
+	// Review triggers are comments posted as the token's user. On someone else's
+	// project they are noise the maintainer did not ask for, and its own review
+	// bots answer without them, so only administered repositories are queued.
+	administered, err := s.administers(ctx, repo)
+	if err != nil {
+		return result, err
+	}
+	if !administered {
+		result.Held = true
+		result.Reason = "crq requests reviews only on repositories you administer; use crq feedback to read this PR's findings"
+		return result, nil
+	}
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
 		return result, err
@@ -1048,7 +1089,7 @@ func (s *Service) postDismissNotice(ctx context.Context, out DismissResult, curr
 	if len(findings) == 0 {
 		return out
 	}
-	comment, err := s.gh.PostIssueComment(ctx, out.Repo, out.PR, dismissComment(out.Head, findings, out.Reason, cfg))
+	comment, err := s.postPRComment(ctx, out.Repo, out.PR, dismissComment(out.Head, findings, out.Reason, cfg))
 	if err != nil {
 		out.Warning = "dismissal recorded, but its PR comment could not be posted: " + err.Error()
 		if s.log != nil {
@@ -3379,7 +3420,7 @@ func (s *Service) sweepMergedHold(ctx context.Context, st State) (State, PumpRes
 		return updated, PumpResult{Action: "lost_race", Repo: repo, PR: pr}, true, nil
 	}
 	s.sync(ctx, updated)
-	comment, commentErr := s.gh.PostIssueComment(ctx, repo, pr, mergedHoldComment())
+	comment, commentErr := s.postPRComment(ctx, repo, pr, mergedHoldComment())
 	if commentErr != nil && s.log != nil {
 		s.log.Printf("warning: %s#%d merged hold retired but its PR comment could not be posted: %v", repo, pr, commentErr)
 	}

@@ -43,7 +43,7 @@ crq next            # inside the checkout: crq finds the PR from the remote and 
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
 | `done` | Converged. Report and stop. |
-| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed). |
+| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed, or the repository is not one you administer, where crq posts nothing and `crq feedback` still reads findings). |
 
 `crq next` always exits 0 on success: read `.action`, never the exit code. It is **non-blocking and
 idempotent**, and it advances the queue by one step as a side effect — so a PR in a repo outside the

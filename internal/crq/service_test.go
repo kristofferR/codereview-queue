@@ -58,6 +58,8 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	// searchErrs fails EachOpenPR for one search target.
+	searchErrs map[string]error
 	// foreignRepos are repositories the token user does not administer; every
 	// other repository reads as administered.
 	foreignRepos map[string]bool
@@ -373,9 +375,13 @@ func (f *fakeGitHub) GetRepo(_ context.Context, repo string) (ghapi.RepoInfo, er
 	return info, nil
 }
 
-func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
+func (f *fakeGitHub) EachOpenPR(_ context.Context, target string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
 	f.mu.Lock()
 	f.searches++
+	if err := f.searchErrs[target]; err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	prs := append([]ghapi.SearchPR(nil), f.searchPRs...)
 	f.mu.Unlock()
 	for _, pr := range prs {
@@ -4373,6 +4379,38 @@ func TestAutoReviewScanAppliesTheRepositorysOwnSkipAuthors(t *testing.T) {
 // A control plane that dies mid-scan must end the pass, not be logged once per
 // candidate: skipping PR by PR spends the offline cap on each one while the
 // pass still reports success, so the daemon looks healthy through the outage.
+func TestAutoReviewEnqueuesPastAnUnsearchableRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/app": true, "o/renamed": true}
+	cfg.LeaderTTL = time.Minute
+	cfg.AutoReviewMaxScan = 10
+	repo, pr := "o/app", 4
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
+	// GitHub search answers 422 for a repository renamed since it was enrolled.
+	gh.searchErrs = map[string]error{"o/renamed": &ghapi.APIError{Method: "GET", URL: "/search/issues", Status: 422}}
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true})
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 422 {
+		t.Fatalf("AutoReview error = %v, want the failed search reported", err)
+	}
+	st, _, lerr := store.Load(ctx)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Round(repo, pr) == nil {
+		t.Fatalf("a failed search for another repository dropped %s#%d, rounds=%#v", repo, pr, st.Rounds)
+	}
+}
+
 func TestAutoReviewPropagatesAnUnreachableControlPlane(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

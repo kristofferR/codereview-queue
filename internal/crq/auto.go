@@ -344,10 +344,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		return cfg
 	}
 	lastBeat := time.Now()
+	var targetErrs []error
 	for _, target := range targets {
 		// Per-target scan budget so one large scope can't consume the whole budget
 		// and starve later scopes when CRQ_SCOPE lists multiple owners/orgs.
 		scanned := 0
+		callbackErr := false
 		// Stream results and stop once the post-filter scan budget is spent, so
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.
@@ -377,9 +379,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if ttl := s.leaderTTL(state); ttl > 0 && time.Since(lastBeat) >= ttl/2 {
 				st, held, herr := s.renewLeader(ctx, owner, token)
 				if herr != nil {
+					callbackErr = true
 					return false, herr
 				}
 				if !held {
+					callbackErr = true
 					return false, errLostLeadership
 				}
 				state = st     // reuse the freshly written snapshot for later candidates
@@ -407,6 +411,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				// spends the offline cap once per PR while the pass still reports
 				// success, so the outage surfaces minutes late, if at all.
 				if abortsPass(nerr) {
+					callbackErr = true
 					return false, nerr
 				}
 				if s.log != nil {
@@ -424,7 +429,18 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			return false, nil
 		})
 		if err != nil {
-			return err
+			// A throttle, an outage or a callback failure (lost leadership)
+			// ends the pass. A search failure for this one target does not:
+			// returning here dropped every candidate already collected, so one
+			// renamed repository (search answers 422 for the old name) kept the
+			// whole fleet from enqueueing anything.
+			if callbackErr || abortsPass(err) {
+				return err
+			}
+			if s.log != nil {
+				s.log.Printf("warning: autoreview skipped %s: %v", target, err)
+			}
+			targetErrs = append(targetErrs, err)
 		}
 	}
 	// Titles first, in one write: they change nothing about scheduling, so a
@@ -441,7 +457,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		return cleanupErr
 	}
 	// One batched write for the whole pass instead of N (#2).
-	return errors.Join(cleanupErr, s.enqueueBatch(ctx, candidates))
+	return errors.Join(append(targetErrs, cleanupErr, s.enqueueBatch(ctx, candidates))...)
 }
 
 // retireMergedEvidence inspects at most one terminal PR per repository. It is

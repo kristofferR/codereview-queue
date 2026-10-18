@@ -935,6 +935,7 @@ func (s *Service) dispatchWithStart(
 	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
+	sweepDispatchProcess(cmd)
 	_ = logFile.Sync()
 	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" {
 		// Asking is not a failed solution attempt. Hold the PR with the exact

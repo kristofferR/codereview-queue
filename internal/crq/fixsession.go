@@ -28,9 +28,10 @@ import (
 //	CRQ_FIX_PROMPT_FILE  the instruction file
 //	CRQ_FIX_MODEL / CRQ_FIX_EFFORT / CRQ_FIX_PROMPT  the repository's settings
 //
-// It execs the agent rather than waiting on it, so the process the watcher
-// supervises IS the agent: a killed session kills the agent, and the exit
-// status is the agent's own rather than a shell's approximation of it.
+// On Linux it stays as the agent's parent and exits with the agent's status
+// once everything the agent started is gone (see runReaped). Elsewhere it execs
+// the agent, so the process the watcher supervises IS the agent. Either way
+// this call does not return on success.
 func FixSession(ctx context.Context, cfg Config) error {
 	agent := cfg.fixAgent()
 	if agent == "" {
@@ -48,9 +49,15 @@ func FixSession(ctx context.Context, cfg Config) error {
 	argv := fixSessionArgv(resolved, prompt, SplitArgv(os.Getenv("CRQ_FIX_ARGS")),
 		os.Getenv("CRQ_FIX_MODEL"), os.Getenv("CRQ_FIX_EFFORT"))
 
-	// Exec, not run: the watcher is supervising this pid and should be
-	// supervising the agent.
-	return syscall.Exec(resolved, argv, os.Environ())
+	code, err := runReaped(resolved, argv)
+	if errors.Is(err, errors.ErrUnsupported) {
+		return syscall.Exec(resolved, argv, os.Environ())
+	}
+	if err != nil {
+		return fmt.Errorf("fix agent %q: %w", agent, err)
+	}
+	os.Exit(code)
+	return nil
 }
 
 // fixSessionPrompt is the instruction file with the repository's standing

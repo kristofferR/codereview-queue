@@ -352,8 +352,8 @@ func run(ctx context.Context, args []string) int {
 		printJSON(est)
 		return 0
 	case "fix-session":
-		// What `crq watch --dispatch` runs per pull request. It execs the agent,
-		// so this call does not return on success.
+		// What `crq watch --dispatch` runs per pull request. It exits with the
+		// agent's status, so this call does not return on success.
 		if err := crq.FixSession(ctx, cfg); err != nil {
 			fatal(err)
 			return 1

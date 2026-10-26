@@ -478,8 +478,8 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	}
 }
 
-// A co-reviewer can answer a trigger with a failure notice (EvCoFailed —
-// Codex's "Something went wrong. Try again later"). The command is spent, but
+// A co-reviewer can answer a trigger with a failure notice (EvCoFailed, as
+// classified in internal/dialect). The command is spent, but
 // unlike an unable notice asking again usually works. crq waits coRetryDelay
 // after each failure and stops after coRetryLimit retries in one round.
 const (

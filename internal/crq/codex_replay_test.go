@@ -557,7 +557,7 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	}
 }
 
-// Codex can answer its trigger with "Something went wrong. Try again later".
+// Codex can answer its trigger with a failure notice (corpus: codex/review-error.md).
 // The notice is never a finding, and crq asks again once the retry delay has
 // passed — at most twice per round — until Codex delivers.
 func TestCodexReplayRetriesFailedReview(t *testing.T) {

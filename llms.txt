@@ -99,8 +99,9 @@ reviewers finish, `crq next` also checks:
   rule a person's thread out.
 
 The gate never changes when reviews are requested: a red check does not hold a review back, and
-these findings never count as reviewer feedback. They have no thread and only a push clears them,
-so once you hold local work crq stops repeating them and the ordinary `hold`/`push` rules apply.
+these findings never count as reviewer feedback. They have no thread; a push clears them, and
+eligible CI findings can also be dismissed as described above. Once you hold local work crq
+stops repeating them and the ordinary `hold`/`push` rules apply.
 A one-pass campaign keeps its own `done` and merge rule.
 
 `crq next` always exits 0 on success — read `.action`, never the exit code. It is non-blocking and

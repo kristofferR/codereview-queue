@@ -181,7 +181,7 @@ func (s *Service) mergeDone(ctx context.Context, report NextReport, pull ghapi.P
 	switch {
 	case forkPull(report.Repo, pull):
 		return true, false, "done; not merging a pull request from another repository", nil
-	case report.Head == "" || !strings.HasPrefix(pull.Head.SHA, report.Head):
+	case report.HeadOID == "" || pull.Head.SHA != report.HeadOID:
 		return true, false, "done; the head moved since the listing, so merging waits for the next pass", nil
 	case !st.AutofixEnabled(report.Repo):
 		return true, false, "done; merging is paused because autofix is off for this repository", nil
@@ -202,7 +202,7 @@ func (s *Service) mergeDone(ctx context.Context, report NextReport, pull ghapi.P
 	if s.cfg.DryRun {
 		return true, false, "dry run: would merge with " + cfg.MergeMethod, nil
 	}
-	result, err := s.gh.MergePull(ctx, report.Repo, report.PR, pull.Head.SHA, cfg.MergeMethod)
+	result, err := s.gh.MergePull(ctx, report.Repo, report.PR, report.HeadOID, cfg.MergeMethod)
 	if err != nil {
 		return true, false, "", err
 	}

@@ -38,7 +38,7 @@ func ciRun(name, status, conclusion string) ghapi.CheckRun {
 func TestNextDoneWaitsForGreenCI(t *testing.T) {
 	base := time.Now().UTC()
 	f := newReplayFixture(t, base)
-	repo, pr, head := "owner/repo", 700, "aaaaaaaa1"
+	repo, pr, head := "owner/repo", 700, "aaaaaaaa1234567890123456789012345678901234"
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Minute))
 	f.setLocalWork(false, "")
@@ -77,7 +77,11 @@ func TestNextDoneWaitsForGreenCI(t *testing.T) {
 		t.Fatalf("reason = %q, want the unreadable threads named", unread.Reason)
 	}
 	f.threadsGraphQL(nil)
-	f.wantAction(f.next(repo, pr), engine.ActionDone)
+	done := f.next(repo, pr)
+	f.wantAction(done, engine.ActionDone)
+	if done.HeadOID != head || done.Head != head[:9] {
+		t.Fatalf("decision head = %q (%q), want full %q and abbreviated head", done.HeadOID, done.Head, head)
+	}
 }
 
 func TestNextMergeGateBlocksOnPeopleAndWaitsForRequiredChecks(t *testing.T) {
@@ -157,7 +161,7 @@ func TestMergeGatePeopleExcludeBotsAndSupersededVerdicts(t *testing.T) {
 func TestMergeDoneMergesTheDecidedHeadOnly(t *testing.T) {
 	base := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
-	repo, pr, head := "owner/repo", 702, "dddddddd12345678"
+	repo, pr, head := "owner/repo", 702, "dddddddd1234567890123456789012345678901234"
 	f.openPull(repo, pr, head)
 	squash := "squash"
 	if _, err := f.svc.SetSolver(f.ctx, repo, SolverChange{MergeMethod: &squash}); err != nil {
@@ -166,17 +170,19 @@ func TestMergeDoneMergesTheDecidedHeadOnly(t *testing.T) {
 	pull := f.gh.pulls[fakeKey(repo, pr)]
 	pull.Number = pr
 	pull.Head.Repo.FullName = repo
-	done := NextReport{Repo: repo, PR: pr, Head: head[:9], Action: string(engine.ActionDone)}
+	done := NextReport{Repo: repo, PR: pr, Head: head[:9], HeadOID: head, Action: string(engine.ActionDone)}
 
 	fork := pull
 	fork.Head.Repo.FullName = "someone/repo"
 	if _, merged, reason, err := f.svc.mergeDone(f.ctx, done, fork); err != nil || merged || !strings.Contains(reason, "another repository") {
 		t.Fatalf("fork merge = merged %t reason %q err %v; want it refused", merged, reason, err)
 	}
-	moved := done
-	moved.Head = "eeeeeeee1"
-	if _, merged, _, err := f.svc.mergeDone(f.ctx, moved, pull); err != nil || merged {
-		t.Fatalf("a decision about another head merged: %v", err)
+	for _, oid := range []string{"", head[:9], "eeeeeeee1234567890123456789012345678901234", head[:9] + strings.Repeat("e", 31)} {
+		moved := done
+		moved.HeadOID = oid
+		if _, merged, _, err := f.svc.mergeDone(f.ctx, moved, pull); err != nil || merged {
+			t.Fatalf("a decision with head OID %q merged: %v", oid, err)
+		}
 	}
 
 	// A live work claim means unpushed changes this watcher cannot see.

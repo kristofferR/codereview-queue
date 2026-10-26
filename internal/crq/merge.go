@@ -57,10 +57,13 @@ func (s *Service) readMergeSeen(ctx context.Context, cfg Config, repo string, ob
 		(statusErr != nil && !errors.Is(statusErr, ghapi.ErrNotFound)) {
 		m.CIUnknown = true
 	}
-	// Unreadable protection degrades to "nothing required": GitHub's own
-	// mergeable_state still reports a required check that never ran as blocked.
-	if reqErr != nil && s.log != nil {
-		s.log.Printf("warning: required checks unavailable for %s@%s: %v", repo, pull.Base.Ref, reqErr)
+	// RequiredChecks tolerates unavailable protection sources (404/403).
+	// Other failures leave the CI requirements unknown until the read succeeds.
+	if reqErr != nil {
+		m.CIUnknown = true
+		if s.log != nil {
+			s.log.Printf("warning: required checks unavailable for %s@%s: %v", repo, pull.Base.Ref, reqErr)
+		}
 	}
 	// A reviewer's own checks are left to the reviewer, including when branch
 	// protection requires one: excluded from CI, it would otherwise read as a

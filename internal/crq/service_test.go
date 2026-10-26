@@ -42,10 +42,11 @@ type fakeGitHub struct {
 	statuses        map[string][]ghapi.CommitStatus // key: ref (full sha)
 	statusErrs      map[string]error
 	requiredChecks  map[string][]string // key: repo#branch
-	postBodyErrs    map[string]error    // body → error (selective trigger-post failures)
-	listPullErrs    map[string]error    // repo → error (a repository the token cannot read)
-	deleteErrs      map[int64]error     // comment id → error (GitHub refuses the delete)
-	deleteAfterErrs map[int64]error     // comment id → error after GitHub applies the delete
+	requiredErrs    map[string]error
+	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	listPullErrs    map[string]error // repo → error (a repository the token cannot read)
+	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
+	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
 	deleteCalls     []int64
@@ -152,6 +153,9 @@ func (f *fakeGitHub) ListCommitStatuses(_ context.Context, _ string, ref string)
 func (f *fakeGitHub) RequiredChecks(_ context.Context, repo, branch string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.requiredErrs[repo+"#"+branch]; err != nil {
+		return nil, err
+	}
 	return append([]string(nil), f.requiredChecks[repo+"#"+branch]...), nil
 }
 

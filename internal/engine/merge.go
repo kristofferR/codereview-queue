@@ -70,8 +70,8 @@ type CISeen struct {
 
 // MergeSeen is what the merge gate decides from.
 type MergeSeen struct {
-	// CIUnknown means the head's checks could not be read, so CI cannot be
-	// called green.
+	// CIUnknown means the head's checks or the base's required checks could
+	// not be read, so CI cannot be called green.
 	CIUnknown bool
 	CI        []CISeen
 	// Required names the checks branch protection requires. One that has not

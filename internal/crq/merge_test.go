@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,31 @@ func TestNextDoneWaitsForGreenCI(t *testing.T) {
 	if done.HeadOID != head || done.Head != head[:9] {
 		t.Fatalf("decision head = %q (%q), want full %q and abbreviated head", done.HeadOID, done.Head, head)
 	}
+}
+
+func TestNextWaitsWhenRequiredChecksCannotBeRead(t *testing.T) {
+	base := time.Now().UTC()
+	f := newReplayFixture(t, base)
+	repo, pr, head := "owner/repo", 703, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.setMergeableState(repo, pr, "clean")
+	f.setCheckRuns(head, ciRun("test", "completed", "success"))
+	f.threadsGraphQL(nil)
+	f.gh.requiredErrs = map[string]error{repo + "#main": errors.New("required checks unavailable")}
+	f.next(repo, pr)
+	f.clk.advance(time.Minute)
+	f.botReview(repo, pr, 900, head, f.clk.now())
+
+	unread := f.next(repo, pr)
+	f.wantAction(unread, engine.ActionWait)
+	if unread.Reason != "could not read CI for this head" {
+		t.Fatalf("reason = %q, want the unreadable CI named", unread.Reason)
+	}
+
+	delete(f.gh.requiredErrs, repo+"#main")
+	f.wantAction(f.next(repo, pr), engine.ActionDone)
 }
 
 func TestNextMergeGateBlocksOnPeopleAndWaitsForRequiredChecks(t *testing.T) {

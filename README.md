@@ -494,7 +494,8 @@ Built to be left running:
 
 To let autofix merge on its own, `crq solver set <repo> --merge squash` merges a PR the moment
 `crq next` says `done`, guarded by the exact head SHA that decision was about. Forks, held PRs and
-repositories with autofix off are never merged. It is off by default.
+repositories with autofix off are never merged, and a PR an agent or fix session is still working on
+waits for it. It is off by default.
 
 For a bulk campaign, `crq solver set <repo> --one-pass on --merge squash` caps each PR at one
 review round, dispatches one fixer/finalizer even when that review was clean, and merges exactly

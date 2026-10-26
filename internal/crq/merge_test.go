@@ -172,6 +172,23 @@ func TestMergeDoneMergesTheDecidedHeadOnly(t *testing.T) {
 		t.Fatalf("a decision about another head merged: %v", err)
 	}
 
+	// A live work claim means unpushed changes this watcher cannot see.
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.SetWorkClaim(repo, pr, WorkClaim{Owner: "session-a", By: "mac:feature", ClaimedAt: f.clk.now(), ExpiresAt: f.clk.now().Add(WorkClaimTTL)})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, merged, reason, err := f.svc.mergeDone(f.ctx, done, pull); err != nil || merged || !strings.Contains(reason, "mac:feature") {
+		t.Fatalf("claimed merge = merged %t reason %q err %v; want it to wait for the owner", merged, reason, err)
+	}
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.ReleaseWorkClaim(repo, pr, "session-a", false)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	eligible, merged, reason, err := f.svc.mergeDone(f.ctx, done, pull)
 	if err != nil || !eligible || !merged {
 		t.Fatalf("merge = eligible %t merged %t reason %q err %v", eligible, merged, reason, err)

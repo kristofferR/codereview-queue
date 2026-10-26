@@ -94,7 +94,7 @@ reviewers finish, `crq next` also checks:
   mergeability, crq waits.
 - **People**: changes requested in a person's latest review, an unresolved review thread a person
   started, a draft, or branch protection still blocking a green PR (a required approval) returns
-  `blocked`.
+  `blocked`, ahead of any CI wait: a draft's CI may only start once a person marks it ready.
 
 The gate never changes when reviews are requested: a red check does not hold a review back, and
 these findings never count as reviewer feedback. They have no thread and only a push clears them,
@@ -401,7 +401,9 @@ crq solver clear REPO | crq solver clear --fleet
 `--merge merge|squash|rebase` is repository-scoped and off by default. On its own it lets the
 autofix watcher merge a PR the moment `crq next` reports `done`, with the method given, through
 GitHub's merge API guarded by the exact head SHA the decision was made on. It never merges a PR
-whose head lives in another repository, a held PR, or one in a repository whose autofix is off.
+whose head lives in another repository, a held PR, or one in a repository whose autofix is off, and
+it waits while an interactive work claim or a fix session owns the PR: `done` describes the remote
+head, and the owner may hold changes it has not pushed yet.
 
 `--one-pass on` is a repository-scoped campaign mode: the first review anywhere on a PR consumes
 its only review round, then one isolated fixer/finalizer runs even if the review was clean. With

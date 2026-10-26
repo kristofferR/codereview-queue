@@ -278,13 +278,15 @@ func NextAction(in NextInput, now time.Time) Action {
 		return Action{Kind: ActionWait, Reason: "resolved or dismissed findings need a fresh confirmation review", At: in.nextCheck(now, nil, pending)}
 	}
 	// 5. The reviewers are satisfied; `done` also means GitHub would merge it.
-	//    CI still running is a wait, and what only a person can settle (changes
-	//    requested, their open threads, a required approval) is blocked.
-	if in.Merge.Wait != "" {
-		return Action{Kind: ActionWait, Reason: in.Merge.Wait, At: now.Add(in.minDelay()).UTC()}
-	}
+	//    What only a person can settle (changes requested, their open threads,
+	//    a draft, a required approval) is blocked, and comes first: CI that only
+	//    starts once a draft is marked ready would otherwise be waited on for
+	//    ever. CI still running is a wait.
 	if in.Merge.Blocked != "" {
 		return Action{Kind: ActionBlocked, Reason: in.Merge.Blocked}
+	}
+	if in.Merge.Wait != "" {
+		return Action{Kind: ActionWait, Reason: in.Merge.Wait, At: now.Add(in.minDelay()).UTC()}
 	}
 	return Action{Kind: ActionDone, Reason: "converged: no findings, every required reviewer answered, and the merge gate passed"}
 }

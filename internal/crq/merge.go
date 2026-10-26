@@ -189,6 +189,16 @@ func (s *Service) mergeDone(ctx context.Context, report NextReport, pull ghapi.P
 	if hold, held := st.HeldPR(report.Repo, report.PR); held {
 		return true, false, "held: " + hold.Reason, nil
 	}
+	// done describes the remote head. Someone holding the PR may have unpushed
+	// work this watcher cannot see, so their claim outranks the merge.
+	now := s.clock()
+	if claim, owned := st.WorkClaim(report.Repo, report.PR, now); owned {
+		return true, false, "done; " + claim.By + " is working on this pull request, so merging waits", nil
+	}
+	if round := st.Round(report.Repo, report.PR); (round != nil && round.DispatchHeld(now)) ||
+		st.ArchivedDispatchHeld(report.Repo, report.PR, now) {
+		return true, false, "done; a fix session owns this pull request, so merging waits", nil
+	}
 	if s.cfg.DryRun {
 		return true, false, "dry run: would merge with " + cfg.MergeMethod, nil
 	}

@@ -121,6 +121,8 @@ func TestNextActionMergeGate(t *testing.T) {
 		{"green gate is done", NextInput{Obs: openObs(), Completion: reviewed}, ActionDone},
 		{"running CI waits", NextInput{Obs: openObs(), Completion: reviewed, Merge: Gate{Wait: "waiting for CI: test"}}, ActionWait},
 		{"a person blocks", NextInput{Obs: openObs(), Completion: reviewed, Merge: Gate{Blocked: "changes requested by alice"}}, ActionBlocked},
+		// A draft's required CI may only start once it is marked ready.
+		{"a person outranks CI that waits on them", NextInput{Obs: openObs(), Completion: reviewed, Merge: MergeGate(MergeSeen{Required: []string{"build"}, State: "draft"})}, ActionBlocked},
 		{"red CI is work", NextInput{Obs: openObs(), Completion: reviewed, Findings: ciFail}, ActionFix},
 		{"red CI is work while a review runs", NextInput{Obs: openObs(), Completion: pending, Round: fired, Findings: ciFail}, ActionFix},
 		// Only a push clears a red check, so a local fix must not hear `fix` again.

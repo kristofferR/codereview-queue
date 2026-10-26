@@ -69,6 +69,7 @@ func TestGoldenClassification(t *testing.T) {
 		summaryOnly     bool
 		codexClean      bool
 		codexUsageLimit bool
+		codexReviewErr  bool
 		codexSummary    bool
 		nonActionable   bool
 		availableIn     time.Duration // 0 = no window must parse
@@ -124,6 +125,11 @@ func TestGoldenClassification(t *testing.T) {
 			author: "chatgpt-codex-connector[bot]", wantKind: EvNoAction, registryPrimary: true},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true,
 			author: "chatgpt-codex-connector[bot]", wantKind: EvFailed, registryPrimary: true},
+		// "Something went wrong. Try again later": the review failed, but asking
+		// again usually works — never a finding, and distinct from unable.
+		{file: "codex/review-error.md", codexReviewErr: true, nonActionable: true, author: CodexBotLogin, wantKind: EvCoFailed},
+		{file: "codex/review-error.md", codexReviewErr: true, nonActionable: true,
+			author: CodexBotLogin, wantKind: EvFailed, registryPrimary: true},
 		{file: "codex/review-summary-running.md", codexSummary: true, nonActionable: true, inProgressSHA: "15d9ec9",
 			author: CodexBotLogin, wantKind: EvInProgress, registryPrimary: true},
 		// Codex's "create an environment" platform ad, posted as a thread reply —
@@ -165,6 +171,7 @@ func TestGoldenClassification(t *testing.T) {
 				{"IsReviewSkipped", goldenCR.IsReviewSkipped(body), tc.reviewSkipped},
 				{"IsCodexNoActionReviewCompletion", IsCodexNoActionReviewCompletion(body), tc.codexClean},
 				{"IsCodexUsageLimit", IsCodexUsageLimit(body), tc.codexUsageLimit},
+				{"IsCodexReviewError", IsCodexReviewError(body), tc.codexReviewErr},
 				{"IsCodexReviewSummary", IsCodexReviewSummary(body), tc.codexSummary},
 				{"IsNonActionableText", IsNonActionableText(body), tc.nonActionable},
 			}

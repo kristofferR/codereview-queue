@@ -555,14 +555,14 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		return headCutoff
 	}
 	// Classified co-reviewer events (clean summaries, verdicts, notices,
-	// trigger commands, unable notices) are completion/participation signals,
+	// trigger commands, unable and failure notices) are completion/participation signals,
 	// not actionable findings — index them by comment id so the loop below
 	// skips them (the same pattern as the Codex clean-summary skip, which the
 	// classifier now owns generically).
 	coEventKinds := map[int64]dialect.EventKind{}
 	for _, ev := range obs.eng.Events {
 		switch ev.Kind {
-		case dialect.EvCoClean, dialect.EvCoInProgress, dialect.EvCoUnable, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
+		case dialect.EvCoClean, dialect.EvCoInProgress, dialect.EvCoUnable, dialect.EvCoFailed, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
 			coEventKinds[ev.CommentID] = ev.Kind
 		}
 	}

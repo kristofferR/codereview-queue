@@ -472,8 +472,8 @@ func (c Config) coCommandBodies() map[string][]string {
 }
 
 // adoptableCo returns the newest trigger command comment present for the head
-// that the co-reviewer has NOT already answered — with a review, or (Bugbot,
-// Macroscope) a completed check run. A command answered by later evidence
+// that the co-reviewer has NOT already answered — with a review, a failure
+// notice, or (Bugbot, Macroscope) a completed check run. A command answered by later evidence
 // belongs to a finished round for an earlier head: on a regular push whose
 // commit date predates that old command, the command survives the cutoff yet
 // is already consumed, so treating it as live makes DecideCoPost see
@@ -505,6 +505,14 @@ func adoptableCo(obs engine.Observation, loginKey string, cutoff time.Time, bodi
 		if dialect.NormalizeBotName(check.Bot) == loginKey &&
 			(check.Verdict == dialect.CheckDone || check.Verdict == dialect.CheckDoneClean) &&
 			!check.CompletedAt.Before(bestAt) {
+			return nil
+		}
+	}
+	// A failed command is spent too: adopting it would leave the round waiting
+	// on a review the bot already said it could not deliver.
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCoFailed && dialect.NormalizeBotName(ev.Bot) == loginKey &&
+			!ev.PairTime().Before(bestAt) {
 			return nil
 		}
 	}

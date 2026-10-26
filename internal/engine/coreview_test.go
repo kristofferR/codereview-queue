@@ -193,6 +193,75 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}
 }
 
+// TestDecideCoRetry pins the re-post after a failure notice: only a failure
+// answering the recorded command counts, after coRetryDelay, at most
+// coRetryLimit times per round, and never over a newer command or evidence.
+func TestDecideCoRetry(t *testing.T) {
+	now := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	head := "a3a687a52"
+	codex := dialect.CodexBotLogin
+	cp := CoReviewerPolicy{Login: codex, Command: dialect.CodexReviewCommand, Trigger: TriggerAlways}
+	enqueued := now.Add(-20 * time.Minute)
+	commandedAt := now.Add(-10 * time.Minute)
+	round := state.Round{Head: head, EnqueuedAt: enqueued, FiredAt: &commandedAt}
+	round.SetCoCommand(codex, 42, commandedAt)
+
+	failed := func(at time.Time) dialect.BotEvent {
+		return dialect.BotEvent{Kind: dialect.EvCoFailed, Bot: codex, For: codex, CreatedAt: at, UpdatedAt: at}
+	}
+	command := func(at time.Time) dialect.BotEvent {
+		return dialect.BotEvent{Kind: dialect.EvCoCommand, Bot: "kristofferR", For: codex, CreatedAt: at}
+	}
+	obsWith := func(events ...dialect.BotEvent) Observation {
+		return Observation{Head: head, Open: true, Events: events}
+	}
+	answered := now.Add(-5 * time.Minute)
+
+	cases := []struct {
+		name  string
+		cp    CoReviewerPolicy
+		round state.Round
+		obs   Observation
+		want  bool
+	}{
+		{name: "retries a failed command", obs: obsWith(command(commandedAt), failed(answered)), want: true},
+		{name: "waits out the retry delay", obs: obsWith(command(commandedAt), failed(now.Add(-time.Minute))), want: false},
+		{name: "no failure, no retry", obs: obsWith(command(commandedAt)), want: false},
+		{name: "a failure before the recorded command was already retried",
+			obs: obsWith(failed(commandedAt.Add(-time.Minute)), command(commandedAt)), want: false},
+		{name: "a newer command is left to be answered",
+			obs: obsWith(command(commandedAt), failed(answered), command(answered.Add(time.Minute))), want: false},
+		{name: "stops after the retry limit",
+			obs: obsWith(failed(enqueued.Add(time.Minute)), failed(enqueued.Add(2*time.Minute)), command(commandedAt), failed(answered)), want: false},
+		{name: "failures from an earlier round do not count",
+			obs: obsWith(failed(enqueued.Add(-2*time.Hour)), failed(enqueued.Add(-time.Hour)), command(commandedAt), failed(answered)), want: true},
+		{name: "an unable notice ends retries",
+			obs: obsWith(command(commandedAt), failed(answered), dialect.BotEvent{Kind: dialect.EvCoUnable, Bot: codex, For: codex, CreatedAt: answered}), want: false},
+		{name: "head evidence ends retries",
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{command(commandedAt), failed(answered)},
+				Reviews: []ReviewSeen{{Bot: codex, Commit: head + "0000", SubmittedAt: now}}}, want: false},
+		{name: "another bot's failure is not this one's",
+			obs: obsWith(command(commandedAt), dialect.BotEvent{Kind: dialect.EvCoFailed, Bot: bugbotLogin, For: bugbotLogin, CreatedAt: answered}), want: false},
+		{name: "never mode does not retry", cp: CoReviewerPolicy{Login: codex, Command: dialect.CodexReviewCommand, Trigger: TriggerNever},
+			obs: obsWith(command(commandedAt), failed(answered)), want: false},
+		{name: "an uncommanded round is DecideCoPost's", round: state.Round{Head: head, EnqueuedAt: enqueued, FiredAt: &commandedAt},
+			obs: obsWith(failed(answered)), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cp.Login == "" {
+				tc.cp = cp
+			}
+			if tc.round.Head == "" {
+				tc.round = round
+			}
+			if got := DecideCoRetry(tc.round, tc.obs, tc.cp, now); got != tc.want {
+				t.Fatalf("DecideCoRetry = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDecideCoPostHonorsReviewerChangeForce(t *testing.T) {
 	cp := CoReviewerPolicy{
 		Login:   "cursor[bot]",

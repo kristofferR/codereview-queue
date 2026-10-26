@@ -33,6 +33,7 @@ const (
 	EvCoClean                   // co-reviewer clean-summary issue comment
 	EvCoInProgress              // editable co-reviewer summary: review still processing
 	EvCoUnable                  // co-reviewer cannot finish this round (Codex usage limits)
+	EvCoFailed                  // co-reviewer's review failed; asking again may work (Codex "Something went wrong")
 	EvCoNotice                  // other non-actionable co-reviewer notice (acks)
 	EvCoVerdict                 // Macroscope approvability verdict (informational only)
 )
@@ -127,7 +128,7 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 			ev.Kind = EvNoAction
 		case EvCoInProgress:
 			ev.Kind = EvInProgress
-		case EvCoUnable:
+		case EvCoUnable, EvCoFailed:
 			// A registry primary that cannot produce the requested review is a
 			// failed attempt, not an optional co-reviewer disengaging its gate.
 			ev.Kind = EvFailed

@@ -87,7 +87,8 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   /`FindingsOnHead`/`Converged`, `Policy`. `coreview.go` holds the co-reviewer
   evidence/gate algebra, keyed by login and bot-shape-generic (participated,
   clean at SHA, cannot finish, was commanded) — including `DecideCoPost` and its
-  `never|selfheal|always` trigger modes. `codex.go` keeps only what is genuinely
+  `never|selfheal|always` trigger modes, and `DecideCoRetry` for a command the
+  bot answered with a failure notice. `codex.go` keeps only what is genuinely
   Codex-specific (the thumbs-up quirk, the rate-limit degrade). Every rule is
   table-tested.
 - `internal/crq/` — orchestration only: `service.go` (Enqueue/Pump/Wait/Cancel),

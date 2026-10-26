@@ -732,6 +732,8 @@ A co-reviewer that joins a round on its own (an actionable comment, a review, a 
 round dynamically: convergence waits for it even though it isn't required. An exhaustion notice — for
 Codex, its usage-limit message — releases that dynamic gate so a bot that cannot finish can't stall a
 round it volunteered for. An explicitly required bot is bounded only by the normal feedback deadline.
+A failure notice is different: when Codex answers crq's command with "Something went wrong. Try again
+later", crq posts the command again two minutes later, at most twice per round.
 
 **Check runs.** Bugbot and Macroscope publish verdicts as commit check runs, not just comments, and a
 clean Bugbot round posts *nothing* on the timeline — its `Cursor Bugbot` check run is the only

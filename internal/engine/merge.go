@@ -83,7 +83,9 @@ type MergeSeen struct {
 	// ChangesRequested lists people whose latest review requests changes.
 	ChangesRequested []string
 	// PersonThreads holds the URLs of unresolved review threads a person started.
-	PersonThreads []string
+	// ThreadsUnknown means they could not be read, so nobody can be ruled out.
+	PersonThreads  []string
+	ThreadsUnknown bool
 }
 
 // Gate is the merge gate's verdict. Failures, conflicts and a stale branch are
@@ -144,6 +146,8 @@ func MergeGate(m MergeSeen) Gate {
 		g.Wait = "waiting for CI: " + strings.Join(g.Pending, ", ")
 	case state == "unknown":
 		g.Wait = "waiting for GitHub to compute mergeability"
+	case m.ThreadsUnknown:
+		g.Wait = "could not read review threads, so a person's open thread cannot be ruled out"
 	}
 
 	switch {

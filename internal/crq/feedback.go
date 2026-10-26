@@ -652,6 +652,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	if gated {
 		seen := <-mergeCh
 		seen.PersonThreads = people
+		seen.ThreadsUnknown = threadRead.err != nil
 		report.Merge = engine.MergeGate(seen)
 		report.Findings = append(report.Findings, engine.GateFindings(report.Merge, head)...)
 	}

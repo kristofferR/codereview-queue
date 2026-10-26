@@ -43,6 +43,11 @@ func TestMergeGate(t *testing.T) {
 		},
 		{name: "unreadable CI waits", in: MergeSeen{CIUnknown: true, State: "clean"}, wait: "could not read CI for this head"},
 		{name: "mergeability still computing", in: MergeSeen{State: "unknown"}, wait: "waiting for GitHub to compute mergeability"},
+		{
+			name: "unreadable threads cannot rule a person out",
+			in:   MergeSeen{State: "clean", ThreadsUnknown: true},
+			wait: "could not read review threads, so a person's open thread cannot be ruled out",
+		},
 		{name: "conflict", in: MergeSeen{State: "dirty"}, conflict: true},
 		{name: "behind a strict base", in: MergeSeen{State: "behind"}, behind: true},
 		{name: "draft", in: MergeSeen{State: "draft"}, blocked: "the pull request is a draft"},

@@ -70,6 +70,13 @@ func TestNextDoneWaitsForGreenCI(t *testing.T) {
 	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{red.Findings[0].ID}, "flaky upstream mirror, unrelated to this PR"); err != nil {
 		t.Fatal(err)
 	}
+	// The fake's GraphQL fails, so nobody's open thread can be ruled out yet.
+	unread := f.next(repo, pr)
+	f.wantAction(unread, engine.ActionWait)
+	if !strings.Contains(unread.Reason, "review threads") {
+		t.Fatalf("reason = %q, want the unreadable threads named", unread.Reason)
+	}
+	f.threadsGraphQL(nil)
 	f.wantAction(f.next(repo, pr), engine.ActionDone)
 }
 

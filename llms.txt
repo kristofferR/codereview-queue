@@ -94,7 +94,8 @@ reviewers finish, `crq next` also checks:
   mergeability, crq waits.
 - **People**: changes requested in a person's latest review, an unresolved review thread a person
   started, a draft, or branch protection still blocking a green PR (a required approval) returns
-  `blocked`, ahead of any CI wait: a draft's CI may only start once a person marks it ready.
+  `blocked`, ahead of any CI wait: a draft's CI may only start once a person marks it ready. When
+  review threads cannot be read, crq waits rather than rule a person's thread out.
 
 The gate never changes when reviews are requested: a red check does not hold a review back, and
 these findings never count as reviewer feedback. They have no thread and only a push clears them,

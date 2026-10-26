@@ -14,8 +14,12 @@ func TestOnePassSolverIsTemporaryAndRepositoryScoped(t *testing.T) {
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 	merge := "squash"
-	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &merge}); err == nil {
-		t.Fatal("post-fix merge without one-pass was accepted")
+	// Outside a campaign, merge means "merge once crq next says done".
+	if view, err := svc.SetSolver(ctx, "o/r", SolverChange{MergeMethod: &merge}); err != nil || view.OnePass || view.MergeMethod != "squash" {
+		t.Fatalf("merge without one-pass = %+v, %v; want it accepted on its own", view, err)
+	}
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{MergeMethod: &merge}); err == nil {
+		t.Fatal("merge was accepted as a fleet-wide default")
 	}
 	on := true
 	if _, err := svc.SetFleetSolver(ctx, SolverChange{OnePass: &on}); err == nil {

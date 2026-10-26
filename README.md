@@ -361,8 +361,13 @@ Read `.action`, do exactly that, call it again.
 | `hold` | **do not commit or push** — a required reviewer hasn't answered for this head; call again at `.recheck_after` |
 | `push` | the head is released — commit and push your fixes once |
 | `wait` | nothing to do until `.recheck_after` |
-| `done` | converged |
-| `blocked` | needs a human; `.reason` says why |
+| `done` | converged and mergeable: reviewers answered, CI green, GitHub reports it mergeable |
+| `blocked` | needs a human; `.reason` says why (e.g. a person requested changes) |
+
+`done` is a merge gate, not just a review verdict. A running CI check is `wait`, a failed one is a
+`fix` finding (`source: "ci_check"`) to fix or re-run, a conflict or a branch behind a strict base
+is a finding too, and a person's requested changes or unresolved thread is `blocked`. None of that
+changes when reviews are requested: a red check never holds a review back.
 
 Every rule this used to spell out is now a value crq computes. Fix-before-review is `fix` coming
 before everything else. Hold-the-head is the `hold` action, including the exception where a
@@ -486,6 +491,10 @@ Built to be left running:
   with a write token over a stranger's code takes an explicit `CRQ_DISPATCH_FORKS=1`.
 - **Observable.** Session logs land under `$CRQ_WORKSPACE/logs/…`, and three consecutive failed
   session starts surface as `dispatch failing` on the dashboard.
+
+To let autofix merge on its own, `crq solver set <repo> --merge squash` merges a PR the moment
+`crq next` says `done`, guarded by the exact head SHA that decision was about. Forks, held PRs and
+repositories with autofix off are never merged. It is off by default.
 
 For a bulk campaign, `crq solver set <repo> --one-pass on --merge squash` caps each PR at one
 review round, dispatches one fixer/finalizer even when that review was clean, and merges exactly

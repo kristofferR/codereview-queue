@@ -84,7 +84,11 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
-  /`FindingsOnHead`/`Converged`, `Policy`. `coreview.go` holds the co-reviewer
+  /`FindingsOnHead`/`Converged`, `Policy`. `merge.go` is the merge gate behind
+  `done`: CI, GitHub's mergeability and people's verdicts reduced to findings
+  (`ci_check`, `merge_conflict`, `branch_behind`) plus a wait or blocked reason.
+  Gate findings are never reviewer feedback, so `FindingsOnHead` drops them and
+  they cannot hold a review back. `coreview.go` holds the co-reviewer
   evidence/gate algebra, keyed by login and bot-shape-generic (participated,
   clean at SHA, cannot finish, was commanded) — including `DecideCoPost` and its
   `never|selfheal|always` trigger modes, and `DecideCoRetry` for a command the

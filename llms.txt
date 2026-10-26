@@ -75,8 +75,31 @@ crq next                      # inside the checkout, the target is inferred
 | `hold` | Do NOT commit or push: a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
-| `done` | Converged. |
-| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed, or the repository is not one you administer, where crq posts nothing and `crq feedback` still reads findings). |
+| `done` | Converged and mergeable: every required reviewer answered, no findings remain, and the merge gate passed (see below). |
+| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed, a person requested changes or has an unresolved review thread, the PR is a draft, or the repository is not one you administer, where crq posts nothing and `crq feedback` still reads findings). |
+
+### Merge gate
+
+`done` means GitHub would merge the PR, not only that the bots are satisfied. After the
+reviewers finish, `crq next` also checks:
+
+- **CI**: every check run and commit status on the head, not only the required ones, plus any
+  required check that has not reported yet. The review bots' own checks are left to the bots. A
+  check still running returns `wait` (`.reason` names it). A failed one is a `fix` finding with
+  `source: "ci_check"` and the run's `.url`: fix it, or re-run it when the failure is unrelated to
+  the PR. A check that cannot pass for reasons outside the PR can be set aside with `crq dismiss`
+  and a reason, which asks no reviewer for a confirmation pass.
+- **Mergeability**: a conflict is a `merge_conflict` finding and a branch behind a strict base is a
+  `branch_behind` finding. Neither can be dismissed. While GitHub is still computing
+  mergeability, crq waits.
+- **People**: changes requested in a person's latest review, an unresolved review thread a person
+  started, a draft, or branch protection still blocking a green PR (a required approval) returns
+  `blocked`.
+
+The gate never changes when reviews are requested: a red check does not hold a review back, and
+these findings never count as reviewer feedback. They have no thread and only a push clears them,
+so once you hold local work crq stops repeating them and the ordinary `hold`/`push` rules apply.
+A one-pass campaign keeps its own `done` and merge rule.
 
 `crq next` always exits 0 on success — read `.action`, never the exit code. It is non-blocking and
 idempotent, and it advances the queue by one step as a side effect, so a PR in a repo outside the
@@ -368,15 +391,21 @@ crq solver REPO                                       # effective settings + whe
 crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5 --rounds 10
 crq solver set REPO --severities minor,potential --ask uncertain
 crq solver set REPO --prompt "This project uses bun, never npm."
+crq solver set REPO --merge squash                    # autofix merges once next says done
 crq solver set REPO --models gpt-5.6-sol --effort medium --one-pass on --merge squash
 crq solver set --fleet --effort medium                # the default every repository inherits
 crq solver set REPO --inherit models,effort,severities,ask,rounds,forks,skip-authors,one-pass,merge
 crq solver clear REPO | crq solver clear --fleet
 ```
 
+`--merge merge|squash|rebase` is repository-scoped and off by default. On its own it lets the
+autofix watcher merge a PR the moment `crq next` reports `done`, with the method given, through
+GitHub's merge API guarded by the exact head SHA the decision was made on. It never merges a PR
+whose head lives in another repository, a held PR, or one in a repository whose autofix is off.
+
 `--one-pass on` is a repository-scoped campaign mode: the first review anywhere on a PR consumes
-its only review round, then one isolated fixer/finalizer runs even if the review was clean.
-`--merge merge|squash|rebase` requires one-pass and lets the autofix watcher merge only the exact
+its only review round, then one isolated fixer/finalizer runs even if the review was clean. With
+one-pass, `--merge` lets the autofix watcher merge only the exact
 head that successful session released after GitHub reports it conflict-free. Review and check
 status are deliberately ignored because the fixer push makes the one allowed review stale. The
 finalizer must integrate the base crq observed, and crq verifies that base immediately before the
@@ -489,7 +518,7 @@ quota; the round just does not WAIT for it.
 cannot disagree. The primary reviewer is fleet-wide.
 
 A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
-remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
+remark, an issue-comment finding, a failed CI check — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
 round on that PR. Judge it, then record the decision:
 
 ```bash

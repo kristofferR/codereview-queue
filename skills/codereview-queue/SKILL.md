@@ -42,8 +42,16 @@ crq next            # inside the checkout: crq finds the PR from the remote and 
 | `hold` | Do NOT commit or push — a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
-| `done` | Converged. Report and stop. |
-| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed, or the repository is not one you administer, where crq posts nothing and `crq feedback` still reads findings). |
+| `done` | Converged and mergeable: reviewers answered, CI green, GitHub reports it mergeable, nobody requests changes. Report and stop. |
+| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed, a person requested changes or has an unresolved review thread, or the repository is not one you administer, where crq posts nothing and `crq feedback` still reads findings). |
+
+**The merge gate.** `done` waits for CI too: a running check is `wait`, and a failed one is a
+`fix` finding with `source: "ci_check"` and the run's `.url`. Fix it, or re-run it with
+`gh run rerun <run-id> --failed` when the failure is unrelated to the PR. Set one that cannot pass
+for reasons outside the PR aside with `crq dismiss` and a reason. A conflict (`merge_conflict`) or a
+branch behind a strict base (`branch_behind`) means merging the latest base. These findings clear
+only when a push lands, so once you hold local work crq stops repeating them. They never hold a
+review back.
 
 `crq next` always exits 0 on success: read `.action`, never the exit code. It is **non-blocking and
 idempotent**, and it advances the queue by one step as a side effect — so a PR in a repo outside the

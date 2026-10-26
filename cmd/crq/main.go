@@ -1089,7 +1089,7 @@ DRIVING A PR REVIEW
     hold     do NOT push: a required reviewer is pending; call again at .recheck_after
     push     the head is released — commit and push your fixes once
     wait     nothing to do; call again at .recheck_after
-    done     converged
+    done     converged and mergeable: CI green, GitHub reports it mergeable
     blocked  needs a human; .reason says why
 
   crq next is non-blocking and idempotent, so nothing is lost if it is interrupted.
@@ -1178,8 +1178,11 @@ Always exits 0 on success. Read .action; the exit code carries no information.
            is still fine. Call again at .recheck_after.
   push     The head is released. Commit and push the accumulated fixes once.
   wait     Nothing to do until .recheck_after.
-  done     Converged: no findings, every required reviewer answered.
-  blocked  Needs a human (.reason says why, e.g. the PR was closed).
+  done     Converged and mergeable: no findings, every required reviewer answered,
+           CI green, and GitHub reports the PR mergeable. A running check is a
+           wait; a failed one is a ci_check finding to fix or re-run.
+  blocked  Needs a human (.reason says why, e.g. the PR was closed, or a person
+           requested changes or left an unresolved review thread).
 
 Fields:
   action            the instruction — the entire contract
@@ -1406,12 +1409,15 @@ this repository. .sources says which layer answered for each setting.
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
   --one-pass     one review round, then exactly one fixer/finalizer session
-  --merge        merge the exact fixed head once it is conflict-free (requires one-pass;
-                 review and check status are ignored)
+  --merge        merge with this method once crq next says done: reviewers
+                 answered, CI green, GitHub reports it mergeable, nobody
+                 requests changes. Autofix merges it; forks are never merged.
+                 With one-pass: merge the exact fixed head once it is
+                 conflict-free (review and check status are ignored)
   --inherit      hand named settings to the layer beneath
 
-One-pass and merge are repository-scoped temporary campaign settings; they
-cannot be set as fleet defaults. 'crq solver set <repo> --inherit one-pass,merge'
+One-pass and merge are repository-scoped settings; they cannot be set as
+fleet defaults. 'crq solver set <repo> --inherit one-pass,merge'
 ends the campaign and removes its hand-offs while preserving unrelated solver
 overrides. 'crq solver clear <repo>' discards every repository solver override.
 

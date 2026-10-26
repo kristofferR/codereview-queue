@@ -34,6 +34,10 @@ type GitHubAPI interface {
 	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
 	ListCommentReactions(context.Context, string, int64) ([]ghapi.Reaction, error)
 	ListCheckRuns(context.Context, string, string) ([]ghapi.CheckRun, error)
+	// ListCommitStatuses and RequiredChecks feed the merge gate: the head's
+	// legacy statuses, and the checks the base branch requires.
+	ListCommitStatuses(context.Context, string, string) ([]ghapi.CommitStatus, error)
+	RequiredChecks(context.Context, string, string) ([]string, error)
 	PostIssueComment(context.Context, string, int, string) (ghapi.IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
 	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)

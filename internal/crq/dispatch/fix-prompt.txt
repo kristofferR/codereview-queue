@@ -31,6 +31,17 @@ Then:
 2. Fix genuine shortcomings within that goal. Decline unrelated refactors, new
    features, speculative hardening, and follow-up suggestions that broaden the
    original scope. Keep fixes minimal and in the style of the surrounding code.
+   Judge severity yourself: another code path, a rare edge case, or a small
+   performance cost is a nit whatever label the bot gave it, so decline it in
+   one line. Prefer the fix that deletes or narrows code over a new lock,
+   cache, helper, or option. If your fixes grew the diff, cut before you commit.
+   Findings whose source is `ci_check`, `merge_conflict` or `branch_behind` come
+   from the merge gate, not a reviewer:
+     ci_check: open its url, reproduce the failure locally and fix it. If it is
+       unrelated to this PR (a flaky test, an outage), re-run the failed jobs
+       with `gh run rerun <run-id> --failed` and change no code.
+     merge_conflict / branch_behind: merge the latest base branch into this
+       detached HEAD without rewriting history, resolve conflicts, run checks.
 3. Run this repository's own checks and make them pass — the ones its AGENTS.md /
    CLAUDE.md, CI workflow or build file documents. In a Go module that is
    `gofmt -l . && go vet ./... && go test ./... -count=1`.
@@ -43,7 +54,10 @@ Then:
      crq dismiss "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" <finding-id>... --reason "why"
    A real reason is required, and it is posted on the PR. Pass every ID in one
    call so they share one comment. Do not dismiss a threadless finding carried from
-   an older commit: the push already superseded it.
+   an older commit: the push already superseded it. Do not dismiss a merge-gate
+   finding you fixed or re-ran either: it clears itself once CI passes on the
+   pushed head. Dismiss a `ci_check` only when it cannot pass for reasons
+   outside this PR, and say which.
 6. Ask crq whether the head may move, then push:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"
    The watcher admits an unattended session after active reviewers have

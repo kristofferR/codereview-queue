@@ -23,10 +23,14 @@ func BlockingFindings(findings []dialect.Finding, head string) []dialect.Finding
 
 // FindingsOnHead excludes carried review artifacts from older commits — the
 // narrower filter for deciding whether visible feedback belongs to the
-// current head at all.
+// current head at all. It is reviewer feedback only: every caller schedules
+// reviews from it, and the merge gate's findings never hold a review back.
 func FindingsOnHead(findings []dialect.Finding, head string) []dialect.Finding {
 	current := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
+		if IsGateFinding(finding) {
+			continue
+		}
 		if finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
 			current = append(current, finding)
 		}
@@ -42,6 +46,10 @@ func FindingsOnHead(findings []dialect.Finding, head string) []dialect.Finding {
 func FindingsForActiveRound(findings []dialect.Finding, head string, enqueuedAt time.Time) []dialect.Finding {
 	current := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
+		// A red check never stands in for the review this wait is for.
+		if IsGateFinding(finding) {
+			continue
+		}
 		onHead := finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head)
 		arrivedDuringRound := !enqueuedAt.IsZero() &&
 			!finding.CreatedAt.IsZero() &&

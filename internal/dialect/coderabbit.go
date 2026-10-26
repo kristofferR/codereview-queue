@@ -27,6 +27,12 @@ func ConfirmationReviewCommand(bot, command string) string {
 	return command
 }
 
+// IsCodeRabbitCheck reports CodeRabbit's own commit status ("CodeRabbit", with
+// descriptions such as "Review completed" or "Review skipped") or check run.
+func IsCodeRabbitCheck(appSlug, name string) bool {
+	return appSlug == "coderabbitai" || strings.EqualFold(strings.TrimSpace(name), "CodeRabbit")
+}
+
 // Default CodeRabbit dialect vocabulary. These literals live here — the one
 // package that owns bot-message text — so crq/config and the engine inject them
 // without spelling out the "rate limit" wording themselves.

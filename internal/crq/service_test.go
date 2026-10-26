@@ -39,10 +39,13 @@ type fakeGitHub struct {
 	reactionReads   []int64
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
-	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
-	listPullErrs    map[string]error // repo → error (a repository the token cannot read)
-	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
-	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
+	statuses        map[string][]ghapi.CommitStatus // key: ref (full sha)
+	statusErrs      map[string]error
+	requiredChecks  map[string][]string // key: repo#branch
+	postBodyErrs    map[string]error    // body → error (selective trigger-post failures)
+	listPullErrs    map[string]error    // repo → error (a repository the token cannot read)
+	deleteErrs      map[int64]error     // comment id → error (GitHub refuses the delete)
+	deleteAfterErrs map[int64]error     // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
 	deleteCalls     []int64
@@ -134,6 +137,23 @@ func newFakeGitHub() *fakeGitHub {
 }
 
 func fakeKey(repo string, pr int) string { return QueueKey(repo, pr) }
+
+// ListCommitStatuses serves the statuses stored under the requested ref.
+func (f *fakeGitHub) ListCommitStatuses(_ context.Context, _ string, ref string) ([]ghapi.CommitStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.statusErrs[ref]; err != nil {
+		return nil, err
+	}
+	return append([]ghapi.CommitStatus(nil), f.statuses[ref]...), nil
+}
+
+// RequiredChecks serves the required check names stored for repo#branch.
+func (f *fakeGitHub) RequiredChecks(_ context.Context, repo, branch string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requiredChecks[repo+"#"+branch]...), nil
+}
 
 // ListCheckRuns serves the runs stored under the requested ref, tolerating a
 // stored short-SHA key for a full-SHA request and vice versa (observe fetches

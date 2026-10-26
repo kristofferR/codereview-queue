@@ -27,9 +27,11 @@ const (
 	ActionPush ActionKind = "push"
 	// ActionWait: nothing to do until Action.At.
 	ActionWait ActionKind = "wait"
-	// ActionDone: every required reviewer answered and no findings remain.
+	// ActionDone: every required reviewer answered, no findings remain, and the
+	// merge gate passed: CI is green and GitHub reports the PR mergeable.
 	ActionDone ActionKind = "done"
-	// ActionBlocked: the loop cannot proceed without a human (PR closed).
+	// ActionBlocked: the loop cannot proceed without a human (PR closed,
+	// changes requested, a person's unresolved thread).
 	ActionBlocked ActionKind = "blocked"
 )
 
@@ -89,6 +91,9 @@ type NextInput struct {
 	// comments can trail its own completion shell — so the first clean
 	// observation is not yet an answer. Zero disables.
 	SettleUntil *time.Time
+	// Merge is the merge gate. Its failures already arrive as Findings; only
+	// its Wait and Blocked verdicts are read here, after the reviewers finish.
+	Merge Gate
 }
 
 const defaultMinDelay = 15 * time.Second
@@ -137,24 +142,31 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    visible and annoying; a swallowed finding is silent and harmful, so this
 	//    deliberately errs toward repeating. Clearing them properly needs an
 	//    explicit dismissal, not an inference from local state.
-	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
-		if in.LocalWork && in.Round.DispatchHeld(now) {
-			if AutofixReady(in, now) {
-				return Action{
-					Kind:     ActionPush,
-					Reason:   "autofix is complete and no active reviewer still gates this head",
-					Pending:  pending,
-					Findings: blocking,
-				}
-			}
+	blocking := BlockingFindings(in.Findings, in.Obs.Head)
+	if len(blocking) > 0 && in.LocalWork && in.Round.DispatchHeld(now) {
+		if AutofixReady(in, now) {
 			return Action{
-				Kind:     ActionHold,
-				Reason:   "do not push: a required reviewer has not answered for this head",
-				At:       in.nextCheck(now, nil, pending),
+				Kind:     ActionPush,
+				Reason:   "autofix is complete and no active reviewer still gates this head",
 				Pending:  pending,
 				Findings: blocking,
 			}
 		}
+		return Action{
+			Kind:     ActionHold,
+			Reason:   "do not push: a required reviewer has not answered for this head",
+			At:       in.nextCheck(now, nil, pending),
+			Pending:  pending,
+			Findings: blocking,
+		}
+	}
+	//    The merge gate's findings are the other exception: a red check or a
+	//    conflict is cleared only by pushing, so once the caller holds local work
+	//    they stop repeating and the ordinary hold/push rules below take over.
+	if in.LocalWork {
+		blocking = WithoutGateFindings(blocking)
+	}
+	if len(blocking) > 0 {
 		return Action{
 			Kind:     ActionFix,
 			Reason:   "actionable findings for this head",
@@ -265,7 +277,16 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 		return Action{Kind: ActionWait, Reason: "resolved or dismissed findings need a fresh confirmation review", At: in.nextCheck(now, nil, pending)}
 	}
-	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
+	// 5. The reviewers are satisfied; `done` also means GitHub would merge it.
+	//    CI still running is a wait, and what only a person can settle (changes
+	//    requested, their open threads, a required approval) is blocked.
+	if in.Merge.Wait != "" {
+		return Action{Kind: ActionWait, Reason: in.Merge.Wait, At: now.Add(in.minDelay()).UTC()}
+	}
+	if in.Merge.Blocked != "" {
+		return Action{Kind: ActionBlocked, Reason: in.Merge.Blocked}
+	}
+	return Action{Kind: ActionDone, Reason: "converged: no findings, every required reviewer answered, and the merge gate passed"}
 }
 
 // AutofixReady reports whether an unattended fixer can start without becoming

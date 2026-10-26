@@ -68,6 +68,10 @@ type FeedbackReport struct {
 	// window entirely — it cannot apply to a round that never spends quota.
 	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
 	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+	// Merge is the merge gate for this head: what `crq next` waits for or
+	// blocks on before it says done. Its failures are also in Findings. Not
+	// serialized: the feedback JSON contract is frozen.
+	Merge engine.Gate `json:"-"`
 	// PrimaryAckPending reports that the round still holds the fire slot for a
 	// review command the primary has not acknowledged. A required set that omits
 	// the primary converges without it, so the loop must not read convergence as
@@ -213,6 +217,13 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		threads, err := s.reviewThreads(threadCtx, repo, pr)
 		threadsCh <- threadsRead{threads: threads, err: err}
 	}()
+	// The merge gate applies to an open PR outside a one-pass campaign, whose
+	// merge deliberately ignores review and check status.
+	gated := obs.eng.Open && !cfg.OnePass
+	mergeCh := make(chan engine.MergeSeen, 1)
+	if gated {
+		go func() { mergeCh <- s.readMergeSeen(threadCtx, cfg, repo, obs) }()
+	}
 	pull := obs.pull
 	head := ""
 	if len(pull.Head.SHA) >= 9 {
@@ -416,7 +427,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// ids settled in ANY thread first and suppress the whole family.
 	settledStableIDs := map[string]bool{}
 	threadRead := <-threadsCh
+	var people []string
 	if threads, err := threadRead.threads, threadRead.err; err == nil {
+		people = personThreads(cfg, threads)
 		// A stable id can appear in both settled and open threads, and the two
 		// readings pull opposite ways: an open thread may be a genuine re-report
 		// after a regression, or merely a leftover duplicate of the one just
@@ -636,6 +649,12 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	if gated {
+		seen := <-mergeCh
+		seen.PersonThreads = people
+		report.Merge = engine.MergeGate(seen)
+		report.Findings = append(report.Findings, engine.GateFindings(report.Merge, head)...)
+	}
 	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
 	// code are computed from this list, so filtering further out would leave a
 	// dismissed finding permanently actionable everywhere except `crq next`.
@@ -647,7 +666,9 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
 			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
-				if finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
+				// A set-aside check asks no reviewer anything, so it needs no
+				// confirmation review.
+				if !engine.IsGateFinding(finding) && (finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head)) {
 					report.confirmationRequired = true
 				}
 				continue
@@ -753,7 +774,8 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 				// co-reviewers meant to resolve a skipped round never ran.
 				// Exempt exactly that notice — real unresolved findings on a
 				// summary-only PR still hold the head, as on any other.
-				blocking := excludeSkipNotice(engine.BlockingFindings(report.Findings, head))
+				// The merge gate's findings never hold a review back either.
+				blocking := excludeSkipNotice(engine.WithoutGateFindings(engine.BlockingFindings(report.Findings, head)))
 				if len(blocking) > 0 {
 					report.Findings = blocking
 					report.Status = "feedback"
@@ -1398,7 +1420,8 @@ type reviewThreadComment struct {
 	OriginalLine int       `json:"originalLine"`
 	CreatedAt    time.Time `json:"createdAt"`
 	Author       struct {
-		Login string `json:"login"`
+		Login    string `json:"login"`
+		Typename string `json:"__typename"`
 	} `json:"author"`
 	Commit struct {
 		OID string `json:"oid"`
@@ -1444,7 +1467,7 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
             totalCount
             nodes {
               databaseId body url path line originalLine createdAt
-              author { login }
+              author { login __typename }
               commit { oid }
               originalCommit { oid }
               pullRequestReview { databaseId }

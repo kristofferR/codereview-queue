@@ -484,6 +484,26 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 					}
 				}
 			}
+			if opts.dispatching() && report.Action == string(engine.ActionDone) {
+				eligible, merged, mergeReason, mergeErr := s.mergeDone(ctx, report, pull)
+				switch {
+				case mergeErr != nil:
+					if abortsPass(mergeErr) {
+						return mergeErr
+					}
+					if s.log != nil {
+						s.log.Printf("watch: merging %s#%d: %v", repo, pull.Number, mergeErr)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s#%d merge: %v", repo, pull.Number, mergeErr))
+					}
+					report.Reason = "done; merge failed: " + mergeErr.Error()
+				case merged:
+					report.Action, report.Reason = "merged", mergeReason
+				case eligible:
+					report.Reason = mergeReason
+				}
+			}
 			event := WatchEvent{
 				Repo: repo, PR: pull.Number,
 				Action: report.Action, Reason: report.Reason,
@@ -1088,8 +1108,9 @@ func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dial
 	out := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
 		// This is workflow control, not reviewer feedback. Filtering it would
-		// leave a clean one-pass campaign with no finalizer and no merge.
-		if finding.Source == onePassFinalizeSource {
+		// leave a clean one-pass campaign with no finalizer and no merge, or a
+		// red check that nobody fixes and a PR that can never be done.
+		if finding.Source == onePassFinalizeSource || engine.IsGateFinding(finding) {
 			out = append(out, finding)
 			continue
 		}

@@ -152,7 +152,9 @@ Bugbot/Macroscope default) only nudges a bot that reviews on its own but missed 
 already reviewed the head, or has a check run in flight. A co-reviewer that joins a round uninvited
 gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit, or a
 check run reporting the bot cannot review the commit, releases the dynamic gate); one listed in
-`CRQ_REQUIRED_BOTS` always gates.
+`CRQ_REQUIRED_BOTS` always gates. When a bot answers crq's command with a failure notice (Codex's
+"Something went wrong. Try again later"), crq re-posts the command after two minutes, at most twice
+per round.
 
 The persisted feedback deadline bounds unattended rounds too. Once it expires, crq retires the
 same-head round without re-firing it, even if no interactive `crq loop` remains to observe the

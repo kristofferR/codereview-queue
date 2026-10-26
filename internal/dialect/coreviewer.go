@@ -179,6 +179,8 @@ func KnownCoReviewers() []CoReviewer {
 					// the dynamic completion gate reads it to stop waiting on a Codex
 					// that cannot finish this round.
 					return CoEvent{Kind: EvCoUnable}
+				case IsCodexReviewError(body):
+					return CoEvent{Kind: EvCoFailed}
 				case IsNonActionableText(body):
 					return CoEvent{Kind: EvCoNotice}
 				}

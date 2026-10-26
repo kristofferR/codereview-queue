@@ -182,7 +182,8 @@ func coReviewedRound(r state.Round, obs Observation, login string, cutoff time.T
 // coCommentedRound reports whether login posted an actionable comment, a
 // clean summary, or an in-progress summary at/after the round's fire — the
 // round-window evidence that means it is participating. Its notices (unable,
-// acks, verdicts) do not count.
+// failed, acks, verdicts) do not count: a failed review produced nothing to
+// wait for, and only a command crq recorded earns it a retry (DecideCoRetry).
 func coCommentedRound(obs Observation, login string, cutoff time.Time) bool {
 	for _, ev := range obs.Events {
 		if ev.Kind == dialect.EvOther && sameBot(ev.Bot, login) && notBefore(ev.ObservedTime(), cutoff) {
@@ -475,6 +476,53 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	default:
 		return false
 	}
+}
+
+// A co-reviewer can answer a trigger with a failure notice (EvCoFailed, as
+// classified in internal/dialect). The command is spent, but
+// unlike an unable notice asking again usually works. crq waits coRetryDelay
+// after each failure and stops after coRetryLimit retries in one round.
+const (
+	coRetryDelay = 2 * time.Minute
+	coRetryLimit = 2
+)
+
+// DecideCoRetry reports whether crq should post login's trigger command again
+// because the bot answered the command this round recorded with a failure
+// notice. It is DecideCoPost's counterpart for a round that already commanded
+// the bot, and shares its current-head guards. A command posted after the
+// failure (a person already asked again) is left to be answered.
+func DecideCoRetry(r state.Round, obs Observation, cp CoReviewerPolicy, now time.Time) bool {
+	commandedAt := roundCoCommandedAt(r, cp.Login)
+	if cp.Trigger == TriggerNever || strings.TrimSpace(cp.Command) == "" ||
+		roundCoCommandID(r, cp.Login) == 0 || commandedAt == nil {
+		return false
+	}
+	if coReviewedHead(obs, cp.Login) || coReviewInProgressOnHead(obs, cp.Login) || coCheckAny(obs, cp.Login) {
+		return false
+	}
+	floor := coSelfHealCutoff(r, cp.Login)
+	if coUnableSince(obs, cp.Login, floor) {
+		return false
+	}
+	failures := 0
+	var last time.Time
+	for _, ev := range obs.Events {
+		if ev.Kind != dialect.EvCoFailed || !eventConcerns(ev, cp.Login) || !notBefore(ev.PairTime(), floor) {
+			continue
+		}
+		failures++
+		if at := ev.PairTime(); at.After(last) {
+			last = at
+		}
+	}
+	if failures == 0 || failures > coRetryLimit || last.Before(commandedAt.UTC()) {
+		return false
+	}
+	if CoCommandSince(obs, cp.Login, last) {
+		return false
+	}
+	return !now.Before(last.Add(coRetryDelay))
 }
 
 // CoReviewerActive reports whether this reviewer has produced any observable

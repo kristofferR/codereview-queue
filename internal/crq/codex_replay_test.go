@@ -557,6 +557,82 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	}
 }
 
+// Codex can answer its trigger with a failure notice (corpus: codex/review-error.md).
+// The notice is never a finding, and crq asks again once the retry delay has
+// passed — at most twice per round — until Codex delivers.
+func TestCodexReplayRetriesFailedReview(t *testing.T) {
+	base := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 38, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	failure := corpusMessage(t, "codex/review-error.md")
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	first := f.round(repo, pr).Co(codexLogin).CommandID
+	f.botReview(repo, pr, 501, head, f.clk.now().Add(time.Minute))
+	f.codexComment(repo, pr, 700, failure, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("a retry must wait out its delay, got %d codex posts", got)
+	}
+	report, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("a failure notice is not a finding: %+v", report.Findings)
+	}
+
+	for posts := 2; posts <= 3; posts++ {
+		f.clk.advance(3 * time.Minute)
+		f.pump()
+		if got := f.codexPosted(repo, pr); got != posts {
+			t.Fatalf("codex posts = %d, want %d", got, posts)
+		}
+		f.codexComment(repo, pr, int64(700+posts), failure, f.clk.now().Add(time.Minute))
+	}
+	if r := f.round(repo, pr); r == nil || r.Co(codexLogin).CommandID == first {
+		t.Fatalf("a retry must replace the failed command, got %+v", r)
+	}
+	f.clk.advance(10 * time.Minute)
+	f.pump()
+	if got := f.codexPosted(repo, pr); got != 3 {
+		t.Fatalf("retries must stop at the limit, got %d codex posts", got)
+	}
+}
+
+// A failed auto-review crq never asked for is not participation: nothing will
+// retry it, so it must not hold an optional Codex's round open.
+func TestCodexReplayUncommandedFailureDoesNotGate(t *testing.T) {
+	base := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, nil) // RequiredBots = coderabbit only
+	repo, pr, head := "o/r", 39, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	f.codexComment(repo, pr, 700, corpusMessage(t, "codex/review-error.md"), f.clk.now().Add(30*time.Second))
+	f.botReview(repo, pr, 501, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("an uncommanded codex failure must not gate the round, got %+v", r)
+	}
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("never-mode codex must not be retried, got %d posts", got)
+	}
+}
+
 // TestPumpAbandonsParkedClosedPR pins the parked-closed sweep: a PR closed
 // while its round cools down in awaiting_retry is abandoned on the next pump,
 // not after the retry window.

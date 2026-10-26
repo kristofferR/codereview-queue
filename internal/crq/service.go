@@ -2490,8 +2490,8 @@ func (s *Service) postCoTrigger(ctx context.Context, cfg Config, round Round, lo
 // fireCoTrigger posts login's trigger command for an already-fired round and
 // records its id under CAS. It is used by the adopt fire path and the
 // self-heal retry (the fresh-post path records the id inside recordFire
-// instead). The CAS guard (same head, command still unset) makes a concurrent
-// post benign.
+// instead). The CAS guard (same head, command still the one this post was
+// decided against) makes a concurrent post benign.
 func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, login string) {
 	id, at := s.postCoTrigger(ctx, cfg, round, login)
 	if id == 0 {
@@ -2526,7 +2526,9 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 			}
 		}
 		r.RecordPosted(login, id, at)
-		if r.Co(login).CommandID == 0 {
+		// Replace only the command this post was decided against: none, or a
+		// retry's failed one. Anything else was recorded concurrently and wins.
+		if r.Co(login).CommandID == round.Co(login).CommandID {
 			r.SetCoCommand(login, id, at)
 		} else {
 			r.ClearCoClaim(login)
@@ -2649,11 +2651,12 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 
 // selfHealCoReviewers posts (or re-posts) co-reviewer trigger commands for a
 // fired/reviewing round: an always-mode bot whose initial post failed (its
-// command id still 0), or a selfheal-mode bot observed active that missed the
-// head past its grace period. It runs on the daemon's progress/sweep paths;
-// idempotence comes from the observation — the bot's evidence, a live trigger
-// command, or an account that reviews on its own all suppress it (see
-// DecideCoPost) — not a retry counter.
+// command id still 0), a selfheal-mode bot observed active that missed the
+// head past its grace period, or a bot that answered the round's command with
+// a failure notice (DecideCoRetry). It runs on the daemon's progress/sweep
+// paths; idempotence comes from the observation — the bot's evidence, a live
+// trigger command, or an account that reviews on its own all suppress it, and
+// retries are counted from the failure notices on the PR — not a stored counter.
 func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
 	if s.cfg.DryRun || round.FiredAt == nil || obs.Head != round.Head {
 		return
@@ -2670,10 +2673,10 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 	}
 	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
-			continue
-		}
-		commandPresent := engine.CoCommandSince(obs, cp.Login, selfHealAt)
-		if !engine.DecideCoPost(round, obs, cp, commandPresent, selfHealAt, now) {
+			if !engine.DecideCoRetry(round, obs, cp, now) {
+				continue
+			}
+		} else if !engine.DecideCoPost(round, obs, cp, engine.CoCommandSince(obs, cp.Login, selfHealAt), selfHealAt, now) {
 			continue
 		}
 		// Claim the post under CAS BEFORE the network call: this sweep path is
@@ -2684,11 +2687,13 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		// the reviewer set that chose this bot must still be the configured one
 		// when it commits — otherwise a bot `crq reviewers set` has just removed
 		// is asked for a review anyway.
+		// The recorded command must still be the one judged above — none, or the
+		// one the bot failed — or another sweep already posted for this round.
 		login := cp.Login
 		claimed := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || r.Co(login).CommandID != 0 || reviewersChanged(st, round.Repo, cfg) {
+			if !sameRound(r, round) || r.Co(login).CommandID != round.Co(login).CommandID || reviewersChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if _, held := st.HeldPR(round.Repo, round.PR); held {

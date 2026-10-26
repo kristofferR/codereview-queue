@@ -74,6 +74,13 @@ func IsCodexUsageLimit(text string) bool {
 	return strings.Contains(NormalizeReviewText(text), "usage limits for code reviews")
 }
 
+// IsCodexReviewError reports whether a Codex comment is its "Something went
+// wrong. Try again later" notice. The review it answers failed, but unlike the
+// usage-limit notice asking again usually works, so crq re-posts the trigger.
+func IsCodexReviewError(text string) bool {
+	return strings.Contains(NormalizeReviewText(text), "something went wrong. try again later by commenting")
+}
+
 // IsCodexReviewSummary reports whether text is Codex's editable PR activity
 // summary. The whole comment is operational status, never review feedback.
 func IsCodexReviewSummary(text string) bool {

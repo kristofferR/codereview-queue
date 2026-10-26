@@ -234,6 +234,22 @@ func CoReviewerByName(nameOrLogin string) (CoReviewer, bool) {
 	return CoReviewer{}, false
 }
 
+// IsReviewerCheck reports whether a check run (app slug and name) or a commit
+// status (its context, with an empty slug) belongs to a review bot rather than
+// to CI. crq already waits for those bots through their reviews, so the merge
+// gate leaves their checks out of the CI it waits for.
+func IsReviewerCheck(appSlug, name string) bool {
+	if IsCodeRabbitCheck(appSlug, name) {
+		return true
+	}
+	for _, c := range KnownCoReviewers() {
+		if c.AppSlug != "" && c.AppSlug == appSlug {
+			return true
+		}
+	}
+	return false
+}
+
 // ClassifyCheckRun dispatches one check run to the co-reviewer that owns it
 // (by app slug) and returns that bot's login with its verdict. Checks owned by
 // no known co-reviewer come back ("", CheckUnrelated).

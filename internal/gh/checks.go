@@ -3,6 +3,7 @@ package gh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ type CheckRun struct {
 	HeadSHA     string    `json:"head_sha"`
 	Status      string    `json:"status"`     // queued | in_progress | completed
 	Conclusion  string    `json:"conclusion"` // success | neutral | failure | skipped | … ("" while running)
+	HTMLURL     string    `json:"html_url"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"` // zero while running
 	Output      struct {
@@ -67,4 +69,88 @@ func (g *GitHub) ListCheckRuns(ctx context.Context, repo, ref string) ([]CheckRu
 		next = nextPage(link)
 	}
 	return out, nil
+}
+
+// CommitStatus is one legacy commit status (the Statuses API, used by
+// deployment previews and by bots that predate check runs).
+type CommitStatus struct {
+	Context   string `json:"context"`
+	State     string `json:"state"` // error | failure | pending | success
+	TargetURL string `json:"target_url"`
+}
+
+// ListCommitStatuses returns the latest status per context for a commit — the
+// combined-status view, so a context that went pending → success appears once.
+func (g *GitHub) ListCommitStatuses(ctx context.Context, repo, ref string) ([]CommitStatus, error) {
+	var out struct {
+		Statuses []CommitStatus `json:"statuses"`
+	}
+	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/commits/%s/status?per_page=100", repoPath(repo), url.PathEscape(ref)), nil, &out)
+	return out.Statuses, err
+}
+
+// RequiredChecks names the status checks a branch requires before merging,
+// from classic branch protection and repository rulesets alike. A source the
+// token cannot read (404 when unprotected, 403 for rulesets on a plan without
+// them) contributes nothing rather than failing the lookup.
+func (g *GitHub) RequiredChecks(ctx context.Context, repo, branch string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	var protected struct {
+		Protection struct {
+			RequiredStatusChecks struct {
+				Contexts []string `json:"contexts"`
+				Checks   []struct {
+					Context string `json:"context"`
+				} `json:"checks"`
+			} `json:"required_status_checks"`
+		} `json:"protection"`
+	}
+	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/branches/%s", repoPath(repo), refPath(branch)), nil, &protected)
+	if err != nil && !unreadable(err) {
+		return nil, err
+	}
+	for _, name := range protected.Protection.RequiredStatusChecks.Contexts {
+		add(name)
+	}
+	for _, check := range protected.Protection.RequiredStatusChecks.Checks {
+		add(check.Context)
+	}
+	var rules []struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			RequiredStatusChecks []struct {
+				Context string `json:"context"`
+			} `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	err = g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/rules/branches/%s", repoPath(repo), refPath(branch)), nil, &rules)
+	if err != nil && !unreadable(err) {
+		return nil, err
+	}
+	for _, rule := range rules {
+		if rule.Type != "required_status_checks" {
+			continue
+		}
+		for _, check := range rule.Parameters.RequiredStatusChecks {
+			add(check.Context)
+		}
+	}
+	return out, nil
+}
+
+// unreadable reports a resource the token is not allowed to see, as opposed to
+// a transport failure worth retrying.
+func unreadable(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var api *APIError
+	return errors.As(err, &api) && api.Status == http.StatusForbidden
 }

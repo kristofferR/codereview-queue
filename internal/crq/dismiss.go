@@ -159,7 +159,8 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// so a pump could spend the primary's quota on code the caller is still
 	// expected to fix.
 	remaining := 0
-	for _, finding := range engine.BlockingFindings(feedback.Findings, feedback.Head) {
+	// The merge gate's findings never hold a review back, so they do not count.
+	for _, finding := range engine.WithoutGateFindings(engine.BlockingFindings(feedback.Findings, feedback.Head)) {
 		// alreadyDone counts as handled: a concurrent agent dismissing the same
 		// finding must not make this call think work is still open and refuse.
 		if !wanted[finding.ID] && !alreadyDone[finding.ID] {
@@ -269,6 +270,9 @@ var dismissibleSources = map[string]bool{
 	"review_prompt":  true,
 	"review_skipped": true,
 	"issue_comment":  true,
+	// A red check unrelated to the PR. A conflict or a stale branch is not
+	// dismissible: GitHub will not merge either, whatever crq records.
+	engine.SourceCICheck: true,
 }
 
 // dismissible reports why a finding may not be dismissed, or nil.

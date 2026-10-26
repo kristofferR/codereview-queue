@@ -833,3 +833,26 @@ func TestGoldenPricing(t *testing.T) {
 		}
 	})
 }
+
+// TestIsReviewerCheck pins which checks the merge gate leaves to the review
+// bots. The rows are the check runs and commit statuses seen on fleet PRs.
+func TestIsReviewerCheck(t *testing.T) {
+	cases := []struct {
+		slug, name string
+		want       bool
+	}{
+		{"", "CodeRabbit", true}, // commit status: "Review completed" / "Review skipped"
+		{"coderabbitai", "CodeRabbit", true},
+		{"macroscopeapp", "Macroscope - Correctness Check", true},
+		{"cursor", "Cursor Bugbot", true},
+		{"github-actions", "rust", false},
+		{"github-actions", "Publish model disclosure status", false},
+		{"", "PR model disclosure", false},
+		{"", "Vercel", false},
+	}
+	for _, tc := range cases {
+		if got := IsReviewerCheck(tc.slug, tc.name); got != tc.want {
+			t.Errorf("IsReviewerCheck(%q, %q) = %v, want %v", tc.slug, tc.name, got, tc.want)
+		}
+	}
+}

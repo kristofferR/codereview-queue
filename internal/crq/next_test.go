@@ -254,6 +254,9 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	f.clk.advance(time.Minute)
 	f.pump()
 	f.botReview(repo, pr, 902, "bbbbbbbb2", f.clk.now())
+	// done needs readable review threads; the findings above came through the
+	// REST fallback a failed GraphQL read leaves.
+	f.threadsGraphQL(nil)
 	done := f.next(repo, pr)
 	f.wantAction(done, engine.ActionDone)
 	if len(done.Findings) != 0 {

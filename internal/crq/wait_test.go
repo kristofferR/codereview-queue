@@ -340,6 +340,7 @@ func TestWaitReturnsOnConvergence(t *testing.T) {
 	repo, pr := "owner/repo", 603
 	head := "aaaaaaaa1"
 	f.openPull(repo, pr, head)
+	f.threadsGraphQL(nil) // done needs readable review threads
 	f.setCommitDate(head, base.Add(-time.Minute))
 	f.setLocalWork(false, "")
 

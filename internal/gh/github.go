@@ -1233,6 +1233,8 @@ type Review struct {
 	HTMLURL     string    `json:"html_url"`
 	User        struct {
 		Login string `json:"login"`
+		// Type is "Bot" for an app account and "User" for a person.
+		Type string `json:"type"`
 	} `json:"user"`
 }
 

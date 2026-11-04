@@ -20,6 +20,14 @@ type observation struct {
 	pull     ghapi.Pull
 	reviews  []ghapi.Review
 	comments []ghapi.IssueComment
+	// runs are the head's raw check runs when observe read them (runsRead),
+	// so the merge gate does not fetch the same ref twice.
+	runs     []ghapi.CheckRun
+	runsErr  error
+	runsRead bool
+	// allReviews is every review, before the confirmation cutoff: a person's
+	// verdict stands whenever it was given.
+	allReviews []ghapi.Review
 }
 
 // observe is the single place that asks GitHub "what happened on this PR" and
@@ -104,6 +112,8 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		return observation{}, err
 	default:
 	}
+	o.runs, o.runsErr, o.runsRead = runs, checksErr, readChecks
+	o.allReviews = reviews
 
 	// The head's commit time bounds evidence that names no commit of its own
 	// (a SHA-less "Review skipped"), so such a notice cannot suppress a later

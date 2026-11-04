@@ -266,9 +266,6 @@ func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChang
 			return nil
 		}
 		effective := st.Fleet.Solver.Merge(next)
-		if effective.MergeMethod != "" && !effective.OnePass {
-			return errors.New("post-fix merge requires one-pass review mode")
-		}
 		before := st.EffectiveSolver(repo)
 		if !before.OnePass && effective.OnePass {
 			lagging := st.LaggingRoleWriters(

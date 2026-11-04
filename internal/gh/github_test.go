@@ -1038,3 +1038,38 @@ func TestViewerLoginConcurrentIdentityReplacesRefusal(t *testing.T) {
 		t.Fatalf("cached viewer = %q, %v; successful identity did not replace refusal", got, err)
 	}
 }
+
+// Required checks come from classic protection and rulesets alike. A private
+// repository on a free plan answers 403 for rulesets, which must read as "none
+// required there", not as a failed lookup.
+func TestRequiredChecksMergesProtectionAndRulesets(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/branches/main":
+			_, _ = w.Write([]byte(`{"protected":true,"protection":{"required_status_checks":{"contexts":["PR model disclosure"],"checks":[{"context":"PR model disclosure"},{"context":"test"}]}}}`))
+		case r.URL.Path == "/repos/o/r/rules/branches/main":
+			_, _ = w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]`))
+		case r.URL.Path == "/repos/o/free/branches/main":
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/repos/o/free/rules/branches/main":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "test-token", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Second, backoffBase: time.Millisecond}
+
+	got, err := g.RequiredChecks(context.Background(), "o/r", "main")
+	if err != nil || strings.Join(got, ",") != "PR model disclosure,test,build" {
+		t.Fatalf("RequiredChecks = %v, %v; want both sources, deduplicated", got, err)
+	}
+	if got, err := g.RequiredChecks(context.Background(), "o/free", "main"); err != nil || len(got) != 0 {
+		t.Fatalf("unprotected free-plan repo = %v, %v; want none required and no error", got, err)
+	}
+	if _, err := g.RequiredChecks(context.Background(), "o/broken", "main"); err == nil {
+		t.Fatal("a server error must not read as nothing required")
+	}
+}

@@ -22,6 +22,9 @@ type NextReport struct {
 	Repo   string `json:"repo"`
 	PR     int    `json:"pr"`
 	Head   string `json:"head,omitempty"`
+	// HeadOID carries the full decision SHA for the watcher's exact-head merge
+	// guard without changing the abbreviated head in the JSON contract.
+	HeadOID string `json:"-"`
 	// Fork is watch-only trust context. It is deliberately not part of the
 	// `crq next` wire contract: Next does not fetch the head repository, while
 	// watch already has the Pull object and must carry that fact into the CAS.
@@ -317,6 +320,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		return report, engine.Action{}, feedback, err
 	}
 	report.Head = feedback.Head
+	report.HeadOID = feedback.HeadOID
 	report.ReviewedBy = feedback.ReviewedBy
 	report.onePassReviewed = feedback.onePassReviewed
 
@@ -355,6 +359,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		),
 		MinDelay:    s.cfg.PollInterval,
 		SettleUntil: s.settleUntil(feedback),
+		Merge:       feedback.Merge,
 	}
 	// Only a round that still tracks THIS head may shape the verdict. A stale
 	// fired/reviewing round carries its own phase and deadline, and an elapsed

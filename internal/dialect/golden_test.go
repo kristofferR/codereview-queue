@@ -340,6 +340,11 @@ func TestGoldenReplyVerdict(t *testing.T) {
 		// marker with it; matching that is what keeps a settled finding from
 		// re-surfacing as a rebuttal and blocking convergence.
 		{file: "coderabbit/reply-withdrawn-marker.md", withdrawn: true},
+		// Acknowledgements that drop the request without the word "withdraw".
+		// Each further reply draws another one, so reading them as unclear
+		// left the thread actionable for ever.
+		{file: "coderabbit/reply-acknowledged.md", withdrawn: true},
+		{file: "coderabbit/reply-acknowledged-follow-up.md", withdrawn: true},
 		{file: "coderabbit/reply-retained.md", retained: true},
 	}
 	for _, tc := range cases {

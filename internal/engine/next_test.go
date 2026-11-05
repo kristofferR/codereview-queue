@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -720,5 +721,39 @@ func TestADispatchHoldIsNotAReviewRequest(t *testing.T) {
 		if got.Kind != ActionPush {
 			t.Errorf("held phase %s: action = %s (%s), want push: no review is active for this head", heldPhase, got.Kind, got.Reason)
 		}
+	}
+}
+
+// TestUnreviewableHeadIsBlockedNotDone: a required primary that can only
+// summarise, with no co-reviewer enabled to stand in, means nothing reviews the
+// head. "Every co-reviewer is satisfied" is vacuously true there, which used to
+// converge the round as done; it must say blocked, naming why.
+func TestUnreviewableHeadIsBlockedNotDone(t *testing.T) {
+	round := state.Round{Repo: "o/private", PR: 1580, Head: "abcdef123", Phase: state.PhaseCompleted}
+	obs := Observation{Head: "abcdef123", Open: true,
+		Events: []dialect.BotEvent{{Bot: "coderabbitai[bot]", SummaryOnly: true, CommentID: 9}}}
+
+	completion := Completion(round, obs, policy)
+	if completion.Done || completion.Unreviewable == "" {
+		t.Fatalf("primary-only summary-only head must be unreviewable, got %+v", completion)
+	}
+	next := NextAction(NextInput{Round: round, Obs: obs, Completion: completion}, t0)
+	if next.Kind != ActionBlocked || !strings.Contains(next.Reason, "summary only") {
+		t.Fatalf("want blocked naming the summary-only plan, got %+v", next)
+	}
+	// The daemon still retires an acknowledged round rather than holding it to
+	// the deadline.
+	reviewing := firedRound(t, "abcdef123")
+	if err := reviewing.Acknowledge(); err != nil {
+		t.Fatal(err)
+	}
+	if tr := Progress(reviewing, state.AccountQuota{}, obs, t0.Add(time.Minute), policy); tr.Outcome != OutComplete {
+		t.Fatalf("an unreviewable round must not wait out its deadline, got %+v", tr)
+	}
+
+	// An enabled co-reviewer can stand in, so this is not a configuration problem.
+	withCo := withCodex(policy, "@codex review")
+	if c := Completion(round, obs, withCo); c.Unreviewable != "" {
+		t.Fatalf("a co-reviewer can still review this head, got %+v", c)
 	}
 }

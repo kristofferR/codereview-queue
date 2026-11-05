@@ -213,7 +213,10 @@ reviewer will NOT review this head at all — its plan only summarizes, or it sk
 true: do not hold the head for it, do not wait for it, and IGNORE the account-quota window entirely
 (`crq status` may show the account blocked; that block is fleet state and cannot apply to a round
 that never spends quota). The round is resolved by the co-reviewers alone, so treat
-`.reviewed_by` for the primary as already delivered and act on `.findings` immediately.
+`.reviewed_by` for the primary as already delivered and act on `.findings` immediately. If the
+repository enables NO co-reviewer, nothing can review the head: `next` returns `blocked` and
+`feedback`/`loop` return `held` (exit 0), with a reason naming why, until a person changes the
+reviewers (`crq reviewers set`).
 
 Skipped reviews: CodeRabbit may refuse a head outright (`Review skipped` — too many files, no usage
 credits). That notice embeds the rate-limit marker but is NOT a timed block: nothing clears by

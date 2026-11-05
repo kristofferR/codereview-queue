@@ -335,10 +335,14 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	report.Dismissed = feedback.Dismissed
 
 	in := engine.NextInput{
-		Obs:        engine.Observation{Head: feedback.Head, Open: feedback.Open},
-		Completion: engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
-		Findings:   feedback.Findings,
-		Global:     s.global(st, now),
+		Obs: engine.Observation{Head: feedback.Head, Open: feedback.Open},
+		Completion: engine.CompletionStatus{
+			ReviewedBy:   feedback.ReviewedBy,
+			Done:         allReviewed(feedback.ReviewedBy),
+			Unreviewable: feedback.unreviewable,
+		},
+		Findings: feedback.Findings,
+		Global:   s.global(st, now),
 		// The reviewer THIS report was built with, not the one this process
 		// started with. The engine uses it to tell the quota-gated reviewer from
 		// the co-reviewers, so a fleet-changed CRQ_BOT left Feedback classifying

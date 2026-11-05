@@ -2366,10 +2366,14 @@ func TestAccountBlockIgnoredWhenPrimaryWillNotReview(t *testing.T) {
 	if !strings.Contains(rep.PrimaryUnavailableReason, "summary") {
 		t.Errorf("the reason must say why, got %q", rep.PrimaryUnavailableReason)
 	}
-	// The primary counts as delivered, so the agent is never told to hold the
-	// head for it while an unrelated account block ticks down.
-	if !rep.ReviewedBy["coderabbitai[bot]"] {
-		t.Fatalf("the primary must read as delivered, got %#v", rep.ReviewedBy)
+	// With no co-reviewer to stand in, nothing can review this head. The agent
+	// is told so at once instead of holding the head while an unrelated
+	// account block ticks down — and never told the head converged.
+	if rep.Converged || rep.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("an unreviewed head must not converge, got %#v", rep.ReviewedBy)
+	}
+	if rep.Status != "held" || !strings.Contains(rep.Reason, "no co-reviewer is enabled") {
+		t.Fatalf("status = %q (%q), want held naming the missing reviewer", rep.Status, rep.Reason)
 	}
 }
 

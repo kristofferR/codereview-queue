@@ -61,6 +61,10 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	}
 	firedAt := r.FiredAt.UTC()
 	completion := Completion(r, obs, p)
+	// A head no reviewer can answer is as finished as one every reviewer
+	// answered: nothing more is owed, so the round must not hold the slot or
+	// wait out its deadline. Callers still report it unreviewed (Unreviewable).
+	completion.Done = completion.Done || completion.Unreviewable != ""
 	declined := primaryDeclinedRound(obs, p, firedAt)
 
 	// A reviewing round's deadline is the durable bound on the review, regardless

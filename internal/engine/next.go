@@ -214,7 +214,12 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 3. Required reviewers still pending: the head must not move. Confirmation
 	//    after a dismissal waits until this review finishes too.
 	if !in.Completion.Done {
-		// ...unless the wait already expired. Progress retires that round to keep
+		// ...unless no reviewer can answer at all: waiting would only run out
+		// the deadline, and "done" would claim a review that never happened.
+		if in.Completion.Unreviewable != "" {
+			return Action{Kind: ActionBlocked, Reason: in.Completion.Unreviewable, Pending: pending}
+		}
+		// ...or the wait already expired. Progress retires that round to keep
 		// the queue moving, but missing required evidence still must not read as
 		// convergence to a caller. Say so instead, and never re-fire: the head was
 		// already acknowledged.
@@ -286,7 +291,7 @@ func AutofixReady(in NextInput, now time.Time) bool {
 	if in.settling(now) {
 		return false
 	}
-	if len(pending) == 0 || !pendingReviewRequested(in, pending) {
+	if len(pending) == 0 || in.Completion.Unreviewable != "" || !pendingReviewRequested(in, pending) {
 		return true
 	}
 	if !in.onlyPrimaryPending(pending) {

@@ -15,6 +15,11 @@ import (
 type CompletionStatus struct {
 	ReviewedBy map[string]bool
 	Done       bool
+	// Unreviewable says why NOTHING can review this head: the required primary
+	// will not (summary-only plan, explicit skip) and no co-reviewer is enabled
+	// to stand in. Done stays false — an unreviewed head must never read as
+	// converged — and callers report it as needing a human. "" otherwise.
+	Unreviewable string
 }
 
 // Completion decides which required bots have review evidence for the round's
@@ -184,7 +189,12 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	// is satisfied, exactly as the clean-review summary does above; unlike that
 	// path it needs no fire, since the round can resolve without crq ever
 	// posting the review command.
-	if primaryUnavailable && needsBotReview(reviewedBy, p.Bot) &&
+	//
+	// With no co-reviewer enabled at all, "every co-reviewer is satisfied" is
+	// vacuously true and would converge a head nobody reviewed; step 5 reports
+	// that instead.
+	noStandIn := len(p.coReviewers()) == 0
+	if primaryUnavailable && !noStandIn && needsBotReview(reviewedBy, p.Bot) &&
 		coReviewersSatisfied(r, obs, p, cutoff, reviewedBy) {
 		markReviewed(reviewedBy, p.Bot)
 	}
@@ -195,7 +205,15 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		markReviewed(reviewedBy, p.Bot)
 	}
 
-	return CompletionStatus{ReviewedBy: reviewedBy, Done: allReviewed(reviewedBy)}
+	// 5. Nothing can review this head: the primary will not and no co-reviewer
+	// is enabled to stand in. A configuration a person has to change.
+	unreviewable := ""
+	if primaryUnavailable && noStandIn && needsBotReview(reviewedBy, p.Bot) {
+		unreviewable = p.Bot + " " + PrimaryUnavailableReason(obs, p, r.Head) +
+			", and no co-reviewer is enabled for this repository to review instead"
+	}
+
+	return CompletionStatus{ReviewedBy: reviewedBy, Done: allReviewed(reviewedBy), Unreviewable: unreviewable}
 }
 
 // coReviewersSatisfied generalizes v2's codexInactiveOrThumbed rule to every

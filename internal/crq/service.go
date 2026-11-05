@@ -3186,7 +3186,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
+				if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) || report.unreviewable != "" {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// A real primary review at this head is NOT a poisoned marker even with

@@ -69,6 +69,8 @@ type NextInput struct {
 	// yet (uncommitted, or committed but unpushed). It is what separates "push
 	// your fixes" from "nothing left to do".
 	LocalWork bool
+	// PrimarySkipped identifies a per-head refusal that local changes can clear.
+	PrimarySkipped bool
 	// ConfirmationRequired means this head's latest findings were cleared by
 	// a fixer rather than by a subsequent review.
 	ConfirmationRequired bool
@@ -217,6 +219,9 @@ func NextAction(in NextInput, now time.Time) Action {
 		// ...unless no reviewer can answer at all: waiting would only run out
 		// the deadline, and "done" would claim a review that never happened.
 		if in.Completion.Unreviewable != "" {
+			if in.LocalWork && in.PrimarySkipped {
+				return Action{Kind: ActionPush, Reason: "primary skipped this head; push the reworked changes so it can review a new head"}
+			}
 			return Action{Kind: ActionBlocked, Reason: in.Completion.Unreviewable, Pending: pending}
 		}
 		// ...or the wait already expired. Progress retires that round to keep

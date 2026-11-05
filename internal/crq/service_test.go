@@ -2745,6 +2745,50 @@ func TestWaitRepairsPoisonedCompletedRoundWithOnlyCarriedReviewPrompt(t *testing
 	}
 }
 
+func TestLoopPreservesCompletedUnreviewableRound(t *testing.T) {
+	for _, tc := range []struct {
+		name, corpus, localAction string
+	}{
+		{"summary-only", "summary-only-free-plan.md", "blocked"},
+		{"dismissed-skip", "review-skipped-too-many-files.md", "push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReplayFixture(t, time.Now().UTC())
+			f.gh.graphQL = noForcePush
+			const repo, pr, head = "o/private", 20, "56150a0423a243224b03f355c3a3ba6941011b5b"
+			f.openPull(repo, pr, head)
+			f.setCommitDate(head, f.clk.now().Add(-time.Hour))
+			seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseCompleted, f.clk.now().Add(-time.Minute), 0)
+			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/"+tc.corpus), f.clk.now())
+			before := f.round(repo, pr)
+			if tc.name == "dismissed-skip" {
+				report, err := f.svc.Feedback(f.ctx, repo, pr)
+				if err != nil || len(report.Findings) != 1 || report.Findings[0].Source != "review_skipped" {
+					t.Fatalf("expected a skip finding, got %+v, %v", report, err)
+				}
+				if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{report.Findings[0].ID}, "narrowed locally"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(f.ctx, time.Second)
+			defer cancel()
+			for range 2 {
+				report, code, err := f.svc.Loop(ctx, repo, pr)
+				if err != nil || code != 0 || report.Status != "held" || len(report.Findings) != 0 {
+					t.Fatalf("loop = %+v, %d, %v; want held without findings", report, code, err)
+				}
+				if after := f.round(repo, pr); after.Seq != before.Seq || after.Phase != PhaseCompleted {
+					t.Fatalf("completed unreviewable round was replaced: before=%+v after=%+v", before, after)
+				}
+			}
+			f.setLocalWork(false, "")
+			f.wantAction(f.next(repo, pr), engine.ActionBlocked)
+			f.setLocalWork(true, "narrowed locally")
+			f.wantAction(f.next(repo, pr), engine.ActionKind(tc.localAction))
+		})
+	}
+}
+
 func TestNeedsReviewToleratesBotSuffix(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", Scope: []string{"o"}, ReviewDoneMarker: "summarize by coderabbit.ai"}
 	gh := newFakeGitHub()

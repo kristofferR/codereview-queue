@@ -772,7 +772,9 @@ CodeRabbit lands" — on a repo where it never lands, so the PR never pushes and
 also stops consulting the account block for such a round: no deadline extension, no poll slowdown to
 the block window, and no log line about a limit that cannot apply to it. If the repository enables no
 co-reviewer at all, nothing can review the head, so `next` answers `blocked` (`feedback`/`loop`:
-`held`) with that reason instead of claiming every required reviewer answered.
+`held`) with that reason instead of claiming every required reviewer answered. Open findings come
+first: `next` returns `fix`, and `loop` exits 10 with the findings. After dismissing a skip notice,
+`next` allows local changes to be pushed so the reworked head can be reviewed.
 
 **Bot-specific quirks crq handles for you.** Macroscope never resolves a thread; it *edits* its own
 comment to append `✅ Resolved in <sha>` (or `No longer relevant as of <sha>`), so crq treats that

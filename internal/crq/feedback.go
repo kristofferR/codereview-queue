@@ -68,6 +68,8 @@ type FeedbackReport struct {
 	// window entirely — it cannot apply to a round that never spends quota.
 	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
 	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+	// PrimarySkipped distinguishes a per-head refusal that a local fix can clear.
+	PrimarySkipped bool `json:"-"`
 	// PrimaryAckPending reports that the round still holds the fire slot for a
 	// review command the primary has not acknowledged. A required set that omits
 	// the primary converges without it, so the loop must not read convergence as
@@ -321,6 +323,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	completion := engine.Completion(completionRound, obs.eng, cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
 	report.unreviewable = completion.Unreviewable
+	report.PrimarySkipped = engine.ReviewSkippedHead(obs.eng, cfg.policy(), head)
 	report.PrimaryAckPending = engine.PrimaryAckPending(completionRound, obs.eng, cfg.policy())
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
@@ -880,7 +883,9 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 				// Nobody else is coming (e.g. a "too many files" skip on a
 				// primary-only repository): the findings are the whole round.
 				report.Reason = report.unreviewable + "; address findings, push once, and resolve threads"
-				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
+				if err := s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config); err != nil {
+					return report, 1, err
+				}
 			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, report.config.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
@@ -907,7 +912,9 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 		}
 		if report.unreviewable != "" {
 			// Waiting out the deadline cannot help: no reviewer will answer.
-			s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
+			if err := s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config); err != nil {
+				return report, 1, err
+			}
 			return report, 0, nil
 		}
 		if s.confirmationReady(report) {

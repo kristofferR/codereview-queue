@@ -741,6 +741,9 @@ func TestUnreviewableHeadIsBlockedNotDone(t *testing.T) {
 	if next.Kind != ActionBlocked || !strings.Contains(next.Reason, "summary only") {
 		t.Fatalf("want blocked naming the summary-only plan, got %+v", next)
 	}
+	if got := NextAction(NextInput{Round: round, Obs: obs, Completion: completion, LocalWork: true}, t0); got.Kind != ActionBlocked {
+		t.Fatalf("local work cannot clear a summary-only plan, got %+v", got)
+	}
 	// The daemon still retires an acknowledged round rather than holding it to
 	// the deadline.
 	reviewing := firedRound(t, "abcdef123")
@@ -755,5 +758,23 @@ func TestUnreviewableHeadIsBlockedNotDone(t *testing.T) {
 	withCo := withCodex(policy, "@codex review")
 	if c := Completion(round, obs, withCo); c.Unreviewable != "" {
 		t.Fatalf("a co-reviewer can still review this head, got %+v", c)
+	}
+}
+
+func TestUnreviewableSkipAllowsLocalFixesToPush(t *testing.T) {
+	round := state.Round{Head: "abcdef123", Phase: state.PhaseCompleted}
+	obs := Observation{Head: round.Head, Open: true,
+		Events: []dialect.BotEvent{{Bot: policy.Bot, Kind: dialect.EvSkipped, SHA: round.Head}}}
+	in := NextInput{Round: round, Obs: obs, Completion: Completion(round, obs, policy), PrimarySkipped: true}
+	if got := NextAction(in, t0); got.Kind != ActionBlocked {
+		t.Fatalf("a skip without local fixes must stay blocked, got %+v", got)
+	}
+	in.LocalWork = true
+	if got := NextAction(in, t0); got.Kind != ActionPush {
+		t.Fatalf("a dismissed skip must allow its local fix to push, got %+v", got)
+	}
+	in.Findings = []dialect.Finding{{Source: "review_skipped", Commit: round.Head, Severity: "major"}}
+	if got := NextAction(in, t0); got.Kind != ActionFix {
+		t.Fatalf("an undismissed skip must still surface first, got %+v", got)
 	}
 }

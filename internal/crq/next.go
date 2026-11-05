@@ -351,6 +351,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		// an expired wait on a bot that was never the primary.
 		Primary:              feedback.config.Bot,
 		LocalWork:            report.LocalWork,
+		PrimarySkipped:       feedback.PrimarySkipped,
 		ConfirmationRequired: feedback.confirmationRequired && !feedback.config.OnePass,
 		Deferred:             feedback.CodeRabbitDeferred,
 		DeferredUntil:        feedback.DeferredUntil,

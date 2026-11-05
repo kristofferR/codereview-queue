@@ -1093,3 +1093,43 @@ func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {
 		t.Errorf("dry-run log must describe a hypothetical dismissal, got %q", got)
 	}
 }
+
+// TestNextBlocksWhenNothingCanReview reproduces a reviewer override that made a
+// summary-only CodeRabbit the ONLY reviewer of a private repository: `next`
+// answered done ("every required reviewer answered") for a head nobody had
+// reviewed. It must say blocked, and still never spend the review command.
+func TestNextBlocksWhenNothingCanReview(t *testing.T) {
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a58bf94233c37f1f"
+	gh.pulls[fakeKey("o/private", 1580)] = pull
+	notice := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/review-skipped-auto-reviews-disabled.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	notice.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 1580)] = []ghapi.IssueComment{notice}
+
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	svc.localWorkFn = func(context.Context, string) (bool, string) { return false, "" }
+
+	rep, err := svc.Next(context.Background(), "o/private", 1580)
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if rep.Action != "blocked" || !strings.Contains(rep.Reason, "summary only") {
+		t.Fatalf("want blocked naming the summary-only plan, got %q (%q)", rep.Action, rep.Reason)
+	}
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("a summary-only primary must never be commanded, posted=%v", gh.posted)
+		}
+	}
+}

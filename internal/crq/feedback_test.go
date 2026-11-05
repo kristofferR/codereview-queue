@@ -1409,6 +1409,56 @@ func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
 	}
 }
 
+type failCompletionStore struct {
+	StateStore
+	err error
+}
+
+func (s *failCompletionStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	return s.StateStore.Update(ctx, func(st *State) error {
+		before := st.Round("o/private", 20)
+		if err := mutate(st); err != nil {
+			return err
+		}
+		if after := st.Round("o/private", 20); before != nil && after != nil &&
+			before.Phase == PhaseReviewing && after.Phase == PhaseCompleted {
+			return s.err
+		}
+		return nil
+	})
+}
+
+func TestLoopReturnsUnreviewableCompletionFailure(t *testing.T) {
+	for _, corpus := range []string{"summary-only-free-plan.md", "review-skipped-too-many-files.md"} {
+		t.Run(corpus, func(t *testing.T) {
+			f := newReplayFixture(t, time.Now().UTC())
+			const repo, pr, head = "o/private", 20, "56150a0423a243224b03f355c3a3ba6941011b5b"
+			f.openPull(repo, pr, head)
+			f.setCommitDate(head, f.clk.now().Add(-time.Hour))
+			seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseReviewing, f.clk.now().Add(-time.Minute), 0)
+			f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/"+corpus), f.clk.now())
+			writeErr := errors.New("completion write failed")
+			f.svc.store = &failCompletionStore{StateStore: f.store, err: writeErr}
+			report, code, err := f.svc.Loop(f.ctx, repo, pr)
+			if !errors.Is(err, writeErr) || code != 1 {
+				t.Fatalf("loop = %+v, %d, %v; want completion error and exit 1", report, code, err)
+			}
+			if got := f.round(repo, pr).Phase; got != PhaseReviewing {
+				t.Fatalf("failed completion must preserve the active round, got %s", got)
+			}
+			f.svc.store = f.store
+			report, code, err = f.svc.Loop(f.ctx, repo, pr)
+			wantCode := 0
+			if corpus == "review-skipped-too-many-files.md" {
+				wantCode = 10
+			}
+			if err != nil || code != wantCode || f.round(repo, pr).Phase != PhaseCompleted {
+				t.Fatalf("completion retry = %+v, %d, %v; want exit %d and completed round", report, code, err, wantCode)
+			}
+		})
+	}
+}
+
 func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 	findings := []dialect.Finding{
 		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},
@@ -2366,10 +2416,14 @@ func TestAccountBlockIgnoredWhenPrimaryWillNotReview(t *testing.T) {
 	if !strings.Contains(rep.PrimaryUnavailableReason, "summary") {
 		t.Errorf("the reason must say why, got %q", rep.PrimaryUnavailableReason)
 	}
-	// The primary counts as delivered, so the agent is never told to hold the
-	// head for it while an unrelated account block ticks down.
-	if !rep.ReviewedBy["coderabbitai[bot]"] {
-		t.Fatalf("the primary must read as delivered, got %#v", rep.ReviewedBy)
+	// With no co-reviewer to stand in, nothing can review this head. The agent
+	// is told so at once instead of holding the head while an unrelated
+	// account block ticks down — and never told the head converged.
+	if rep.Converged || rep.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("an unreviewed head must not converge, got %#v", rep.ReviewedBy)
+	}
+	if rep.Status != "held" || !strings.Contains(rep.Reason, "no co-reviewer is enabled") {
+		t.Fatalf("status = %q (%q), want held naming the missing reviewer", rep.Status, rep.Reason)
 	}
 }
 

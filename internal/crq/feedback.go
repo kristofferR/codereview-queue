@@ -68,6 +68,8 @@ type FeedbackReport struct {
 	// window entirely — it cannot apply to a round that never spends quota.
 	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
 	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+	// PrimarySkipped distinguishes a per-head refusal that a local fix can clear.
+	PrimarySkipped bool `json:"-"`
 	// PrimaryAckPending reports that the round still holds the fire slot for a
 	// review command the primary has not acknowledged. A required set that omits
 	// the primary converges without it, so the loop must not read convergence as
@@ -84,6 +86,8 @@ type FeedbackReport struct {
 	onePassReviewed      bool
 	confirmationRequired bool
 	confirmationRoundSeq int64
+	// unreviewable is Completion's reason no reviewer can answer for this head.
+	unreviewable string
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -318,6 +322,8 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	}
 	completion := engine.Completion(completionRound, obs.eng, cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	report.unreviewable = completion.Unreviewable
+	report.PrimarySkipped = engine.ReviewSkippedHead(obs.eng, cfg.policy(), head)
 	report.PrimaryAckPending = engine.PrimaryAckPending(completionRound, obs.eng, cfg.policy())
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
@@ -701,6 +707,11 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		allReviewed(report.ReviewedBy) && !confirmationCutoff(&completionRound, head).IsZero():
 		report.Status = "held"
 		report.Reason = "confirmation review findings were dismissed again; human review or a code change is required"
+	case report.unreviewable != "" && len(report.Findings) == 0:
+		// Same terminal shape as the dismissed-twice confirmation: nothing more
+		// will arrive until a person changes the reviewer configuration.
+		report.Status = "held"
+		report.Reason = report.unreviewable
 	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
 		engine.DoneExceptWithEvidence(report.ReviewedBy, cfg.Bot, dialect.CodexBotLogin):
 		report.Status = "deferred"
@@ -868,6 +879,13 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
+			} else if report.unreviewable != "" {
+				// Nobody else is coming (e.g. a "too many files" skip on a
+				// primary-only repository): the findings are the whole round.
+				report.Reason = report.unreviewable + "; address findings, push once, and resolve threads"
+				if err := s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config); err != nil {
+					return report, 1, err
+				}
 			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, report.config.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
@@ -891,6 +909,13 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 				report.Reason = "hold current head: fix locally, but do not commit or push until every required reviewer finishes"
 			}
 			return report, 10, nil
+		}
+		if report.unreviewable != "" {
+			// Waiting out the deadline cannot help: no reviewer will answer.
+			if err := s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config); err != nil {
+				return report, 1, err
+			}
+			return report, 0, nil
 		}
 		if s.confirmationReady(report) {
 			if blocked, err := s.confirmationBlocked(ctx, report); err != nil {

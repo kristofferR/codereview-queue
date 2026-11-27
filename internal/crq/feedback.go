@@ -198,7 +198,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, reviewerAnswers(st, cfg, repo, pr), now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
@@ -356,7 +356,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		verdictCutoff = obs.eng.HeadAt
 	}
 	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" {
+	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" && !cfg.policy().DoneForPR(obs.eng, cfg.Bot) {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = cfg.Bot + " " + why
 	}
@@ -387,8 +387,12 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		}
 		// Empty carrier reviews and pending drafts are not a subsequent verdict
 		// on a resolved thread. GraphQL and REST spell bot logins differently.
+		// Nor is a reviewer that reviews each pull request once and already has:
+		// it will not take a confirmation pass, so resolving its findings must
+		// not queue one.
 		if !strings.EqualFold(review.State, "PENDING") &&
-			!(strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "") {
+			!(strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "") &&
+			!cfg.policy().DoneForPR(obs.eng, login) {
 			key := dialect.NormalizeBotName(login)
 			if cur, ok := confirmationReviews[key]; !ok || reviewNewer(review, cur) {
 				confirmationReviews[key] = review
@@ -576,7 +580,10 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
+		// A primary that reviews each pull request once and already has is not
+		// needed here, so its refusal of this head is not work.
 		if s.cr.IsReviewSkipped(comment.Body) && cfg.isConfiguredBot(comment.User.Login) &&
+			!cfg.policy().DoneForPR(obs.eng, cfg.Bot) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -653,7 +660,8 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
 			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
-				if finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
+				if (finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head)) &&
+					!cfg.policy().DoneForPR(obs.eng, finding.Bot) {
 					report.confirmationRequired = true
 				}
 				continue

@@ -74,6 +74,9 @@ var envKeys = []EnvKey{
 		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting.", AllowEmpty: true, ReviewImpact: true},
 	{Key: "CRQ_REQUIRED_BOTS", Kind: "list", Group: "review", Label: "Required reviewers",
 		Help: "Which reviewers convergence waits for.", ReviewImpact: true},
+	{Key: "CRQ_REVIEW_ONCE", Kind: "list", Group: "review", Label: "Review once",
+		Help:       "Reviewers that review each pull request once instead of every push. Defaults to greptile; empty means every push for all.",
+		AllowEmpty: true},
 	{Key: "CRQ_FEEDBACK_BOTS", Kind: "list", Group: "review", Label: "Feedback reviewers",
 		Help: "Whose findings are surfaced. Defaults to everyone who reviews; widen it to read a bot without waiting for it."},
 	{Key: "CRQ_SETTLE", Kind: "duration", Group: "review", Label: "Settle window",
@@ -224,6 +227,17 @@ func validateEnvValue(key, value string) error {
 		// Empty either clears the setting or is the setting's explicit value;
 		// both shapes are valid, and SetEnv keeps that distinction.
 		return nil
+	}
+	if key == "CRQ_REVIEW_ONCE" {
+		known := coReviewerNames()
+		known[dialect.NormalizeBotName(dialect.CodeRabbitLogin)] = dialect.CodeRabbitLogin
+		for _, name := range splitList(value) {
+			_, ok := known[strings.ToLower(dialect.NormalizeBotName(name))]
+			if !ok && !strings.HasSuffix(name, "[bot]") {
+				return fmt.Errorf("%s: unknown reviewer %q (known: %s, or any bot login ending in [bot])",
+					key, name, strings.Join(knownLogins(known), ", "))
+			}
+		}
 	}
 	if key == "CRQ_TZ" {
 		if value == "Local" {

@@ -263,14 +263,14 @@ func TestConfirmationIgnoresOldCommentAndCheckEvidence(t *testing.T) {
 	f.gh.setCheckRuns(head, check)
 	cutoff := f.clk.now()
 	round := Round{Repo: repo, PR: pr, Head: head, Phase: PhaseReviewing, ConfirmationAfter: &cutoff}
-	obs, err := f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, f.clk.now())
+	obs, err := f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, nil, f.clk.now())
 	if err != nil || len(obs.eng.Checks) != 0 || len(obs.eng.Events) != 0 || len(obs.comments) != 0 {
 		t.Fatalf("old evidence leaked into confirmation: %+v %v", obs, err)
 	}
 	// A completed check without a timestamp cannot prove freshness either.
 	check.CompletedAt = time.Time{}
 	f.gh.setCheckRuns(head, check)
-	obs, err = f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, f.clk.now())
+	obs, err = f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, nil, f.clk.now())
 	if err != nil || len(obs.eng.Checks) != 0 {
 		t.Fatalf("undated completed check counted: %+v %v", obs, err)
 	}
@@ -279,8 +279,75 @@ func TestConfirmationIgnoresOldCommentAndCheckEvidence(t *testing.T) {
 	f.gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{comment}
 	check.CompletedAt = f.clk.now()
 	f.gh.setCheckRuns(head, check)
-	obs, err = f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, f.clk.now())
+	obs, err = f.svc.observe(f.ctx, cfg, repo, pr, &round, nil, nil, f.clk.now())
 	if err != nil || len(obs.eng.Checks) != 1 || len(obs.eng.Events) != 1 || len(obs.comments) != 1 {
 		t.Fatalf("fresh evidence was dropped: %+v %v", obs, err)
+	}
+}
+
+// resolveFirstFinding drives a head to one CodeRabbit finding and resolves it
+// without changing the head — the moment a confirmation pass is considered.
+func resolveFirstFinding(t *testing.T, f *replayFixture, repo string, pr int, head string) {
+	t.Helper()
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now().Add(-time.Hour))
+	f.setLocalWork(false, "")
+	th := confirmationThread(f.bot, head, 900, false)
+	installConfirmationThread(f, &th)
+	th.Comments.Nodes = nil
+	f.wantAction(f.next(repo, pr), engine.ActionWait)
+	f.clk.advance(time.Minute)
+	f.botReview(repo, pr, 900, head, f.clk.now())
+	th = confirmationThread(f.bot, head, 900, false)
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+	th.IsResolved = true
+	f.clk.advance(time.Minute)
+}
+
+// A reviewer that reviews each pull request once will not take a confirmation
+// pass, so resolving its findings neither queues one nor buys another review.
+func TestNoConfirmationFromAReviewerDoneWithThePR(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 9, 21, 16, 0, 0, 0, time.UTC))
+	f.cfg.OnceBots = []string{f.cfg.Bot}
+	f.svc.cfg = f.cfg
+	repo, pr, head := "owner/repo", 1314, "8674e32b3"
+	resolveFirstFinding(t, f, repo, pr, head)
+	before := len(f.gh.posted)
+	f.wantAction(f.next(repo, pr), engine.ActionDone)
+	if r := f.round(repo, pr); r != nil && r.ConfirmationAfter != nil {
+		t.Fatalf("a once reviewer that already reviewed must not get a confirmation pass: %+v", r)
+	}
+	if got := len(f.gh.posted); got != before {
+		t.Fatalf("posted %d commands, want none", got-before)
+	}
+}
+
+// A confirmation pass asks the co-reviewers that gate or took part in the pull
+// request, not every enabled one: Greptile, enabled by default but never seen
+// here, must not be asked to spend a credit.
+func TestConfirmationAsksOnlyParticipatingCoReviewers(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 9, 21, 16, 0, 0, 0, time.UTC))
+	co, err := parseCoBots(map[string]string{"CRQ_COBOTS": "greptile"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.CoBots = co
+	f.svc.cfg = f.cfg
+	repo, pr, head := "owner/repo", 1315, "8674e32b3"
+	resolveFirstFinding(t, f, repo, pr, head)
+	f.wantAction(f.next(repo, pr), engine.ActionWait)
+	r := f.round(repo, pr)
+	if r == nil || r.ConfirmationAfter == nil {
+		t.Fatalf("confirmation not queued: %+v", r)
+	}
+	if r.ForceCoReviewer(dialect.GreptileLogin) {
+		t.Fatal("a co-reviewer never seen on this pull request must not be forced")
+	}
+	f.clk.advance(30 * time.Minute)
+	f.next(repo, pr)
+	for _, posted := range f.gh.posted {
+		if strings.HasSuffix(posted, "@greptile") {
+			t.Fatalf("asked a Greptile that never ran here: %v", f.gh.posted)
+		}
 	}
 }

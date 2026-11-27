@@ -17,7 +17,7 @@ const PricesCheckedAt = "2026-07-27"
 // PricingDisclosure is the shared user-facing explanation of vendor billing.
 // It lives beside the prices so changing a vendor term cannot leave the CLI and
 // dashboard describing a different model from the estimator.
-const PricingDisclosure = "Macroscope bills by diff size with a per-review minimum and charges incrementally after its first review of a pull request, so later rounds can cost less than this whole-head estimate. CodeRabbit uses the plan allowance first and may bill by reviewed file after it; path filters can reduce that figure. Codex and Cursor Bugbot are covered by their own subscriptions."
+const PricingDisclosure = "Macroscope bills by diff size with a per-review minimum and charges incrementally after its first review of a pull request, so later rounds can cost less than this whole-head estimate. CodeRabbit uses the plan allowance first and may bill by reviewed file after it; path filters can reduce that figure. Greptile spends prepaid credits per review, set by the repository's review tier; free and open-source plans include some. Codex and Cursor Bugbot are covered by their own subscriptions."
 
 // Published prices, per vendor. Named constants rather than literals in the
 // arithmetic so re-checking them is reading one block, not auditing a function.
@@ -33,6 +33,13 @@ const (
 	// usage-based reviews bill $0.25 per reviewed file. Only reached when the
 	// account has usage-based reviews enabled at all.
 	coderabbitPerFile = 0.25
+
+	// Greptile sells prepaid credits at $1 each, shared across the
+	// organization. A Base review spends 1, Plus 3 and Apex 10, whatever the
+	// diff's size. Read 2026-11-27, after PricesCheckedAt.
+	greptilePerCredit   = 1.0
+	greptileBaseCredits = 1.0
+	greptileApexCredits = 10.0
 )
 
 // DiffStat is what a cost estimate needs to know about a head. Lines rather
@@ -98,7 +105,7 @@ type CostEstimate struct {
 }
 
 // Free is the estimate for a reviewer covered by its own subscription, which is
-// every co-reviewer except Macroscope.
+// every co-reviewer except Macroscope and Greptile.
 func freeEstimate(login, why string) CostEstimate {
 	return CostEstimate{Bot: login, Exact: true, Basis: why}
 }
@@ -131,6 +138,19 @@ func EstimateMacroscope(d DiffStat) CostEstimate {
 		)
 	}
 	return est
+}
+
+// EstimateGreptile prices one Greptile review. The tier is a repository setting
+// crq cannot read, so the band runs up to an Apex review. Credits a free or
+// open-source plan includes cost nothing, and crq cannot see those either, so
+// the band starts at zero.
+func EstimateGreptile(DiffStat) CostEstimate {
+	return CostEstimate{
+		Bot:  GreptileLogin,
+		High: greptileApexCredits * greptilePerCredit,
+		Basis: fmt.Sprintf("%.0f credit for a Base review to %.0f for Apex at $%.2f each, whatever the diff size; included plan credits cost nothing",
+			greptileBaseCredits, greptileApexCredits, greptilePerCredit),
+	}
 }
 
 // EstimateCodeRabbit prices one CodeRabbit review of this diff against the

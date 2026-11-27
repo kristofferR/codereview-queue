@@ -67,6 +67,10 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// OnceBots are the logins that review each pull request once rather than
+	// every push (CRQ_REVIEW_ONCE, or a repository's own list): after a first
+	// review crq neither asks them again nor waits for them on later heads.
+	OnceBots []string
 	// PrimaryOff is set by ForRepo when a repository turned the metered primary
 	// off. It is never a fleet setting: CRQ_BOT always names one, and "the fleet
 	// has no primary" is expressed by requiring nobody, not by this.
@@ -293,6 +297,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	onceBots := parseReviewOnce(env, bot)
 	// A required co-reviewer gates convergence via RequiredBots membership —
 	// that list stays the single source of required-ness.
 	for _, cb := range coBots {
@@ -399,6 +404,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 	// Built here, after the command is resolved, because the primary's trigger is
 	// part of describing it.
 	cfg.KnownCoBots = parseAllCoBots(env)
+	cfg.OnceBots = onceBots
 	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots, false)
 	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
 	// parses, so they cannot answer differently from it. An explicit
@@ -698,6 +704,38 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 }
 
 const defaultSelfHealGrace = 10 * time.Minute
+
+// parseReviewOnce resolves CRQ_REVIEW_ONCE, the reviewers (names or logins,
+// the primary included) that review each pull request once rather than every
+// push. Absent means each registry bot's own default; explicitly empty means
+// every reviewer reviews every push.
+//
+// An unrecognised entry is kept as a login, as CRQ_REQUIRED_BOTS keeps one,
+// rather than failing: this parse also re-runs over the fleet's recorded
+// settings, and an error there would discard every one of them on this host.
+// The fleet write validates names instead (validateEnvValue).
+func parseReviewOnce(env map[string]string, primary string) []string {
+	raw, set := env["CRQ_REVIEW_ONCE"]
+	if !set {
+		var out []string
+		for _, co := range dialect.KnownCoReviewers() {
+			if co.DefaultOnce {
+				out = append(out, co.Login)
+			}
+		}
+		return out
+	}
+	known := coReviewerNames()
+	known[dialect.NormalizeBotName(primary)] = primary
+	var out []string
+	for _, name := range splitList(raw) {
+		if login, ok := known[strings.ToLower(dialect.NormalizeBotName(name))]; ok {
+			name = login
+		}
+		out = append(out, name)
+	}
+	return out
+}
 
 // defaultCoBot is a co-reviewer's configuration from the registry alone, with no
 // environment applied. parseCoBots layers env on top of it, and a per-repo

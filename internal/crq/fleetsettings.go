@@ -112,10 +112,11 @@ func (s *Service) fleetViewOf(st State) FleetView {
 	for _, r := range cfg.Reviewers {
 		view.Reviewers = append(view.Reviewers, ReviewerDetail{
 			Login: r.Login, Budget: string(r.Budget), Required: r.Required, Trigger: string(r.Trigger),
+			Once: containsBot(cfg.OnceBots, r.Login),
 		})
 	}
 	for repo := range st.Repos {
-		if ov, ok := st.RepoOverride(repo); ok && (ov.SetCoBots || ov.SetRequired || ov.PrimaryOff) {
+		if ov, ok := st.RepoOverride(repo); ok && !repoOverrideEmpty(ov) {
 			view.Overriding = append(view.Overriding, repo)
 		}
 	}
@@ -845,6 +846,8 @@ func configValueOf(cfg Config, key string) string {
 		return strings.Join(names, ",")
 	case "CRQ_REQUIRED_BOTS":
 		return strings.Join(cfg.RequiredBots, ",")
+	case "CRQ_REVIEW_ONCE":
+		return strings.Join(cfg.OnceBots, ",")
 	case "CRQ_FEEDBACK_BOTS":
 		return strings.Join(cfg.FeedbackBots, ",")
 	case "CRQ_SETTLE":

@@ -78,7 +78,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		return result, nil
 	}
 
-	obs, err := s.observe(ctx, cfg, repo, pr, nil, observedPosted.commands, s.clock())
+	obs, err := s.observe(ctx, cfg, repo, pr, nil, observedPosted.commands, reviewerAnswers(st, cfg, repo, pr), s.clock())
 	if err != nil {
 		return result, err
 	}

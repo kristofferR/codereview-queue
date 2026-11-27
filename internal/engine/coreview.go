@@ -412,6 +412,72 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 	return !coUnableSince(obs, login, floor) && !coCheckUnable(obs, login)
 }
 
+// ReviewedPR reports live evidence that login delivered a review anywhere on
+// this pull request: a submitted review of any commit, a clean summary naming
+// any commit, the primary's clean-review summary, a completed check run, or a
+// Codex thumbs-up. observe() evaluates it before a confirmation pass filters
+// old evidence out.
+func ReviewedPR(obs Observation, login string) bool {
+	if dialect.IsCodexBot(login) && obs.CodexThumbsUp {
+		return true
+	}
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, login) {
+			return true
+		}
+	}
+	for _, ev := range obs.Events {
+		switch {
+		case ev.Kind == dialect.EvCoClean && eventConcerns(ev, login):
+			return true
+		case ev.Kind == dialect.EvNoAction && !ev.SummaryOnly && sameBot(ev.Bot, login):
+			return true
+		}
+	}
+	_, reviewed := coCheckReviewedAt(obs, login)
+	return reviewed
+}
+
+// CoAnsweredRound is CoReviewedRound plus the Codex thumbs-up, which completes
+// a round without leaving a review, summary or check behind. It is what crq
+// records as a reviewer having answered. A thumbs-up names no commit, so it
+// only answers a round whose head is the one observed: after a push it may be
+// the answer to the new head, and charging it to the old one would spend the
+// review budget on a head nobody re-reviewed.
+func CoAnsweredRound(r state.Round, obs Observation, login string) bool {
+	if CoReviewedRound(r, obs, login) {
+		return true
+	}
+	return dialect.IsCodexBot(login) && obs.CodexThumbsUp &&
+		r.Head != "" && obs.Head != "" && dialect.SHAPrefixMatch(r.Head, obs.Head)
+}
+
+// CoAnsweredPR reports an answer that binds to the pull request but to no
+// head: a Codex thumbs-up. CoAnsweredRound credits it to a round only on that
+// round's head; seen after a push it still answers the pull request.
+func CoAnsweredPR(obs Observation, login string) bool {
+	return dialect.IsCodexBot(login) && obs.CodexThumbsUp
+}
+
+// DoneForPR reports whether login reviews each pull request once and already
+// has, so this head neither asks it nor waits for it.
+func (p Policy) DoneForPR(obs Observation, login string) bool { return p.doneForPR(obs, login) }
+
+func (p Policy) doneForPR(obs Observation, login string) bool {
+	if !obs.ReviewedPR[dialect.NormalizeBotName(login)] {
+		return false
+	}
+	if sameBot(login, p.Bot) {
+		return p.PrimaryOnce
+	}
+	for _, cp := range p.coReviewers() {
+		if sameBot(cp.Login, login) {
+			return cp.Once
+		}
+	}
+	return false
+}
+
 // DecideCoPost reports whether crq should post login's trigger command for
 // this round. Common guards regardless of mode: a command is configured, the
 // round has not already commanded this bot, no live command sits on the PR,
@@ -425,6 +491,9 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 // the sweep share the rule.
 func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPresent bool, anchor, now time.Time) bool {
 	if roundCoCommandID(r, cp.Login) != 0 {
+		return false
+	}
+	if cp.Once && obs.ReviewedPR[dialect.NormalizeBotName(cp.Login)] {
 		return false
 	}
 	if strings.TrimSpace(cp.Command) == "" {
@@ -499,6 +568,9 @@ func DecideCoRetry(r state.Round, obs Observation, cp CoReviewerPolicy, now time
 		return false
 	}
 	if coReviewedHead(obs, cp.Login) || coReviewInProgressOnHead(obs, cp.Login) || coCheckAny(obs, cp.Login) {
+		return false
+	}
+	if cp.Once && obs.ReviewedPR[dialect.NormalizeBotName(cp.Login)] {
 		return false
 	}
 	floor := coSelfHealCutoff(r, cp.Login)

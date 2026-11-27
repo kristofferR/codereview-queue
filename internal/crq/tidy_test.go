@@ -76,7 +76,7 @@ func TestTidyRemovesAnsweredCodexCommandWhilePrimaryIsQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 	round := st.Round(repo, pr)
-	obs, err := svc.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	obs, err := svc.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, reviewerAnswers(st, cfg, repo, pr), now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -417,7 +417,7 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 	}
 	for repo, rv := range st.Repos {
 		row := get(repo)
-		row.Override = rv.SetCoBots || rv.SetRequired || rv.PrimaryOff
+		row.Override = rv.SetCoBots || rv.SetRequired || rv.PrimaryOff || rv.SetOnce
 		row.OverrideBy, row.OverrideAt = rv.By, rv.UpdatedAt
 		row.PrimaryOff = rv.PrimaryOff
 	}

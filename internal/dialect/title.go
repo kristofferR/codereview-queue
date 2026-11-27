@@ -51,6 +51,18 @@ var (
 	macroscopeScale = regexp.MustCompile(
 		`(?im)^\s*\W*\*\*(Critical|High|Medium|Low)\*\*`,
 	)
+	// greptilePriority reads the badge Greptile leads a finding with:
+	// <img alt="P1" src=".../badges/p1.svg">.
+	greptilePriority = regexp.MustCompile(`(?i)<img\b[^>]*\balt="P([0-3])"`)
+	// greptileLegacyLabel is the category earlier Greptile findings opened with
+	// instead of a badge: "**logic:** …", "**style:** …", "**syntax:** …".
+	greptileLegacyLabel = regexp.MustCompile(`(?i)^\s*\*\*(logic|style|syntax):\*\*\s*`)
+	// greptilePrompt is the collapsed "Prompt To Fix With AI" block, which
+	// repeats the finding and must not supply its title.
+	greptilePrompt = regexp.MustCompile(`(?is)<details>\s*<summary>\s*Prompt To Fix With AI\s*</summary>.*?</details>`)
+	// greptileWrapper is a <details>/<summary> line around out-of-diff
+	// findings ("Additional Comments (1)"), which describes none of them.
+	greptileWrapper = regexp.MustCompile(`(?i)^\s*</?(?:details|summary)\b`)
 )
 
 // ReviewLabels are the independent labels in a reviewer's rubric header.
@@ -77,6 +89,8 @@ func ReviewLabelsFor(bot, body string) ReviewLabels {
 		return singleScaleLabels(body, bugbotScale)
 	case "macroscopeapp":
 		return singleScaleLabels(body, macroscopeScale)
+	case "greptile-apps":
+		return greptileLabels(body)
 	default:
 		return ReviewLabels{}
 	}
@@ -119,6 +133,28 @@ func codexLabels(body string) ReviewLabels {
 	}
 	severity := map[string]string{"0": "critical", "1": "major", "2": "potential", "3": "minor"}[priority]
 	return ReviewLabels{Severity: severity, Scale: "P" + priority}
+}
+
+// greptileLabels maps Greptile's documented badges onto the shared scale:
+// P0 "must fix before merging", P1 "should fix", P2 "consider fixing". The
+// legacy categories carry no urgency of their own; style is the only one that
+// was ever cosmetic.
+func greptileLabels(body string) ReviewLabels {
+	if match := greptilePriority.FindStringSubmatch(body); match != nil {
+		severity := map[string]string{
+			"0": SeverityCritical, "1": SeverityMajor, "2": SeverityPotential, "3": SeverityMinor,
+		}[match[1]]
+		return ReviewLabels{Severity: severity, Scale: "P" + match[1]}
+	}
+	if match := greptileLegacyLabel.FindStringSubmatch(body); match != nil {
+		category := strings.ToLower(match[1])
+		severity := SeverityPotential
+		if category == "style" {
+			severity = SeverityMinor
+		}
+		return ReviewLabels{Category: category, Severity: severity, Scale: category}
+	}
+	return ReviewLabels{}
 }
 
 func singleScaleLabels(body string, pattern *regexp.Regexp) ReviewLabels {
@@ -165,9 +201,31 @@ func ReviewTitleFor(bot, body string) string {
 		return ThreadTitle(true, detailsBlock.ReplaceAllString(body, ""))
 	case "chatgpt-codex-connector", "cursor", "macroscopeapp":
 		return ThreadTitle(true, body)
+	case "greptile-apps":
+		if title := greptileTitle(body); title != "" {
+			return title
+		}
+		return ThreadTitle(true, body)
 	default:
 		return ThreadTitle(true, body)
 	}
+}
+
+// greptileTitle is the first line of a Greptile finding that says something.
+// The title is the bold span after the badge on the first line; a legacy
+// finding has no title, so its first sentence (minus the category label) is
+// the best one. The generic order would prefer a later bold line such as
+// "**Context Used:**" over that sentence.
+func greptileTitle(body string) string {
+	for _, line := range strings.Split(greptilePrompt.ReplaceAllString(body, ""), "\n") {
+		if greptileWrapper.MatchString(line) {
+			continue
+		}
+		if title := usableTitle(greptileLegacyLabel.ReplaceAllString(line, "")); title != "" {
+			return title
+		}
+	}
+	return ""
 }
 
 // ThreadTitle reduces a review comment to one readable line, per bot.

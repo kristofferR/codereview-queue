@@ -68,7 +68,7 @@ func TestObserveFetchesHeadResourcesConcurrently(t *testing.T) {
 	service := NewService(cfg, github, NewMemoryStore(cfg), nil)
 	done := make(chan error, 1)
 	go func() {
-		_, err := service.observe(t.Context(), cfg, "o/r", 1, nil, nil, time.Now().UTC())
+		_, err := service.observe(t.Context(), cfg, "o/r", 1, nil, nil, nil, time.Now().UTC())
 		done <- err
 	}()
 
@@ -124,7 +124,7 @@ func TestObserveCancelsSiblingReadsAfterRequiredFailure(t *testing.T) {
 		commentsCanceled: make(chan struct{}),
 	}
 	service := NewService(cfg, github, NewMemoryStore(cfg), nil)
-	_, err := service.observe(t.Context(), cfg, "o/r", 1, nil, nil, time.Now().UTC())
+	_, err := service.observe(t.Context(), cfg, "o/r", 1, nil, nil, nil, time.Now().UTC())
 	if !errors.Is(err, want) {
 		t.Fatalf("observe error = %v, want %v", err, want)
 	}

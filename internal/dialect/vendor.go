@@ -102,6 +102,22 @@ func vendorFor(name string) Vendor {
 			},
 			SuitedTo: "repositories with conventions worth enforcing in writing",
 		}
+	case "greptile":
+		return Vendor{
+			Site: "https://www.greptile.com",
+			Docs: "https://www.greptile.com/docs",
+			Pitch: "Indexes the whole repository and reviews a pull request against it, " +
+				"leaving prioritised line comments and a summary with a confidence score. " +
+				"It reviews once when a pull request opens unless told to review every push.",
+			Cost: "Prepaid credits at $1 each: a Base review is 1, Plus 3, Apex 10. Starter " +
+				"includes 50 a month and open-source projects can use it free.",
+			Setup: []string{
+				"Sign in at greptile.com with GitHub and install its app.",
+				"Enable the repositories you want reviewed and let it index them.",
+				"Optionally commit a greptile.json — set triggerOnUpdates to review every push.",
+			},
+			SuitedTo: "large codebases where a finding depends on code outside the diff",
+		}
 	}
 	return Vendor{}
 }

@@ -115,7 +115,7 @@ func (c Config) storeConfig() StoreConfig {
 }
 
 // coReviewerSummary renders the enabled co-reviewers for the dashboard row:
-// "codex (required, always) · bugbot (selfheal) · macroscope (selfheal)".
+// "codex (required, always) · bugbot (selfheal) · macroscope (selfheal) · greptile (never)".
 // Empty with no co-bots so existing dashboards stay byte-identical.
 func (c Config) coReviewerSummary() string {
 	parts := make([]string, 0, len(c.CoBots))
@@ -182,6 +182,7 @@ func (c Config) policy() engine.Policy {
 		Bot:                c.Bot,
 		RequiredBots:       c.RequiredBots,
 		PrimaryOff:         c.PrimaryOff,
+		PrimaryOnce:        containsBot(c.OnceBots, c.Bot),
 		MinInterval:        c.MinInterval,
 		InflightTimeout:    c.InflightTimeout,
 		RateLimitFallback:  c.RateLimitFallback,
@@ -199,6 +200,7 @@ func (c Config) policy() engine.Policy {
 			Command:       cb.Command,
 			Trigger:       cb.Trigger,
 			SelfHealGrace: cb.SelfHealGrace,
+			Once:          containsBot(c.OnceBots, cb.Login),
 		})
 	}
 	return p

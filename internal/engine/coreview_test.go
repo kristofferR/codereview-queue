@@ -895,3 +895,76 @@ func TestSelfHealGraceStartsWhenCrqSawTheHead(t *testing.T) {
 		t.Fatalf("self-heal must still fire once the grace elapses: %+v", d)
 	}
 }
+
+// TestReviewOncePerPullRequest pins CoReviewerPolicy.Once and Policy.PrimaryOnce:
+// before a reviewer's first review it behaves as configured; afterwards a later
+// head neither asks it nor waits for it, required or not, and a once primary
+// is not fired or spent again.
+func TestReviewOncePerPullRequest(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	fired := now.Add(-20 * time.Minute)
+	head := "bbbbbbbbb"
+	greptile := dialect.GreptileLogin
+	key := dialect.NormalizeBotName(greptile)
+	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: head + "0000", SubmittedAt: now.Add(-10 * time.Minute)}
+	p := Policy{Bot: "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", greptile},
+		CoReviewers: []CoReviewerPolicy{{Login: greptile, Command: "@greptile",
+			Trigger: TriggerAlways, SelfHealGrace: time.Minute, Once: true}}}
+	round := state.Round{Head: head, FiredAt: &fired}
+	// Greptile reviewed an earlier head on its own; this head has only CodeRabbit.
+	fresh := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReview},
+		Co: map[string]CoSeen{key: {AutoActive: true}}}
+	done := fresh
+	done.ReviewedPR = map[string]bool{key: true}
+
+	if !DecideCoPost(round, fresh, p.CoReviewers[0], false, fired, now) {
+		t.Fatal("before its first review a once reviewer is asked as configured")
+	}
+	if got := Completion(round, fresh, p); got.Done {
+		t.Fatalf("before its first review a required once reviewer gates: %+v", got)
+	}
+	if DecideCoPost(round, done, p.CoReviewers[0], false, fired, now) {
+		t.Fatal("a once reviewer that already reviewed the pull request must not be asked again")
+	}
+	if got := Completion(round, done, p); !got.Done {
+		t.Fatalf("a once reviewer that already reviewed must not gate a later head: %+v", got)
+	}
+	every := p
+	every.CoReviewers = []CoReviewerPolicy{p.CoReviewers[0]}
+	every.CoReviewers[0].Once = false
+	if got := Completion(round, done, every); got.Done {
+		t.Fatalf("an every-push reviewer still gates each head: %+v", got)
+	}
+
+	// A once primary that already reviewed the pull request is not fired again,
+	// whatever the slot or the account says.
+	primary := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"}, PrimaryOnce: true}
+	queued := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseQueued}
+	earlier := Observation{Head: head, Open: true,
+		Reviews:    []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "aaaaaaaaa0000", SubmittedAt: fired}},
+		ReviewedPR: map[string]bool{"coderabbitai": true}}
+	blocked := now.Add(time.Hour)
+	if d := DecideFire(Global{BlockedUntil: &blocked}, queued, earlier, now, primary); d.Verdict != FireDedupe {
+		t.Fatalf("verdict = %v (%s), want FireDedupe", d.Verdict, d.Reason)
+	}
+	if got := Completion(queued, earlier, primary); !got.Done {
+		t.Fatalf("a once primary that already reviewed must not gate a later head: %+v", got)
+	}
+	primary.PrimaryOnce = false
+	if d := DecideFire(Global{SlotFree: true}, queued, earlier, now, primary); d.Verdict != FirePost {
+		t.Fatalf("an every-push primary fires on each head, got %v (%s)", d.Verdict, d.Reason)
+	}
+
+	// A Codex thumbs-up completes its review without leaving one behind, so it
+	// both counts for the pull request and is recorded as an answer.
+	thumbs := Observation{Head: head, Open: true, CodexThumbsUp: true}
+	if !ReviewedPR(thumbs, dialect.CodexBotLogin) || !CoAnsweredRound(round, thumbs, dialect.CodexBotLogin) {
+		t.Fatal("a Codex thumbs-up is a completed review")
+	}
+	// It names no commit, so it never answers a round for an earlier head.
+	stale := state.Round{Head: "aaaaaaaaa", FiredAt: &fired}
+	if CoAnsweredRound(stale, thumbs, dialect.CodexBotLogin) {
+		t.Fatal("a thumbs-up seen after a push must not answer the previous head's round")
+	}
+}

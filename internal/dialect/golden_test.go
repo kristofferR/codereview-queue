@@ -391,7 +391,7 @@ func TestGoldenCoReviewers(t *testing.T) {
 		wantKind      EventKind
 		wantFor       string
 		wantApproved  *bool  // EvCoVerdict only
-		reviewedSHA   string // BugbotReviewedCommitSHA
+		reviewedSHA   string // BugbotReviewedCommitSHA / GreptileReviewedCommitSHA
 		resolvedSHA   string // MacroscopeResolvedInSHA
 		dedupeKey     string // BugbotFindingDedupeKey ("" = none)
 		bodyFindings  int    // ParseReviewBodyFindings count as this bot
@@ -440,6 +440,35 @@ func TestGoldenCoReviewers(t *testing.T) {
 			wantKind: EvCoNotice, wantFor: MacroscopeLogin,
 			resolvedSHA: "6a06232237270dfc6d1e39af9611ce2ac3349ce5",
 		},
+		{file: "greptile/trigger-command.md", author: "kristofferR", wantKind: EvCoCommand, wantFor: GreptileLogin},
+		// A clean review submits no review object, so the summary naming the
+		// commit is its evidence — whether or not it says so in words.
+		{
+			file: "greptile/summary-clean.md", author: GreptileLogin,
+			wantKind: EvCoClean, wantFor: GreptileLogin,
+			reviewedSHA: "605a68e7ff137a4adc5b446074aede196d4db158",
+		},
+		{
+			file: "greptile/summary-clean-unworded.md", author: GreptileLogin,
+			wantKind: EvCoClean, wantFor: GreptileLogin,
+			reviewedSHA: "042a8b2736b0e4015efd136f52795b4c05cdc843",
+		},
+		// A summary listing findings repeats the inline threads; surfacing it
+		// as well would report every finding twice.
+		{
+			file: "greptile/summary-findings.md", author: GreptileLogin,
+			wantKind: EvCoNotice, wantFor: GreptileLogin,
+			reviewedSHA: "3ee8653629153f67c8d1a3abf8de7d7a1c914635",
+		},
+		{file: "greptile/summary-legacy.md", author: GreptileLogin, wantKind: EvCoNotice, wantFor: GreptileLogin},
+		{file: "greptile/summary-legacy-overview.md", author: GreptileLogin, wantKind: EvCoNotice, wantFor: GreptileLogin},
+		{file: "greptile/behavior-notice.md", author: GreptileLogin, wantKind: EvCoNotice, wantFor: GreptileLogin},
+		// Spent credits: no trigger can help, so the bot cannot finish.
+		{file: "greptile/credits-exhausted.md", author: GreptileLogin, wantKind: EvCoUnable, wantFor: GreptileLogin},
+		// Findings outside the diff exist only in this comment.
+		{file: "greptile/additional-comments.md", author: GreptileLogin, wantKind: EvOther, wantFor: GreptileLogin},
+		{file: "greptile/inline-finding-p1.md", author: GreptileLogin, wantKind: EvOther, wantFor: GreptileLogin},
+		{file: "greptile/inline-finding-legacy-logic.md", author: GreptileLogin, wantKind: EvOther, wantFor: GreptileLogin},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
@@ -469,6 +498,14 @@ func TestGoldenCoReviewers(t *testing.T) {
 			if strings.HasPrefix(tc.file, "macroscope/") {
 				if got := MacroscopeResolvedInSHA(body); got != tc.resolvedSHA {
 					t.Errorf("MacroscopeResolvedInSHA = %q, want %q", got, tc.resolvedSHA)
+				}
+			}
+			if strings.HasPrefix(tc.file, "greptile/") && tc.author == GreptileLogin {
+				if got := GreptileReviewedCommitSHA(body); got != tc.reviewedSHA {
+					t.Errorf("GreptileReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
+				}
+				if tc.wantKind == EvCoClean && ev.SHA != tc.reviewedSHA {
+					t.Errorf("clean summary SHA = %q, want %q", ev.SHA, tc.reviewedSHA)
 				}
 			}
 			meta := ReviewMeta{ID: 7, SubmittedAt: base}
@@ -539,6 +576,12 @@ func TestGoldenCheckRuns(t *testing.T) {
 		{"macroscope/check-approvability-approved.json", MacroscopeLogin, CheckAuxiliary},
 		{"macroscope/check-approvability-not-eligible.json", MacroscopeLogin, CheckAuxiliary},
 		{"macroscope/check-custom.json", MacroscopeLogin, CheckAuxiliary},
+		// Greptile's run concludes `success` with or without findings; only its
+		// comment count says clean. The count includes out-of-diff comments.
+		{"greptile/check-findings.json", GreptileLogin, CheckDone},
+		{"greptile/check-clean.json", GreptileLogin, CheckDoneClean},
+		{"greptile/check-legacy-clean.json", GreptileLogin, CheckDoneClean},
+		{"greptile/check-in-progress.json", GreptileLogin, CheckInProgress},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
@@ -628,12 +671,19 @@ func TestCheckRunsThatAreNotReviewEvidence(t *testing.T) {
 		{"macroscope custom", "Macroscope - Effect Service Conventions", "completed", "failure", CheckAuxiliary},
 		{"macroscope correctness failed", macroscopeCorrectnessCheck, "completed", "failure", CheckFailed},
 		{"macroscope correctness done", macroscopeCorrectnessCheck, "completed", "neutral", CheckDone},
+		// Greptile has no benign skip.
+		{"greptile failure", greptileCheckName, "completed", "failure", CheckFailed},
+		{"greptile skipped", greptileCheckName, "completed", "skipped", CheckFailed},
+		{"greptile other check", "Greptile Something Else", "completed", "success", CheckUnrelated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			slug := "cursor"
-			if strings.HasPrefix(tc.check, macroscopeCheckPrefix) {
+			switch {
+			case strings.HasPrefix(tc.check, macroscopeCheckPrefix):
 				slug = "macroscopeapp"
+			case strings.HasPrefix(tc.check, "Greptile"):
+				slug = "greptile-apps"
 			}
 			_, got := ClassifyCheckRun(slug, tc.check, "", "", tc.status, tc.conclusion)
 			if got != tc.want {
@@ -815,6 +865,12 @@ func TestGoldenPricing(t *testing.T) {
 		}
 		if e := EstimateCost(CodexBotLogin, CodexBotLogin, big, spent); !e.Exact || e.High != 0 {
 			t.Errorf("codex primary = %+v, want the subscription it is actually covered by", e)
+		}
+		// Greptile charges by review tier, not diff size, and crq cannot see
+		// the tier or included credits: up to Apex, never metered.
+		if e := EstimateCost(GreptileLogin, "coderabbitai[bot]", big, spent); e.Low != 0 || e.High != 10 ||
+			e.Exact || e.Metered || e.Unknown || e.Basis == "" || e != EstimateGreptile(DiffStat{}) {
+			t.Errorf("greptile = %+v, want a size-independent $0-$10 band", e)
 		}
 
 		// The primary is free inside the allowance, unknown without a count,

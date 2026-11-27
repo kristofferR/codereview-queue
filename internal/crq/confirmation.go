@@ -103,8 +103,13 @@ func (s *Service) queueConfirmation(ctx context.Context, feedback FeedbackReport
 		fresh.ConfirmationAfter = &now
 		fresh.LastAttemptAt = &now
 		fresh.Note = "confirmation after findings were resolved or dismissed without changing the head"
+		// Ask the co-reviewers that gate or have taken part in this pull
+		// request. Forcing every enabled one posted a trigger for bots that
+		// were never installed here.
 		for _, cb := range feedback.config.CoBots {
-			fresh.ForceCoReviewers = append(fresh.ForceCoReviewers, cb.Login)
+			if cb.Required || fresh.Co(cb.Login).SeenActiveAt != nil || st.CoReviewerAnswered(feedback.Repo, feedback.PR, cb.Login) {
+				fresh.ForceCoReviewers = append(fresh.ForceCoReviewers, cb.Login)
+			}
 		}
 		st.PutRound(*fresh)
 		queued = true

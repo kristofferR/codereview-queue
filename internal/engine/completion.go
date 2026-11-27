@@ -46,7 +46,10 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	reviewedBy := map[string]bool{}
 	for _, bot := range p.RequiredBots {
 		bot = strings.TrimSpace(bot)
-		if bot != "" {
+		// A reviewer that reviews each pull request once gates only until it
+		// has: requiring it on every later head waits for a review that is,
+		// by configuration, never coming.
+		if bot != "" && !p.doneForPR(obs, bot) {
 			reviewedBy[bot] = false
 		}
 	}
@@ -74,7 +77,7 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	// a round nothing else will finish.
 	carriedReviewer := false
 	for _, cp := range p.coReviewers() {
-		if cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil {
+		if cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil && !p.doneForPR(obs, cp.Login) {
 			carriedReviewer = true
 			break
 		}
@@ -82,7 +85,7 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	roundActivated := r.FiredAt != nil || primaryUnavailable
 	if roundActivated || carriedReviewer {
 		for _, cp := range p.coReviewers() {
-			if requiredBot(p, cp.Login) {
+			if requiredBot(p, cp.Login) || p.doneForPR(obs, cp.Login) {
 				continue
 			}
 			co := obs.co(cp.Login)
@@ -224,7 +227,7 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 // reviewed in step 2b, so it satisfies the first clause here.
 func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.Time, reviewedBy map[string]bool) bool {
 	for _, cp := range p.coReviewers() {
-		if reviewedByBot(reviewedBy, cp.Login) || coReviewedRound(r, obs, cp.Login, cutoff) {
+		if reviewedByBot(reviewedBy, cp.Login) || coReviewedRound(r, obs, cp.Login, cutoff) || p.doneForPR(obs, cp.Login) {
 			continue
 		}
 		// The bot either gates by configuration, or participates via a

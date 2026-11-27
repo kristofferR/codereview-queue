@@ -217,6 +217,35 @@ func TestThreadTitleAgainstTheCorpus(t *testing.T) {
 	}
 }
 
+// Greptile leads with a badge, so its title is the bold span after it — the
+// generic order would pick the first prose line instead. Legacy findings
+// opened with a category label and had no title at all.
+func TestGreptileFindingTitlesAndSeverity(t *testing.T) {
+	for _, tc := range []struct{ file, title, severity, scale string }{
+		{"greptile/inline-finding-p1.md", "Light stays off after turn-on", SeverityMajor, "P1"},
+		{"greptile/inline-finding-p2.md", "Refresh lacks required diagnostic flag", SeverityPotential, "P2"},
+		{"greptile/inline-finding-legacy-logic.md",
+			"Critical architectural issue: calling move functions directly bypasses async_execute_controller_command(), which viol...",
+			SeverityPotential, "logic"},
+		// The <summary> wrapper and the bold path are not a description.
+		{"greptile/additional-comments.md", "Missing required imports timedelta and dt_util for the brew_now service", "", ""},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("testdata", tc.file))
+			if err != nil {
+				t.Fatalf("read corpus fixture: %v", err)
+			}
+			if got := ReviewTitleFor(GreptileLogin, string(body)); got != tc.title {
+				t.Errorf("ReviewTitleFor = %q, want %q", got, tc.title)
+			}
+			labels := ReviewLabelsFor(GreptileLogin, string(body))
+			if labels.Severity != tc.severity || labels.Scale != tc.scale {
+				t.Errorf("ReviewLabelsFor = %+v, want severity %q scale %q", labels, tc.severity, tc.scale)
+			}
+		})
+	}
+}
+
 // Titles carry code and issue references. A generic tag or heading strip eats
 // them: `Map<string, User>` becomes `Map`, and `#123` becomes `123`.
 func TestThreadTitleKeepsCodeAndReferences(t *testing.T) {

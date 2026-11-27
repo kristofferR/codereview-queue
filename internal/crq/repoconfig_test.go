@@ -308,6 +308,53 @@ func TestOverrideNeverGatesOnAReviewerItCannotTrigger(t *testing.T) {
 	})
 }
 
+// A repository sets its own once-per-PR reviewers apart from the fleet, and an
+// explicitly empty list survives as "every reviewer every push here".
+func TestSetReviewOncePerRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo := "o/r"
+
+	view, err := svc.SetReviewOnce(ctx, repo, []string{cfg.Bot, "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range view.Reviewers {
+		if !r.Once {
+			t.Fatalf("reviewer %s must review once here: %+v", r.Login, view)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := svc.cfgFor(st, repo).policy(); !p.PrimaryOnce || !p.CoReviewers[0].Once {
+		t.Fatalf("the repository's list must reach the policy: %+v", p)
+	}
+	if p := svc.cfgFor(st, "o/other").policy(); p.PrimaryOnce {
+		t.Fatal("another repository must keep the fleet's list")
+	}
+
+	if _, err := svc.SetReviewOnce(ctx, repo, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, err = store.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ov, ok := st.RepoOverride(repo); !ok || !ov.SetOnce {
+		t.Fatalf("an empty list is a choice, not a cleared override: %+v", ov)
+	}
+	if p := svc.cfgFor(st, repo).policy(); p.PrimaryOnce || p.CoReviewers[0].Once {
+		t.Fatalf("an empty list means every push here: %+v", p)
+	}
+	if _, err := svc.SetReviewOnce(ctx, repo, []string{"nobody"}); err == nil {
+		t.Fatal("an unknown reviewer must be refused")
+	}
+}
+
 // Changing who has to review a head must not strand the PR. A completed round
 // is the "this head was reviewed" dedup marker, so adding a required reviewer
 // leaves convergence reporting it pending while enqueue keeps skipping the head:

@@ -353,8 +353,9 @@ function HeldHere({
 // Set-up bots first, then unproven, then ones crq has asked and never heard
 // from — worst last, because that is the order in which they are worth
 // considering.
-function rank(b: BotCard) {
-  return b.status === "working" ? 0 : b.status === "silent" || b.status === "unable" ? 2 : 1;
+function rank(b: BotCard, owner: string) {
+  if (b.unable_owners?.includes(owner)) return 2;
+  return b.status === "working" ? 0 : b.status === "silent" ? 2 : 1;
 }
 
 /** Runs and Required are separate ideas, so they get separate toggles. */
@@ -367,6 +368,7 @@ function ReviewerEditor({
   bots: BotCard[];
   onSnapshot?: (s: Snapshot) => void;
 }) {
+  const owner = repo.repo.split("/")[0]?.toLowerCase() ?? "";
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
   const [saveImpact, setSaveImpact] = useState<FleetImpact | null>(null);
@@ -481,74 +483,78 @@ function ReviewerEditor({
                 crq posts a trigger on every round and waits for an answer that
                 never comes. */}
             {[...bots]
-              .sort((a, b) => rank(a) - rank(b))
-              .map((b) => (
-                <tr key={b.login} className={b.status === "working" ? "" : "opacity-75"}>
-                  <Td>
-                    <span className="flex items-center gap-2.5">
-                      <BotIcon login={b.login} name={b.name} size={20} />
-                      <span className="font-[550]">{b.name}</span>
-                      {b.status !== "working" && (
-                        <Link
-                          to="/bots"
-                          title={
-                            b.status === "unable"
-                              ? `it said it cannot review: ${b.unable_reason ?? "see Bots"}`
-                              : b.status === "silent"
-                                ? "crq has asked it and never seen an answer — most likely not set up"
-                                : "crq has never seen this bot work here"
-                          }
-                        >
-                          <Pill
-                            tone={b.status === "silent" || b.status === "unable" ? "bad" : "mut"}
+              .sort((a, b) => rank(a, owner) - rank(b, owner))
+              .map((b) => {
+                const unableHere = b.unable_owners?.includes(owner) ?? false;
+                return (
+                  <tr
+                    key={b.login}
+                    className={b.status === "working" && !unableHere ? "" : "opacity-75"}
+                  >
+                    <Td>
+                      <span className="flex items-center gap-2.5">
+                        <BotIcon login={b.login} name={b.name} size={20} />
+                        <span className="font-[550]">{b.name}</span>
+                        {(unableHere || b.status !== "working") && (
+                          <Link
+                            to="/bots"
+                            title={
+                              unableHere
+                                ? `it said it cannot review under ${owner}: ${b.unable_reason ?? "see Bots"}`
+                                : b.status === "silent"
+                                  ? "crq has asked it and never seen an answer — most likely not set up"
+                                  : "crq has never seen this bot work here"
+                            }
                           >
-                            {b.status === "unable"
-                              ? (b.unable_reason ?? "can't review")
-                              : b.status === "silent"
-                                ? "never answered"
-                                : "not set up?"}
-                          </Pill>
-                        </Link>
-                      )}
-                    </span>
-                  </Td>
-                  <Td className="text-center">
-                    <Toggle
-                      on={runs.includes(b.name)}
-                      label={`${b.name} runs for ${repo.repo}`}
-                      locked={!b.primary && !b.configurable}
-                      title={
-                        b.primary
-                          ? "the metered reviewer — turning it off spends no quota here"
-                          : b.configurable
-                            ? undefined
-                            : "this retired reviewer is shown for history and cannot be configured"
-                      }
-                      onClick={() => toggleRuns(b.name)}
-                    />
-                  </Td>
-                  <Td className="text-center">
-                    <Toggle
-                      on={required.includes(b.name)}
-                      label={`${b.name} required for ${repo.repo}`}
-                      locked={!b.primary && !b.configurable}
-                      title={
-                        !b.primary && !b.configurable
-                          ? "this retired reviewer is shown for history and cannot be configured"
-                          : undefined
-                      }
-                      onClick={() => toggleRequired(b.name)}
-                    />
-                  </Td>
-                  <Td className="c-host text-[12.5px] text-faint">
-                    {b.primary
-                      ? primaryOn
-                        ? "primary · metered against the shared allowance"
-                        : "primary · turned off here"
-                      : "co-reviewer"}
-                  </Td>
-                </tr>
-              ))}
+                            <Pill tone={unableHere || b.status === "silent" ? "bad" : "mut"}>
+                              {unableHere
+                                ? (b.unable_reason ?? "can't review")
+                                : b.status === "silent"
+                                  ? "never answered"
+                                  : "not set up?"}
+                            </Pill>
+                          </Link>
+                        )}
+                      </span>
+                    </Td>
+                    <Td className="text-center">
+                      <Toggle
+                        on={runs.includes(b.name)}
+                        label={`${b.name} runs for ${repo.repo}`}
+                        locked={!b.primary && !b.configurable}
+                        title={
+                          b.primary
+                            ? "the metered reviewer — turning it off spends no quota here"
+                            : b.configurable
+                              ? undefined
+                              : "this retired reviewer is shown for history and cannot be configured"
+                        }
+                        onClick={() => toggleRuns(b.name)}
+                      />
+                    </Td>
+                    <Td className="text-center">
+                      <Toggle
+                        on={required.includes(b.name)}
+                        label={`${b.name} required for ${repo.repo}`}
+                        locked={!b.primary && !b.configurable}
+                        title={
+                          !b.primary && !b.configurable
+                            ? "this retired reviewer is shown for history and cannot be configured"
+                            : undefined
+                        }
+                        onClick={() => toggleRequired(b.name)}
+                      />
+                    </Td>
+                    <Td className="c-host text-[12.5px] text-faint">
+                      {b.primary
+                        ? primaryOn
+                          ? "primary · metered against the shared allowance"
+                          : "primary · turned off here"
+                        : "co-reviewer"}
+                    </Td>
+                  </tr>
+                );
+              })}
           </tbody>
         </table>
 

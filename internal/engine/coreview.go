@@ -469,6 +469,27 @@ func CoUnableAt(obs Observation, login string) (time.Time, bool) {
 	return latest, !latest.IsZero()
 }
 
+// CoLatestAnswerAt reports the newest completed answer by login in this
+// observation, by GitHub's clock: a submitted review, a clean summary's last
+// edit, or a completed check run.
+func CoLatestAnswerAt(obs Observation, login string) (time.Time, bool) {
+	var latest time.Time
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, login) && review.SubmittedAt.After(latest) {
+			latest = review.SubmittedAt
+		}
+	}
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCoClean && eventConcerns(ev, login) && ev.ObservedTime().After(latest) {
+			latest = ev.ObservedTime()
+		}
+	}
+	if at, ok := coCheckReviewedAt(obs, login); ok && at.After(latest) {
+		latest = at
+	}
+	return latest, !latest.IsZero()
+}
+
 // CoAnsweredPR reports an answer that binds to the pull request but to no
 // head: a Codex thumbs-up. CoAnsweredRound credits it to a round only on that
 // round's head; seen after a push it still answers the pull request.

@@ -3580,7 +3580,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	}
 	var active, prAnswers []string
 	answered := map[string]bool{}
-	unable := map[string]time.Time{}
+	unable, answeredAt := map[string]time.Time{}, map[string]time.Time{}
 	for _, cb := range cfg.CoBots {
 		// Setup status is not head-scoped: activity on an earlier head still
 		// proves that the reviewer is installed and working.
@@ -3597,6 +3597,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		}
 		if at, ok := engine.CoUnableAt(obs, cb.Login); ok {
 			unable[cb.Login] = at
+		}
+		if at, ok := engine.CoLatestAnswerAt(obs, cb.Login); ok {
+			answeredAt[cb.Login] = at
 		}
 	}
 	primary := cfg.Bot != "" &&
@@ -3622,6 +3625,11 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		}
 		for login, at := range unable {
 			if st.NoteCoUnable(login, round.Repo, round.PR, at) {
+				indexChanged = true
+			}
+		}
+		for login, at := range answeredAt {
+			if st.NoteCoAnswerSeen(login, round.Repo, at) {
 				indexChanged = true
 			}
 		}

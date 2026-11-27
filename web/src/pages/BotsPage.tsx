@@ -11,13 +11,6 @@ const STATUS: Record<
 > = {
   working: { tone: "ok", label: "Working", note: "crq saw it answer here in the last week" },
   quiet: { tone: "warn", label: "Quiet", note: "crq saw it answer once, but not lately" },
-  unable: {
-    tone: "bad",
-    label: "Can't review",
-    note:
-      "it said it cannot review at all and has not answered since — crq stops waiting for it " +
-      "and does not ask again, since no trigger can fix that",
-  },
   silent: {
     tone: "bad",
     label: "Never answered",
@@ -65,6 +58,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
       <div className="mt-4 grid grid-cols-2 gap-4 max-[940px]:grid-cols-1">
         {bots.map((b) => {
           const st = STATUS[b.status] ?? STATUS.off;
+          const unableUnder = b.unable_owners ?? [];
           return (
             <section
               key={b.login}
@@ -81,9 +75,18 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                     {b.metered ? "spends the shared quota" : "free, no crq quota"}
                   </div>
                 </div>
-                <span className="ml-auto shrink-0" title={st.note}>
-                  <Pill tone={st.tone}>{st.label}</Pill>
-                </span>
+                {unableUnder.length > 0 ? (
+                  <span
+                    className="ml-auto shrink-0"
+                    title={`it said it cannot review under ${unableUnder.join(", ")}`}
+                  >
+                    <Pill tone="bad">Can't review</Pill>
+                  </span>
+                ) : (
+                  <span className="ml-auto shrink-0" title={st.note}>
+                    <Pill tone={st.tone}>{st.label}</Pill>
+                  </span>
+                )}
               </header>
 
               <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
@@ -126,7 +129,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                   {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
                 </p>
 
-                {b.status === "unable" &&
+                {unableUnder.length > 0 &&
                   b.unable_at &&
                   (() => {
                     const [repo = "", number = ""] = (b.unable_on ?? "").split("#");
@@ -143,9 +146,9 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                         {b.unable_reason
                           ? `${b.unable_reason[0]?.toUpperCase()}${b.unable_reason.slice(1)}`
                           : "Cannot review"}{" "}
-                        since {ago(b.unable_at, now)}
-                        {where}. It reviews again once that is fixed with the vendor; crq notices
-                        its next answer and clears this.
+                        for {unableUnder.join(", ")} — said so {ago(b.unable_at, now)}
+                        {where}. It reviews there again once that is fixed with the vendor; this
+                        clears when crq next sees it answer there.
                       </p>
                     );
                   })()}

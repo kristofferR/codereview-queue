@@ -212,9 +212,12 @@ type BotCard struct {
 	LastAsked *time.Time `json:"last_asked,omitempty"`
 	SeenOn    string     `json:"seen_on,omitempty"`
 	RepoCount int        `json:"repo_count"`
-	// UnableAt is the newest notice in which the bot said it cannot review at
-	// all, UnableOn where crq saw it, and UnableReason what that means for this
-	// bot ("out of review credits"). Status is "unable" while no answer since.
+	// UnableOwners are the repository owners under which the bot last said it
+	// cannot review at all and has not answered since; UnableAt and UnableOn
+	// are the newest such notice and where crq saw it, and UnableReason what
+	// that means for this bot ("out of review credits"). Status is unaffected:
+	// the notice is an account fact, so a page decides per repository.
+	UnableOwners []string   `json:"unable_owners,omitempty"`
 	UnableAt     *time.Time `json:"unable_at,omitempty"`
 	UnableOn     string     `json:"unable_on,omitempty"`
 	UnableReason string     `json:"unable_reason,omitempty"`
@@ -224,8 +227,6 @@ type BotCard struct {
 	//
 	//	working    crq saw it answer within the week
 	//	quiet      it answered once, but not lately
-	//	unable     it said it cannot review at all (out of credits, usage
-	//	           limit, billing) and has not answered since
 	//	silent     crq has asked it and never seen an answer — the case that
 	//	           matters, and the whole reason answering is tracked apart
 	//	           from asking
@@ -656,14 +657,20 @@ func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) [
 			RepoCount: repoCount[key],
 			Status:    botStatus(on, seen[key], asked[key], now, answerLog),
 		}
-		if note, ok := st.CoUnable[key]; ok && (seen[key] == nil || note.At.After(*seen[key])) {
-			at := note.At
-			card.UnableAt, card.UnableOn = &at, note.Repo+"#"+itoa(int64(note.PR))
+		for owner, note := range st.CoUnable[key] {
+			if !note.Unable() {
+				continue
+			}
+			card.UnableOwners = append(card.UnableOwners, owner)
+			if card.UnableAt == nil || note.At.After(*card.UnableAt) {
+				at := note.At
+				card.UnableAt, card.UnableOn = &at, note.Repo+"#"+itoa(int64(note.PR))
+			}
+		}
+		if len(card.UnableOwners) > 0 {
+			sort.Strings(card.UnableOwners)
 			if co, ok := dialect.CoReviewerByName(login); ok {
 				card.UnableReason = co.UnableMeans
-			}
-			if on {
-				card.Status = "unable"
 			}
 		}
 		if v, ok := dialect.VendorFor(login); ok {

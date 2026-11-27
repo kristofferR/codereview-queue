@@ -1116,15 +1116,14 @@ func TestPRStateOnlyReadSkipsGitHubObservationAndPricing(t *testing.T) {
 	}
 }
 
-// A bot that said it cannot review at all — Greptile out of credits — reads as
-// unable, with what that means and where crq saw it, until it answers again.
+// A bot that said it cannot review at all — Greptile out of credits — is
+// marked for the owner it said so under, with what that means and where crq
+// saw it, until it answers there again. Both times are GitHub's.
 func TestBotCardShowsUnableUntilTheBotAnswersAgain(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	greptile := dialect.GreptileLogin
 	running := []BotName{{Login: greptile, Name: "greptile"}}
 	cfg := FleetConfig{GateRepo: "o/gate"}
-	st := state.State{}
-	st.NoteCoUnable(greptile, "o/repo", 7, now.Add(-2*time.Hour))
 	card := func(st state.State) BotCard {
 		for _, c := range botCards(st, cfg, func(string) []BotName { return running }, now) {
 			if c.Login == greptile {
@@ -1134,15 +1133,23 @@ func TestBotCardShowsUnableUntilTheBotAnswersAgain(t *testing.T) {
 		t.Fatal("no Greptile card")
 		return BotCard{}
 	}
+	st := state.State{}
+	// The pause at 10:05 is observed together with a review from 10:00.
+	st.NoteCoUnable(greptile, "o/repo", 7, now.Add(-115*time.Minute))
+	st.NoteCoAnswerSeen(greptile, "o/repo", now.Add(-2*time.Hour))
 	got := card(st)
-	if got.Status != "unable" || got.UnableReason != "out of review credits" || got.UnableOn != "o/repo#7" {
-		t.Fatalf("card = %+v, want unable: out of review credits on o/repo#7", got)
+	if len(got.UnableOwners) != 1 || got.UnableOwners[0] != "o" ||
+		got.UnableReason != "out of review credits" || got.UnableOn != "o/repo#7" {
+		t.Fatalf("card = %+v, want unable under o: out of review credits on o/repo#7", got)
 	}
-
-	answered := now.Add(-time.Hour)
-	st.Rounds = map[string]state.Round{"o/repo#8": {Repo: "o/repo", PR: 8, Head: "abcdef123",
-		CoBots: map[string]state.CoBotRound{"greptile-apps": {AnsweredAt: &answered}}}}
-	if got := card(st); got.Status == "unable" || got.UnableAt != nil {
+	// An answer under another owner says nothing about this one's credits.
+	st.NoteCoAnswerSeen(greptile, "other/repo", now.Add(-time.Minute))
+	if got := card(st); len(got.UnableOwners) != 1 {
+		t.Fatalf("an answer elsewhere must not clear the notice: %+v", got)
+	}
+	// A later answer under the same owner, even on the same head, clears it.
+	st.NoteCoAnswerSeen(greptile, "o/repo", now.Add(-time.Minute))
+	if got := card(st); len(got.UnableOwners) != 0 || got.UnableAt != nil {
 		t.Fatalf("an answer after the notice must clear it: %+v", got)
 	}
 }

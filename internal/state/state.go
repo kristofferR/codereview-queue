@@ -608,11 +608,13 @@ type State struct {
 	// observations of one review for new work. An explicitly empty entry is a
 	// reset cycle; Normalize must not reconstruct it from the archive.
 	ReviewedHeads map[string][]string `json:"reviewed_heads,omitempty"`
-	// CoUnable keeps, per reviewer, the newest notice crq observed in which it
-	// said it cannot review at all — out of credits, usage limit, billing. It
-	// is fleet-wide because those are account facts, and display-only: the
-	// decisions read the notice itself from the pull request.
-	CoUnable map[string]CoUnableNote `json:"co_unable,omitempty"`
+	// CoUnable keeps, per reviewer and repository owner, the newest notice crq
+	// observed in which the reviewer said it cannot review at all — out of
+	// credits, usage limit, billing — and the newest answer it has given there
+	// since. Keyed by owner because those are account facts and an account is
+	// the closest thing GitHub shows. Display-only: decisions read the notice
+	// itself from the pull request.
+	CoUnable map[string]map[string]CoUnableNote `json:"co_unable,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -1461,25 +1463,53 @@ func (s *State) CoReviewerAnswered(repo string, pr int, login string) bool {
 	return false
 }
 
-// CoUnableNote is one reviewer's newest cannot-review notice and where crq
-// saw it.
+// CoUnableNote is a reviewer's newest cannot-review notice under one owner,
+// where crq saw it, and the newest answer the reviewer has given under that
+// owner. Both times are GitHub's, so they compare.
 type CoUnableNote struct {
-	At   time.Time `json:"at"`
-	Repo string    `json:"repo"`
-	PR   int       `json:"pr"`
+	At         time.Time `json:"at"`
+	Repo       string    `json:"repo"`
+	PR         int       `json:"pr"`
+	AnsweredAt time.Time `json:"answered_at,omitempty"`
 }
 
-// NoteCoUnable records login's cannot-review notice if it is newer than the
-// one on record, and reports whether it was.
+// Unable reports whether the notice still stands: no answer since.
+func (n CoUnableNote) Unable() bool { return n.At.After(n.AnsweredAt) }
+
+func repoOwner(repo string) string {
+	owner, _, _ := strings.Cut(strings.ToLower(repo), "/")
+	return owner
+}
+
+// NoteCoUnable records login's cannot-review notice on repo if it is newer
+// than the one on record for that owner, and reports whether it was.
 func (s *State) NoteCoUnable(login, repo string, pr int, at time.Time) bool {
-	login = coBotKey(login)
-	if cur, ok := s.CoUnable[login]; ok && !at.After(cur.At) {
+	login, owner := coBotKey(login), repoOwner(repo)
+	cur, ok := s.CoUnable[login][owner]
+	if ok && !at.After(cur.At) {
 		return false
 	}
 	if s.CoUnable == nil {
-		s.CoUnable = map[string]CoUnableNote{}
+		s.CoUnable = map[string]map[string]CoUnableNote{}
 	}
-	s.CoUnable[login] = CoUnableNote{At: at.UTC(), Repo: strings.ToLower(repo), PR: pr}
+	if s.CoUnable[login] == nil {
+		s.CoUnable[login] = map[string]CoUnableNote{}
+	}
+	cur.At, cur.Repo, cur.PR = at.UTC(), strings.ToLower(repo), pr
+	s.CoUnable[login][owner] = cur
+	return true
+}
+
+// NoteCoAnswerSeen records that login answered on repo at at, which clears an
+// earlier notice under that owner. It writes only where a notice exists.
+func (s *State) NoteCoAnswerSeen(login, repo string, at time.Time) bool {
+	login, owner := coBotKey(login), repoOwner(repo)
+	cur, ok := s.CoUnable[login][owner]
+	if !ok || !at.After(cur.AnsweredAt) {
+		return false
+	}
+	cur.AnsweredAt = at.UTC()
+	s.CoUnable[login][owner] = cur
 	return true
 }
 

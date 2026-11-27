@@ -316,8 +316,8 @@ func TestGreptileCreditPauseIsRecordedForTheDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	note, ok := st.CoUnable[dialect.NormalizeBotName(greptileLogin)]
-	if !ok || note.Repo != repo || note.PR != pr || !note.At.Equal(base.Add(-time.Minute)) {
+	note, ok := st.CoUnable[dialect.NormalizeBotName(greptileLogin)]["o"]
+	if !ok || !note.Unable() || note.Repo != repo || note.PR != pr || !note.At.Equal(base.Add(-time.Minute)) {
 		t.Fatalf("CoUnable = %+v, want the credit pause on %s#%d", st.CoUnable, repo, pr)
 	}
 }

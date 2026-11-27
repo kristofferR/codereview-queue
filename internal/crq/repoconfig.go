@@ -45,6 +45,8 @@ type ReviewerDetail struct {
 	Budget   string `json:"budget"`
 	Required bool   `json:"required"`
 	Trigger  string `json:"trigger,omitempty"`
+	// Once says it reviews each pull request once rather than every push.
+	Once bool `json:"once,omitempty"`
 }
 
 // Reviewers reports the reviewers that will run on repo.
@@ -80,9 +82,43 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 			Budget:   string(r.Budget),
 			Required: r.Required,
 			Trigger:  string(r.Trigger),
+			Once:     containsBot(cfg.OnceBots, r.Login),
 		})
 	}
 	return view, nil
+}
+
+// SetReviewOnce records which reviewers review each pull request on repo once
+// rather than every push, replacing CRQ_REVIEW_ONCE there. An empty list means
+// every reviewer reviews every push. It changes nothing already reviewed, so
+// no round is reopened: the next head simply follows the new list.
+func (s *Service) SetReviewOnce(ctx context.Context, repo string, once []string) (ReviewerView, error) {
+	repo = NormalizeRepo(repo)
+	if err := s.CheckReviewOnce(ctx, repo, once); err != nil {
+		return ReviewerView{}, err
+	}
+	now := s.clock().UTC()
+	state, err := s.store.Update(ctx, func(st *State) error {
+		resolved, err := resolveOnceLogins(once, s.cfgFor(*st, repo).Bot, "--once")
+		if err != nil {
+			return err
+		}
+		ov, _ := st.RepoOverride(repo)
+		if ov.SetOnce && sameLogins(ov.Once, resolved) {
+			return ErrNoChange
+		}
+		ov.Once, ov.SetOnce = resolved, true
+		ov.UpdatedAt, ov.By = &now, s.cfg.Host
+		st.SetRepoOverride(repo, ov)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return ReviewerView{}, err
+	}
+	if err == nil {
+		s.sync(ctx, state)
+	}
+	return s.Reviewers(ctx, repo)
 }
 
 // SetReviewers records which co-reviewers run on repo and which of them gate
@@ -255,7 +291,7 @@ func (s *Service) applyReviewerEdit(
 }
 
 func repoOverrideEmpty(ov RepoReviewers) bool {
-	return !ov.SetCoBots && !ov.SetRequired && !ov.PrimaryOff
+	return !ov.SetCoBots && !ov.SetRequired && !ov.PrimaryOff && !ov.SetOnce
 }
 
 // ClearReviewers returns repo to the fleet default.
@@ -754,6 +790,32 @@ func resolveRequiredLoginsPreserving(list []string, primary string, existing []s
 		allowed[strings.ToLower(login)] = login
 	}
 	return resolveBotList(allowed, list, "--required")
+}
+
+// CheckReviewOnce validates a once list for repo without writing it, so a
+// command that also changes other reviewer settings can refuse a bad list
+// before it changes anything.
+func (s *Service) CheckReviewOnce(ctx context.Context, repo string, once []string) error {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return err
+	}
+	loaded, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = resolveOnceLogins(once, s.cfgFor(loaded, repo).Bot, "--once")
+	return err
+}
+
+// resolveOnceLogins accepts the co-reviewers and the primary: either may be
+// set to review each pull request once.
+func resolveOnceLogins(list []string, primary, what string) ([]string, error) {
+	allowed := coReviewerNames()
+	if primary != "" {
+		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	return resolveBotList(allowed, list, what)
 }
 
 // coReviewerNames maps every accepted spelling to its login. Each bot appears

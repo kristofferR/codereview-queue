@@ -65,14 +65,20 @@ export function SetupPage({
                       <span className="ml-auto">
                         <Pill
                           tone={
-                            b.status === "working" ? "ok" : b.status === "silent" ? "bad" : "mut"
+                            (b.unable_owners?.length ?? 0) > 0 || b.status === "silent"
+                              ? "bad"
+                              : b.status === "working"
+                                ? "ok"
+                                : "mut"
                           }
                         >
-                          {b.status === "working"
-                            ? "working"
-                            : b.status === "silent"
-                              ? "never answered"
-                              : "not verified"}
+                          {(b.unable_owners?.length ?? 0) > 0
+                            ? (b.unable_reason ?? "can't review")
+                            : b.status === "working"
+                              ? "working"
+                              : b.status === "silent"
+                                ? "never answered"
+                                : "not verified"}
                         </Pill>
                       </span>
                     </li>

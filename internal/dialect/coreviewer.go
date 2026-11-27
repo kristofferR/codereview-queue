@@ -4,8 +4,8 @@ import "strings"
 
 // A co-reviewer is a review bot that is not the configured primary reviewer
 // and does not spend CodeRabbit account quota: Codex, Cursor Bugbot,
-// Macroscope. This file is the static registry of the co-reviewers crq knows —
-// deliberately not a plugin system. Adding a bot means one entry here, its
+// Macroscope, Greptile. This file is the static registry of the co-reviewers
+// crq knows — deliberately not a plugin system. Adding a bot means one entry here, its
 // wording helpers in its own file, corpus files, and golden rows; engine/state/
 // crq consume only the registry's structure, never the wording.
 
@@ -106,6 +106,12 @@ type CoReviewer struct {
 	// metered primary — but it is stated rather than assumed so the queue rules
 	// can read it off the registry.
 	Budget Budget
+	// DefaultOnce makes the bot review each pull request once, rather than
+	// every push, unless CRQ_REVIEW_ONCE or a repository says otherwise.
+	DefaultOnce bool
+	// UnableMeans says, for a person, what this bot's cannot-review notice
+	// (EvCoUnable or CheckUnable) means; "" when it has none.
+	UnableMeans string
 
 	// ClassifyComment classifies an issue comment authored by this bot.
 	// Kind EvOther means "no special meaning" (may still be actionable text).
@@ -126,7 +132,7 @@ type CoReviewer struct {
 	FindingDedupeKey func(body string) (string, bool)
 	// Price estimates what one review of this diff costs. Nil means the bot
 	// charges nothing per review — it is covered by a subscription — which is
-	// true of every co-reviewer here except Macroscope.
+	// true of every co-reviewer here except Macroscope and Greptile.
 	Price func(d DiffStat) CostEstimate
 }
 
@@ -164,6 +170,7 @@ func KnownCoReviewers() []CoReviewer {
 			// Codex predates the registry: its command env var is still read,
 			// and it only ever triggered at fire time when required.
 			LegacyCommandEnv: "CRQ_CODEX_CMD",
+			UnableMeans:      "usage limit reached",
 			DefaultTrigger:   "never",
 			RequiredTrigger:  "always",
 			ClassifyComment: func(body string) CoEvent {
@@ -213,12 +220,34 @@ func KnownCoReviewers() []CoReviewer {
 			AppSlug:         "macroscopeapp",
 			Command:         "@macroscope-app review",
 			Budget:          BudgetNone,
+			UnableMeans:     "billing issue — the workspace cannot pay for reviews",
 			DefaultTrigger:  "selfheal",
 			ClassifyComment: ClassifyMacroscopeComment,
 			ClassifyCheck:   ClassifyMacroscopeCheck,
 			ResolvedInSHA:   MacroscopeResolvedInSHA,
-			// The one co-reviewer that bills per review rather than per seat.
+			// Bills per kilobyte of diff rather than per seat.
 			Price: EstimateMacroscope,
+		},
+		{
+			Login:   GreptileLogin,
+			Name:    "greptile",
+			AppSlug: "greptile-apps",
+			// The spelling Greptile has answered with a 👍 on our PRs; its docs
+			// also accept the alias.
+			Command:        "@greptile",
+			TriggerAliases: []string{"@greptileai"},
+			Budget:         BudgetNone,
+			// Greptile reviews a pull request once, when it opens, unless the
+			// repository opts into reviews on every push, and every command
+			// spends a credit. So it defaults to once per pull request, and when
+			// set to review every push crq asks for each head it missed.
+			DefaultOnce:     true,
+			UnableMeans:     "out of review credits",
+			DefaultTrigger:  "selfheal",
+			RequiredTrigger: "always",
+			ClassifyComment: ClassifyGreptileComment,
+			ClassifyCheck:   ClassifyGreptileCheck,
+			Price:           EstimateGreptile,
 		},
 	}
 }

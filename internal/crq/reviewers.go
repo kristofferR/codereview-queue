@@ -193,6 +193,9 @@ func (c Config) evidenceBots() map[string]struct{} {
 // per-repo primary would mean per-repo classifiers — a much larger change than
 // "which co-reviewers run here", which is what the request actually is.
 func (c Config) ForRepo(ov RepoReviewers) Config {
+	if ov.SetOnce {
+		c.OnceBots = append([]string(nil), ov.Once...)
+	}
 	if !ov.SetCoBots && !ov.SetRequired && !ov.PrimaryOff {
 		return c
 	}

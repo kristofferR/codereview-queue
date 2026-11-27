@@ -1125,8 +1125,8 @@ USAGE
   crq unhold <repo> <pr>           put it back in the queue
   crq tidy <repo> <pr> [--dry-run] remove crq's own spent review-trigger comments
   crq reviewers <repo>             which bots review this project (and what each costs)
-  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
-                                   choose this project's reviewers (either flag alone)
+  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] [--once <a,b>]
+                                   choose this project's reviewers (any flag alone)
   crq reviewers clear <repo>       go back to the fleet default
   crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
   crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
@@ -1625,7 +1625,7 @@ Set CRQ_TIDY=1 to run it automatically as reviewers finish under crq autoreview.
 `)
 	case "reviewers":
 		fmt.Print(`crq reviewers <repo>
-crq reviewers set <repo> [--bots <login,...>] [--required <login,...>] [--primary|--no-primary]
+crq reviewers set <repo> [--bots <login,...>] [--required <login,...>] [--once <login,...>] [--primary|--no-primary]
 crq reviewers clear <repo>
 
 Which bots review one project, and what each of them costs.
@@ -1641,7 +1641,12 @@ a round WAITS for a reviewer is --required, whatever the reviewer costs.
           off or on here. Each flag alone updates only its own half. An empty
           --bots means none here, which is a different answer from not setting
           it at all; an empty --required is refused, because a round that gates
-          on nobody converges before any reviewer runs.
+          on nobody converges before any reviewer runs. --once chooses which
+          reviewers review each pull request once instead of every push:
+          after a first review crq neither asks them again nor waits for them,
+          though their open findings still count. An empty --once means every
+          reviewer reviews every push here. Fleet-wide it is CRQ_REVIEW_ONCE
+          (default: greptile).
   clear   drops the override so the repository follows the fleet again.
 
 The configuration lives in the shared state ref, not in a file the repository
@@ -1992,7 +1997,7 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 		action, rest = args[0], args[1:]
 	}
 	var repo string
-	var bots, required *string
+	var bots, required, once *string
 	var primary *bool
 	setPrimary := func(on bool) { primary = &on }
 	for i := 0; i < len(rest); i++ {
@@ -2004,17 +2009,20 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 			setPrimary(false)
 		case arg == "--primary":
 			setPrimary(true)
-		case arg == "--bots", arg == "--required":
+		case arg == "--bots", arg == "--required", arg == "--once":
 			if i+1 >= len(rest) {
 				fatal(fmt.Errorf("%s needs a value", arg))
 				return 1
 			}
 			value := rest[i+1]
 			i++
-			if arg == "--bots" {
+			switch arg {
+			case "--bots":
 				bots = &value
-			} else {
+			case "--required":
 				required = &value
+			default:
+				once = &value
 			}
 		case strings.HasPrefix(arg, "--bots="):
 			value := strings.TrimPrefix(arg, "--bots=")
@@ -2022,6 +2030,9 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 		case strings.HasPrefix(arg, "--required="):
 			value := strings.TrimPrefix(arg, "--required=")
 			required = &value
+		case strings.HasPrefix(arg, "--once="):
+			value := strings.TrimPrefix(arg, "--once=")
+			once = &value
 		case strings.HasPrefix(arg, "-"):
 			fatal(fmt.Errorf("unknown flag %s (usage: crq reviewers set <repo> --bots <a,b>)", arg))
 			return 1
@@ -2043,23 +2054,33 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 	case "clear":
 		// Ignoring a mutation flag here would turn a malformed automation call
 		// like `reviewers clear repo --bots codex` into a silent wipe.
-		if bots != nil || required != nil || primary != nil {
-			fatal(errors.New("clear takes no --bots/--required/--primary (it drops the whole override)"))
+		if bots != nil || required != nil || once != nil || primary != nil {
+			fatal(errors.New("clear takes no --bots/--required/--once/--primary (it drops the whole override)"))
 			return 1
 		}
 		view, err = service.ClearReviewers(ctx, repo)
 	case "set":
-		if bots == nil && required == nil && primary == nil {
-			fatal(errors.New("set needs --bots, --required or --primary/--no-primary (crq reviewers clear <repo> drops the override)"))
+		if bots == nil && required == nil && once == nil && primary == nil {
+			fatal(errors.New("set needs --bots, --required, --once or --primary/--no-primary (crq reviewers clear <repo> drops the override)"))
 			return 1
 		}
-		view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required), primary)
+		if once != nil {
+			if err = service.CheckReviewOnce(ctx, repo, splitList(once)); err != nil {
+				break
+			}
+		}
+		if bots != nil || required != nil || primary != nil {
+			view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required), primary)
+		}
+		if err == nil && once != nil {
+			view, err = service.SetReviewOnce(ctx, repo, splitList(once))
+		}
 	default:
 		// `crq reviewers owner/repo --bots codex` is a set command missing its
 		// verb. Showing the configuration and exiting 0 tells automation the
 		// mutation worked when nothing changed.
-		if bots != nil || required != nil || primary != nil {
-			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required/--primary only apply to set"))
+		if bots != nil || required != nil || once != nil || primary != nil {
+			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required/--once/--primary only apply to set"))
 			return 1
 		}
 		view, err = service.Reviewers(ctx, repo)

@@ -29,8 +29,8 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   classifiers (`IsReviewFindingWithdrawn`/`IsReviewFindingRetained`) that let
   crq read a bot's rebuttal to a declined finding; SHA/severity vocabulary; the
   `Finding` type (frozen JSON tags); the typed `BotEvent`/`Classifier`. Also the
-  **co-reviewer registry** (`coreviewer.go` + `bugbot.go`/`macroscope.go`): the
-  static `KnownCoReviewers()` list — Codex, Cursor Bugbot, Macroscope — each
+  **co-reviewer registry** (`coreviewer.go` + `bugbot.go`/`macroscope.go`/`greptile.go`): the
+  static `KnownCoReviewers()` list — Codex, Cursor Bugbot, Macroscope, Greptile — each
   carrying its login, config name, check-run app slug, trigger command, and its
   wording hooks (`ClassifyComment`, `ClassifyCheck`, `ResolvedInSHA`,
   `FindingDedupeKey`, `Price`, …). The only place a bot's literal wording may
@@ -51,7 +51,7 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   `serve` receives narrow interfaces wired by `cmd/crq`.
 - `internal/state/` — persisted schema v7: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
-  per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,
+  per-repository records (`Repos` reviewer overrides incl. `PrimaryOff` and `Once`,
   `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped
   whenever one of those records starts changing decisions, so a fleet running
   two binary versions can name the hosts that will ignore a new one. Round transition
@@ -182,7 +182,7 @@ When a bot ships a new phrasing that crq must recognise, change three things and
 nothing else:
 
 1. the matching classifier/parser in `internal/dialect` (`coderabbit.go`,
-   `codex.go`, `bugbot.go`, `macroscope.go`, or `common.go`);
+   `codex.go`, `bugbot.go`, `macroscope.go`, `greptile.go`, or `common.go`);
 2. one corpus file under `internal/dialect/testdata/<bot>/` holding the real
    message, captured verbatim;
 3. one row in `TestGoldenClassification` / `TestGoldenCoReviewers` /

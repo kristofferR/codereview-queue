@@ -787,7 +787,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "idle"}, nil
 	}
 	cfg := s.cfgFor(st, next.Repo)
-	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, collectPosted(st, next.Repo, next.PR).commands, now)
+	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, collectPosted(st, next.Repo, next.PR).commands, reviewerAnswers(st, cfg, next.Repo, next.PR), now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -896,7 +896,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// the cost instead.
 		scanned++
 		cfg := s.cfgFor(st, round.Repo)
-		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, collectPosted(st, round.Repo, round.PR).commands, now)
+		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, collectPosted(st, round.Repo, round.PR).commands, reviewerAnswers(st, cfg, round.Repo, round.PR), now)
 		if err != nil {
 			continue
 		}
@@ -966,7 +966,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		return PumpResult{}, false, nil
 	}
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, reviewerAnswers(st, cfg, repo, pr), now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -1272,7 +1272,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		return PumpResult{}, err
 	}
 	cfg := s.cfgFor(st, slot.Repo)
-	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, collectPosted(st, slot.Repo, slot.PR).commands, now)
+	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, collectPosted(st, slot.Repo, slot.PR).commands, reviewerAnswers(st, cfg, slot.Repo, slot.PR), now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -1544,7 +1544,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	target := &candidates[index]
 	s.lastReviewSweep = QueueKey(target.Repo, target.PR)
 	cfg := s.cfgFor(st, target.Repo)
-	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, now)
+	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, reviewerAnswers(st, cfg, target.Repo, target.PR), now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
@@ -3228,7 +3228,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			primaryUnavailable = report.PrimaryUnavailable
+			primaryUnavailable = report.quotaFree()
 			// Return current-head findings immediately, plus a delayed review
 			// attached to the previous commit when it actually arrived after this
 			// round was queued. The latter is real new feedback, not the old carried
@@ -3578,14 +3578,28 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	if s.cfg.DryRun {
 		return nil, nil // DryRun writes nothing, bookkeeping included
 	}
-	var active []string
+	var active, prAnswers []string
 	answered := map[string]bool{}
+	unable, answeredAt := map[string]time.Time{}, map[string]time.Time{}
 	for _, cb := range cfg.CoBots {
 		// Setup status is not head-scoped: activity on an earlier head still
 		// proves that the reviewer is installed and working.
-		if engine.CoReviewerActive(obs, cb.Login) {
+		answer := engine.CoAnsweredRound(round, obs, cb.Login)
+		if answer || engine.CoReviewerActive(obs, cb.Login) {
 			active = append(active, cb.Login)
-			answered[dialect.NormalizeBotName(cb.Login)] = engine.CoReviewedRound(round, obs, cb.Login)
+			answered[dialect.NormalizeBotName(cb.Login)] = answer
+		}
+		// An answer to the pull request that names no head this round can
+		// claim. It is recorded for the pull request alone — never against a
+		// head's review budget — so a reviewer set to review once stays done.
+		if !answer && engine.CoAnsweredPR(obs, cb.Login) {
+			prAnswers = append(prAnswers, cb.Login)
+		}
+		if at, ok := engine.CoUnableAt(obs, cb.Login); ok {
+			unable[cb.Login] = at
+		}
+		if at, ok := engine.CoLatestAnswerAt(obs, cb.Login); ok {
+			answeredAt[cb.Login] = at
 		}
 	}
 	primary := cfg.Bot != "" &&
@@ -3594,13 +3608,31 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	for _, didAnswer := range answered {
 		reviewed = reviewed || (cfg.MaxReviewRounds > 0 && didAnswer)
 	}
-	if len(active) == 0 && !primary {
+	if len(active) == 0 && !primary && len(prAnswers) == 0 && len(unable) == 0 {
 		return nil, nil
 	}
 	newSettledCommand := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		newSettledCommand = false
 		budgetChanged := reviewed && st.NoteReviewedHead(round.Repo, round.PR, round.Head)
+		// Pull-request and fleet indexes that change nothing about a round.
+		indexChanged := false
+		for _, login := range prAnswers {
+			if !st.CoReviewerAnswered(round.Repo, round.PR, login) {
+				st.RememberCoAnswer(round.Repo, round.PR, login, now)
+				indexChanged = true
+			}
+		}
+		for login, at := range unable {
+			if st.NoteCoUnable(login, round.Repo, round.PR, at) {
+				indexChanged = true
+			}
+		}
+		for login, at := range answeredAt {
+			if st.NoteCoAnswerSeen(login, round.Repo, at) {
+				indexChanged = true
+			}
+		}
 		noteHistorical := func(r *Round) {
 			for _, login := range active {
 				if answered[dialect.NormalizeBotName(login)] {
@@ -3619,7 +3651,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				}
 				before := archived.CoBots
 				noteHistorical(archived)
-				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) && !budgetChanged {
+				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) && !budgetChanged && !indexChanged {
 					return ErrNoChange
 				}
 				st.RememberCoActivity(*archived)
@@ -3630,7 +3662,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
 			noteHistorical(&round)
-			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) && !budgetChanged {
+			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) && !budgetChanged && !indexChanged {
 				return ErrNoChange
 			}
 			st.RememberCoActivity(round)
@@ -3652,6 +3684,11 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				}
 			}
 			if sameCoActivity(before, r.CoBots) && !answerChanged && !budgetChanged {
+				if indexChanged {
+					// Only a pull-request or fleet index changed: nothing
+					// about this round is new, so it must not be reopened.
+					return nil
+				}
 				return ErrNoChange
 			}
 			if r.Phase == PhaseCompleted {
@@ -3682,7 +3719,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			}
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
-		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged {
+		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged && !indexChanged {
 			return ErrNoChange
 		}
 		st.PutRound(*r)

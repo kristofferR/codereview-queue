@@ -144,17 +144,27 @@ commit do not block after fixes are pushed; the next current-head review superse
 the finding again.
 
 `crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. Alongside it
-crq runs its **co-reviewers** — Codex, Cursor Bugbot and Macroscope (`CRQ_COBOTS`, all enabled by
-default). None of them spends CodeRabbit quota or takes the fire slot. Each has a trigger mode
+crq runs its **co-reviewers** — Codex, Cursor Bugbot, Macroscope and Greptile (`CRQ_COBOTS`, all
+enabled by default). None of them spends CodeRabbit quota or takes the fire slot. Each has a trigger mode
 (`CRQ_COBOT_<NAME>_TRIGGER`): `always` posts its command in the same fire step, `selfheal` (the
 Bugbot/Macroscope default) only nudges a bot that reviews on its own but missed the head past
-`CRQ_COBOT_<NAME>_GRACE`, and `never` posts nothing. crq never triggers a bot that auto-reviews, has
+`CRQ_COBOT_<NAME>_GRACE`, and `never` posts nothing. Codex defaults to `always` when required and
+`never` otherwise. crq never triggers a bot that auto-reviews, has
 already reviewed the head, or has a check run in flight. A co-reviewer that joins a round uninvited
 gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit, or a
 check run reporting the bot cannot review the commit, releases the dynamic gate); one listed in
 `CRQ_REQUIRED_BOTS` always gates. When a bot answers crq's command with a failure notice (Codex's
 "Something went wrong. Try again later"), crq re-posts the command after two minutes, at most twice
 per round.
+
+Each reviewer, CodeRabbit included, reviews every push or each PR once. `CRQ_REVIEW_ONCE` lists the
+once reviewers (default `greptile`; empty means every push for all; fleet-wide via
+`crq fleet env CRQ_REVIEW_ONCE <a,b>`), and `crq reviewers set REPO --once <a,b>` overrides it per
+repository. After a once reviewer's first review anywhere on the PR, crq neither asks it again nor
+waits for it on later heads; for CodeRabbit that means no further fire or quota. Its unresolved
+findings still block, and resolving them queues no confirmation pass. Its thread-less findings stay
+bound to the head they were reported on and are not re-reported after a push: fix or dismiss first. Greptile is once by default because it reviews a PR when it opens and every
+`@greptile` spends a prepaid credit; set to every push, it is nudged for each head it missed.
 
 The persisted feedback deadline bounds unattended rounds too. Once it expires, crq retires the
 same-head round without re-firing it, even if no interactive `crq loop` remains to observe the
@@ -172,8 +182,11 @@ Explicit reviewer withdrawal counts as confirmation. One-pass campaigns keep the
 limit. `feedback` remains non-triggering. Schema v7 preserves v5/v6 state but fences older clients
 that would accept stale evidence, so upgrade every fleet host together.
 
-Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
-nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
+Bugbot, Macroscope and Greptile report through **check runs** as well as comments — a clean Bugbot
+round posts nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges
+on. A clean Greptile review submits no review object; its `Greptile Review` check and its summary
+comment naming the reviewed commit are the evidence. Greptile's summary also lists the findings its
+threads carry, so crq surfaces each one once, from its thread.
 `.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
 (`clean|issues|in_progress|failed|unable|unknown` — `failed` is a crashed run crq re-triggers,
 `unable` a bot that reported it cannot review this commit at all, which crq stops waiting for and
@@ -357,11 +370,13 @@ crq cost REPO PR
 
 `.low`/`.high` bound it in US dollars; `.exact` is true only when every reviewer's figure is a real
 number; `.unpriced[]` names reviewers crq has no pricing for, so the total is a floor;
-`.reviewers[].basis` is the sentence explaining each figure. Only two reviewers can cost anything —
+`.reviewers[].basis` is the sentence explaining each figure. Three reviewers can cost anything —
 Macroscope bills per KB of diff with a 10 KB minimum (so under ~85 changed lines the $0.50 floor IS
 the price and the estimate is exact), and CodeRabbit bills per reviewed file only once the plan
 allowance is spent AND usage-based reviews are enabled — and since crq does not yet learn which,
-a spent allowance reports the primary as unpriced rather than free. Codex and Cursor Bugbot are covered by their
+a spent allowance reports the primary as unpriced rather than free. Greptile spends prepaid credits
+whatever the diff size — 1 ($1) for a Base review up to 10 for Apex — and crq cannot see the
+repository's tier, so it reports that band. Codex and Cursor Bugbot are covered by their
 own subscriptions. The diff basis is the whole head, so this is exact on a PR's first Macroscope
 review and an upper bound after that. `.prices_checked_at` is when the published figures were last
 verified against the vendors.
@@ -471,6 +486,8 @@ crq reviewers REPO                                    # effective reviewers + bu
 crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
 crq reviewers set REPO --no-primary                   # CodeRabbit does not review this project
 crq reviewers set REPO --primary                      # ...and back on
+crq reviewers set REPO --once coderabbitai,greptile   # each reviews a PR once, not every push
+crq reviewers set REPO --once ""                      # every reviewer reviews every push here
 crq reviewers clear REPO                              # fleet default again
 ```
 

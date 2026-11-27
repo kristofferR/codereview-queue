@@ -229,6 +229,12 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	if PrimaryReviewUnavailable(obs, p, obs.Head) {
 		return coAwareDedupe(r, obs, p, now, true)
 	}
+	// The primary reviews each pull request once and already has: later heads
+	// are the co-reviewers' alone, and resolve before the quota gates for the
+	// same reason a reviewed head does below.
+	if p.doneForPR(obs, p.Bot) {
+		return coAwareDedupe(r, obs, p, now, false)
+	}
 	reviewedHead := false
 	for _, review := range obs.Reviews {
 		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
@@ -388,11 +394,19 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	var post []string
 	wait := false
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
+	// A primary that reviews each pull request once and already has never
+	// fires on this head, so the fire step that would have asked always-mode
+	// co-reviewers never runs: ask them here instead.
+	primaryDone := !primaryUnavailable && p.doneForPR(obs, p.Bot)
 	for _, cp := range p.coReviewers() {
+		if p.doneForPR(obs, cp.Login) {
+			continue
+		}
 		co := obs.co(cp.Login)
 		carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
 		checksUnknown := r.FiredAt != nil && co.ChecksUnknown
-		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable || r.ForceCoReviewer(cp.Login)
+		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable ||
+			r.ForceCoReviewer(cp.Login) || (primaryDone && cp.Trigger == TriggerAlways)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -414,11 +428,14 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// it reports the bot, and so the primary, unfinished — leaving Loop to
 		// time out and requeue into the same cycle. A bounded wait is the
 		// honest state: the bot has not spoken, and the deadline ends it.
-		if primaryUnavailable && requiredBot(p, cp.Login) {
+		if (primaryUnavailable || primaryDone) && requiredBot(p, cp.Login) {
 			wait = true
 		}
 	}
 	delivered := "primary reviewed head"
+	if p.doneForPR(obs, p.Bot) {
+		delivered = "primary already reviewed this pull request once"
+	}
 	if primaryUnavailable {
 		if p.PrimaryOff {
 			delivered = "primary disabled for this repository"
@@ -432,7 +449,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	if wait {
 		return FireDecision{Verdict: FireCoReviewWait, Reason: "awaiting co-review"}
 	}
-	if primaryUnavailable {
+	if primaryUnavailable || p.doneForPR(obs, p.Bot) {
 		return FireDecision{Verdict: FireDedupe, Reason: delivered + "; no co-review outstanding"}
 	}
 	return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}

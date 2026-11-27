@@ -608,6 +608,13 @@ type State struct {
 	// observations of one review for new work. An explicitly empty entry is a
 	// reset cycle; Normalize must not reconstruct it from the archive.
 	ReviewedHeads map[string][]string `json:"reviewed_heads,omitempty"`
+	// CoUnable keeps, per reviewer and repository owner, the newest notice crq
+	// observed in which the reviewer said it cannot review at all — out of
+	// credits, usage limit, billing — and the newest answer it has given there
+	// since. Keyed by owner because those are account facts and an account is
+	// the closest thing GitHub shows. Display-only: decisions read the notice
+	// itself from the pull request.
+	CoUnable map[string]map[string]CoUnableNote `json:"co_unable,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -692,7 +699,7 @@ const SchemaVersion = 7
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 18
+const WriterCaps = 19
 
 // CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
 // daemons do not recognise that terminal same-head marker and could otherwise
@@ -873,10 +880,14 @@ type RepoReviewers struct {
 	// round alone. There is no "set" companion because false IS the default —
 	// the primary runs unless a repository says otherwise.
 	PrimaryOff bool `json:"primary_off,omitempty"`
-	// SetCoBots/SetRequired record whether each list was set at all, so
+	// Once are the logins that review each pull request once here rather than
+	// every push, replacing CRQ_REVIEW_ONCE.
+	Once []string `json:"once,omitempty"`
+	// SetCoBots/SetRequired/SetOnce record whether each list was set at all, so
 	// "explicitly none" survives a JSON round trip that drops empty slices.
 	SetCoBots   bool       `json:"set_cobots,omitempty"`
 	SetRequired bool       `json:"set_required,omitempty"`
+	SetOnce     bool       `json:"set_once,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 	By          string     `json:"by,omitempty"`
 
@@ -1446,6 +1457,83 @@ func (s *State) CoReviewerAnswered(repo string, pr int, login string) bool {
 	for i := range s.Archive {
 		round := &s.Archive[i]
 		if Key(round.Repo, round.PR) == key && round.Co(login).AnsweredAt != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// CoUnableNote is a reviewer's newest cannot-review notice under one owner,
+// where crq saw it, and the newest answer the reviewer has given under that
+// owner. Both times are GitHub's, so they compare.
+type CoUnableNote struct {
+	At         time.Time `json:"at"`
+	Repo       string    `json:"repo"`
+	PR         int       `json:"pr"`
+	AnsweredAt time.Time `json:"answered_at,omitempty"`
+
+	// unknown carries members a newer binary added inside a note; "co_unable"
+	// is a member this binary recognises, so the State carrier cannot.
+	unknown unknownFields
+}
+
+// Unable reports whether the notice still stands: no answer since.
+func (n CoUnableNote) Unable() bool { return n.At.After(n.AnsweredAt) }
+
+func repoOwner(repo string) string {
+	owner, _, _ := strings.Cut(strings.ToLower(repo), "/")
+	return owner
+}
+
+// NoteCoUnable records login's cannot-review notice on repo if it is newer
+// than the one on record for that owner, and reports whether it was.
+func (s *State) NoteCoUnable(login, repo string, pr int, at time.Time) bool {
+	login, owner := coBotKey(login), repoOwner(repo)
+	cur, ok := s.CoUnable[login][owner]
+	if ok && !at.After(cur.At) {
+		return false
+	}
+	if s.CoUnable == nil {
+		s.CoUnable = map[string]map[string]CoUnableNote{}
+	}
+	if s.CoUnable[login] == nil {
+		s.CoUnable[login] = map[string]CoUnableNote{}
+	}
+	cur.At, cur.Repo, cur.PR = at.UTC(), strings.ToLower(repo), pr
+	s.CoUnable[login][owner] = cur
+	return true
+}
+
+// NoteCoAnswerSeen records that login answered on repo at at, which clears an
+// earlier notice under that owner. It writes only where a notice exists.
+func (s *State) NoteCoAnswerSeen(login, repo string, at time.Time) bool {
+	login, owner := coBotKey(login), repoOwner(repo)
+	cur, ok := s.CoUnable[login][owner]
+	if !ok || !at.After(cur.AnsweredAt) {
+		return false
+	}
+	cur.AnsweredAt = at.UTC()
+	s.CoUnable[login][owner] = cur
+	return true
+}
+
+// ReviewerAnswered reports durable completed-review evidence for login on this
+// pull request, as a co-reviewer or as the primary — what a reviewer that
+// reviews each pull request once is measured against once GitHub's own record
+// is out of view.
+func (s *State) ReviewerAnswered(repo string, pr int, login string) bool {
+	if s.CoReviewerAnswered(repo, pr, login) {
+		return true
+	}
+	key, login := Key(repo, pr), coBotKey(login)
+	answered := func(r Round) bool {
+		return r.PrimaryAnsweredAt != nil && coBotKey(r.PrimaryAnsweredBy) == login
+	}
+	if round := s.Round(repo, pr); round != nil && answered(*round) {
+		return true
+	}
+	for i := range s.Archive {
+		if Key(s.Archive[i].Repo, s.Archive[i].PR) == key && answered(s.Archive[i]) {
 			return true
 		}
 	}

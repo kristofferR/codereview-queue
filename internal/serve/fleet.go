@@ -212,6 +212,15 @@ type BotCard struct {
 	LastAsked *time.Time `json:"last_asked,omitempty"`
 	SeenOn    string     `json:"seen_on,omitempty"`
 	RepoCount int        `json:"repo_count"`
+	// UnableOwners are the repository owners under which the bot last said it
+	// cannot review at all and has not answered since; UnableAt and UnableOn
+	// are the newest such notice and where crq saw it, and UnableReason what
+	// that means for this bot ("out of review credits"). Status is unaffected:
+	// the notice is an account fact, so a page decides per repository.
+	UnableOwners []string   `json:"unable_owners,omitempty"`
+	UnableAt     *time.Time `json:"unable_at,omitempty"`
+	UnableOn     string     `json:"unable_on,omitempty"`
+	UnableReason string     `json:"unable_reason,omitempty"`
 
 	// Status is what crq can honestly say about setup, from its OWN records —
 	// a trigger it posted, a claim it saw — never a status read from the vendor:
@@ -417,7 +426,7 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 	}
 	for repo, rv := range st.Repos {
 		row := get(repo)
-		row.Override = rv.SetCoBots || rv.SetRequired || rv.PrimaryOff
+		row.Override = rv.SetCoBots || rv.SetRequired || rv.PrimaryOff || rv.SetOnce
 		row.OverrideBy, row.OverrideAt = rv.By, rv.UpdatedAt
 		row.PrimaryOff = rv.PrimaryOff
 	}
@@ -647,6 +656,22 @@ func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) [
 			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
 			RepoCount: repoCount[key],
 			Status:    botStatus(on, seen[key], asked[key], now, answerLog),
+		}
+		for owner, note := range st.CoUnable[key] {
+			if !note.Unable() {
+				continue
+			}
+			card.UnableOwners = append(card.UnableOwners, owner)
+			if card.UnableAt == nil || note.At.After(*card.UnableAt) {
+				at := note.At
+				card.UnableAt, card.UnableOn = &at, note.Repo+"#"+itoa(int64(note.PR))
+			}
+		}
+		if len(card.UnableOwners) > 0 {
+			sort.Strings(card.UnableOwners)
+			if co, ok := dialect.CoReviewerByName(login); ok {
+				card.UnableReason = co.UnableMeans
+			}
 		}
 		if v, ok := dialect.VendorFor(login); ok {
 			card.Site, card.Docs = v.Site, v.Docs

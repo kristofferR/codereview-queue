@@ -30,6 +30,9 @@ type CoReviewerPolicy struct {
 	// SelfHealGrace is how long a selfheal trigger waits past its anchor for
 	// the bot to show up on its own (<=0: a conservative default).
 	SelfHealGrace time.Duration
+	// Once means the bot reviews each pull request once rather than every
+	// push: after its first review crq neither asks it again nor waits for it.
+	Once bool
 }
 
 func (cp CoReviewerPolicy) selfHealGrace() time.Duration {
@@ -50,6 +53,9 @@ type Policy struct {
 	// resolves before the slot, quota and pacing gates, which is what keeps a
 	// repository crq does not fire from queueing behind one it does.
 	PrimaryOff bool
+	// PrimaryOnce is CoReviewerPolicy.Once for the primary: after its first
+	// review of a pull request, later heads neither fire it nor wait for it.
+	PrimaryOnce bool
 
 	// CoReviewers are the enabled co-reviewer bots with their trigger stances.
 	CoReviewers []CoReviewerPolicy
@@ -142,8 +148,11 @@ type Observation struct {
 	// Reacted reports a configured-bot reaction on the round's fired command.
 	Reacted bool
 	// CodexThumbsUp reports a current Codex +1 on the PR or the fired command
-	// (pre-fetched only when a Codex-gated completion needs it).
-	CodexThumbsUp bool
+	// (pre-fetched only when a Codex-gated completion needs it), and
+	// CodexThumbsUpAt when GitHub says the newest one was given (zero when the
+	// reaction carried no time).
+	CodexThumbsUp   bool
+	CodexThumbsUpAt time.Time
 
 	// HeadAt is when the observed head commit was created, the cutoff for
 	// evidence that names no commit of its own. Zero when unknown.
@@ -153,6 +162,11 @@ type Observation struct {
 	// Co carries each co-reviewer's per-bot observation slice, keyed by
 	// normalized login.
 	Co map[string]CoSeen
+	// ReviewedPR names, by normalized login, the reviewers that have delivered
+	// a review anywhere on this pull request — any head, including evidence a
+	// confirmation pass hides and answers crq recorded earlier. It is what a
+	// reviewer set to review once is measured against.
+	ReviewedPR map[string]bool
 }
 
 // CoSeenFor exposes one co-reviewer's observation slice to the apply layer

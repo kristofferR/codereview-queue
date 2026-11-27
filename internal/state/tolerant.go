@@ -41,6 +41,7 @@ var (
 	toolReportFields      = jsonFieldNames(reflect.TypeOf(ToolReport{}))
 	onePassFields         = jsonFieldNames(reflect.TypeOf(OnePassProgress{}))
 	onePassEvidenceFields = jsonFieldNames(reflect.TypeOf(OnePassEvidence{}))
+	coUnableFields        = jsonFieldNames(reflect.TypeOf(CoUnableNote{}))
 )
 
 // UnmarshalJSON decodes campaign review evidence while preserving fields from
@@ -485,6 +486,30 @@ func (t *ToolReport) UnmarshalJSON(raw []byte) error {
 func (t ToolReport) MarshalJSON() ([]byte, error) {
 	type plain ToolReport
 	return mergeUnknown(plain(t), t.unknown)
+}
+
+// UnmarshalJSON decodes one cannot-review note and remembers anything it did
+// not recognise. Nested inside "co_unable", which every binary that has the
+// map recognises, so only the note can carry a member a newer one added.
+func (n *CoUnableNote) UnmarshalJSON(raw []byte) error {
+	type plain CoUnableNote
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, coUnableFields)
+	if err != nil {
+		return err
+	}
+	*n = CoUnableNote(decoded)
+	n.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a cannot-review note back with unknown members intact.
+func (n CoUnableNote) MarshalJSON() ([]byte, error) {
+	type plain CoUnableNote
+	return mergeUnknown(plain(n), n.unknown)
 }
 
 // captureUnknown returns the members of raw that known does not name.

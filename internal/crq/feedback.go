@@ -88,7 +88,15 @@ type FeedbackReport struct {
 	confirmationRoundSeq int64
 	// unreviewable is Completion's reason no reviewer can answer for this head.
 	unreviewable string
+	// primaryDone says the primary reviews each pull request once and already
+	// has, so this head needs nothing from it or from the account quota.
+	primaryDone bool
 }
+
+// quotaFree reports that nothing this round still waits for depends on the
+// account quota: the primary either cannot review this head or already
+// reviewed the pull request once.
+func (r FeedbackReport) quotaFree() bool { return r.PrimaryUnavailable || r.primaryDone }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
 type CoReviewerStatus struct {
@@ -198,7 +206,7 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, reviewerAnswers(st, cfg, repo, pr), now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
@@ -356,7 +364,8 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		verdictCutoff = obs.eng.HeadAt
 	}
 	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" {
+	report.primaryDone = cfg.policy().DoneForPR(obs.eng, cfg.Bot)
+	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" && !report.primaryDone {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = cfg.Bot + " " + why
 	}
@@ -387,8 +396,12 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		}
 		// Empty carrier reviews and pending drafts are not a subsequent verdict
 		// on a resolved thread. GraphQL and REST spell bot logins differently.
+		// Nor is a reviewer that reviews each pull request once and already has:
+		// it will not take a confirmation pass, so resolving its findings must
+		// not queue one.
 		if !strings.EqualFold(review.State, "PENDING") &&
-			!(strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "") {
+			!(strings.EqualFold(review.State, "COMMENTED") && strings.TrimSpace(review.Body) == "") &&
+			!cfg.policy().DoneForPR(obs.eng, login) {
 			key := dialect.NormalizeBotName(login)
 			if cur, ok := confirmationReviews[key]; !ok || reviewNewer(review, cur) {
 				confirmationReviews[key] = review
@@ -576,7 +589,10 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
+		// A primary that reviews each pull request once and already has is not
+		// needed here, so its refusal of this head is not work.
 		if s.cr.IsReviewSkipped(comment.Body) && cfg.isConfiguredBot(comment.User.Login) &&
+			!cfg.policy().DoneForPR(obs.eng, cfg.Bot) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -623,6 +639,13 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		if cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
+		// A registry reviewer read only through CRQ_FEEDBACK_BOTS is not among
+		// the enabled ones the classifier knows, but its summaries and notices
+		// are still not findings.
+		if co, ok := dialect.CoReviewerByName(comment.User.Login); ok && co.ClassifyComment != nil &&
+			co.ClassifyComment(comment.Body).Kind != dialect.EvOther {
+			continue
+		}
 		if dialect.IsNonActionableText(comment.Body) {
 			continue // notices/acks (e.g. usage-limit messages) aren't findings
 		}
@@ -653,7 +676,8 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
 			if dismissibleSources[finding.Source] && finding.ThreadID == "" && dismissalRound.IsDismissed(finding.ID) {
-				if finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
+				if (finding.Commit == "" || dialect.SHAPrefixMatch(finding.Commit, head)) &&
+					!cfg.policy().DoneForPR(obs.eng, finding.Bot) {
 					report.confirmationRequired = true
 				}
 				continue
@@ -981,7 +1005,7 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 		// deadline, slow its poll to the block window, and narrate a limit that
 		// has nothing to do with it — while the co-reviewers it IS waiting for
 		// answer in minutes. Leave blockedUntil nil so none of that applies.
-		if !report.PrimaryUnavailable {
+		if !report.quotaFree() {
 			if st, _, lerr := s.store.Load(ctx); lerr == nil {
 				if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
 					blockedUntil = &until

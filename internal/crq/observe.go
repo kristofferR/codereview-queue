@@ -33,7 +33,7 @@ type observation struct {
 // the adoption cutoff is its LastAttemptAt, and reactions/thumbs-up are fetched
 // only for a round that has fired. posted restores the chronological position
 // of crq-authored trigger comments that Tidy has removed from GitHub.
-func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, round *Round, posted []engine.CommandComment, now time.Time) (observation, error) {
+func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, round *Round, posted []engine.CommandComment, answered map[string]bool, now time.Time) (observation, error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
 		return observation{}, err
@@ -116,7 +116,18 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// Reviews and issue comments are fetched even for a closed PR: the daemon's
 	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its
 	// findings, and the extra two reads on a to-be-dropped round are negligible.
+	// Everything on the PR, before a confirmation pass hides old evidence: what
+	// a reviewer set to review once is measured against.
+	var history engine.Observation
 	for _, review := range reviews {
+		// A draft is nobody's verdict, in either evidence stream.
+		if strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
+		shell := cfg.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED")
+		if !shell {
+			history.Reviews = append(history.Reviews, engine.ReviewSeen{Bot: review.User.Login})
+		}
 		if !confirmationFresh(review.SubmittedAt, confirmationAt) {
 			continue
 		}
@@ -129,7 +140,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		// filter to the configured reviewer — only CodeRabbit posts these
 		// carriers, and dropping another bot's empty review could discard real
 		// evidence a Codex-gated round waits on.
-		if cfg.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
+		if shell {
 			continue
 		}
 		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{
@@ -151,6 +162,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	for _, c := range comments {
 		presentComments[c.ID] = true
 		ev := classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt)
+		history.Events = append(history.Events, ev)
 		if confirmationEvent(ev, confirmationAt) {
 			if !confirmationFresh(ev.ObservedTime(), confirmationAt) && ev.SummaryOnly {
 				// Preserve the plan restriction, never its old completion marker.
@@ -204,14 +216,16 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 			}
 		} else {
 			for _, run := range runs {
-				if run.Status == "completed" && !confirmationFresh(run.CompletedAt, confirmationAt) {
-					continue
-				}
 				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
 				if verdict == dialect.CheckUnrelated || !cfg.coBotEnabled(login) {
 					continue
 				}
-				o.eng.Checks = append(o.eng.Checks, engine.CheckSeen{Bot: login, Name: run.Name, Verdict: verdict, CompletedAt: run.CompletedAt})
+				seen := engine.CheckSeen{Bot: login, Name: run.Name, Verdict: verdict, CompletedAt: run.CompletedAt}
+				history.Checks = append(history.Checks, seen)
+				if run.Status == "completed" && !confirmationFresh(run.CompletedAt, confirmationAt) {
+					continue
+				}
+				o.eng.Checks = append(o.eng.Checks, seen)
 			}
 		}
 	}
@@ -234,10 +248,15 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 				}
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
 					o.eng.CodexThumbsUp = true
+					if reaction.CreatedAt.After(o.eng.CodexThumbsUpAt) {
+						o.eng.CodexThumbsUpAt = reaction.CreatedAt
+					}
 				}
 			}
 		}
-		if !o.eng.CodexThumbsUp && cfg.codexRelevant(o.eng) {
+		// Read even after a thumbs-up on the command: a newer one on the pull
+		// request is the answer time the dashboard compares notices against.
+		if cfg.codexRelevant(o.eng) {
 			reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
 			if err != nil {
 				return observation{}, err
@@ -245,9 +264,20 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 			for _, reaction := range reactions {
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
 					o.eng.CodexThumbsUp = true
-					break
+					if reaction.CreatedAt.After(o.eng.CodexThumbsUpAt) {
+						o.eng.CodexThumbsUpAt = reaction.CreatedAt
+					}
 				}
 			}
+		}
+	}
+
+	if len(cfg.OnceBots) > 0 {
+		history.CodexThumbsUp = o.eng.CodexThumbsUp
+		o.eng.ReviewedPR = map[string]bool{}
+		for _, login := range cfg.OnceBots {
+			key := dialect.NormalizeBotName(login)
+			o.eng.ReviewedPR[key] = answered[key] || engine.ReviewedPR(history, login)
 		}
 	}
 
@@ -283,6 +313,22 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		}
 	}
 	return o, nil
+}
+
+// reviewerAnswers is the durable half of Observation.ReviewedPR: which
+// reviewers set to review once crq has recorded answering this pull request,
+// for evidence GitHub no longer shows (a check run on an earlier head).
+func reviewerAnswers(st State, cfg Config, repo string, pr int) map[string]bool {
+	if len(cfg.OnceBots) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, login := range cfg.OnceBots {
+		if st.ReviewerAnswered(repo, pr, login) {
+			out[dialect.NormalizeBotName(login)] = true
+		}
+	}
+	return out
 }
 
 // classifierPrimary returns registry wording hooks when the configured primary
@@ -472,8 +518,8 @@ func (c Config) coCommandBodies() map[string][]string {
 }
 
 // adoptableCo returns the newest trigger command comment present for the head
-// that the co-reviewer has NOT already answered — with a review, a failure
-// notice, or (Bugbot, Macroscope) a completed check run. A command answered by later evidence
+// that the co-reviewer has NOT already answered — with a review, a clean
+// summary, a failure notice, or (Bugbot, Macroscope) a completed check run. A command answered by later evidence
 // belongs to a finished round for an earlier head: on a regular push whose
 // commit date predates that old command, the command survives the cutoff yet
 // is already consumed, so treating it as live makes DecideCoPost see
@@ -513,6 +559,14 @@ func adoptableCo(obs engine.Observation, loginKey string, cutoff time.Time, bodi
 	for _, ev := range obs.Events {
 		if ev.Kind == dialect.EvCoFailed && dialect.NormalizeBotName(ev.Bot) == loginKey &&
 			!ev.PairTime().Before(bestAt) {
+			return nil
+		}
+		// A clean review may leave no review object at all (Greptile), and a
+		// summary edited in place answers when it was last edited. Only one
+		// naming its commit: a SHA-less summary binds to the head solely
+		// through the adopted command's anchor, so it must not consume it.
+		if ev.Kind == dialect.EvCoClean && ev.SHA != "" && dialect.NormalizeBotName(ev.Bot) == loginKey &&
+			!ev.ObservedTime().Before(bestAt) {
 			return nil
 		}
 	}

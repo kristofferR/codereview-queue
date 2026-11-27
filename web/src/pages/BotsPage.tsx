@@ -58,6 +58,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
       <div className="mt-4 grid grid-cols-2 gap-4 max-[940px]:grid-cols-1">
         {bots.map((b) => {
           const st = STATUS[b.status] ?? STATUS.off;
+          const unableUnder = b.unable_owners ?? [];
           return (
             <section
               key={b.login}
@@ -74,9 +75,18 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                     {b.metered ? "spends the shared quota" : "free, no crq quota"}
                   </div>
                 </div>
-                <span className="ml-auto shrink-0" title={st.note}>
-                  <Pill tone={st.tone}>{st.label}</Pill>
-                </span>
+                {unableUnder.length > 0 ? (
+                  <span
+                    className="ml-auto shrink-0"
+                    title={`it said it cannot review under ${unableUnder.join(", ")}`}
+                  >
+                    <Pill tone="bad">Can't review</Pill>
+                  </span>
+                ) : (
+                  <span className="ml-auto shrink-0" title={st.note}>
+                    <Pill tone={st.tone}>{st.label}</Pill>
+                  </span>
+                )}
               </header>
 
               <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
@@ -118,6 +128,30 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                     })()}
                   {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
                 </p>
+
+                {unableUnder.length > 0 &&
+                  b.unable_at &&
+                  (() => {
+                    const [repo = "", number = ""] = (b.unable_on ?? "").split("#");
+                    const pr = Number(number);
+                    const where =
+                      repo && Number.isInteger(pr) && pr > 0 ? (
+                        <>
+                          {" on "}
+                          <PRLink repo={repo} pr={pr} />
+                        </>
+                      ) : null;
+                    return (
+                      <p className="mt-2 rounded-lg border border-bad-edge bg-bad-bg px-2.5 py-1.5 text-[12.5px] text-bad">
+                        {b.unable_reason
+                          ? `${b.unable_reason[0]?.toUpperCase()}${b.unable_reason.slice(1)}`
+                          : "Cannot review"}{" "}
+                        for {unableUnder.join(", ")} — latest notice {ago(b.unable_at, now)}
+                        {where}. It reviews there again once that is fixed with the vendor; this
+                        clears when crq next sees it answer there.
+                      </p>
+                    );
+                  })()}
 
                 {b.status === "silent" && b.last_asked && (
                   <p className="mt-2 rounded-lg border border-bad-edge bg-bad-bg px-2.5 py-1.5 text-[12.5px] text-bad">

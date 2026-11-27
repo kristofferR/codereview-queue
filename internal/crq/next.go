@@ -283,7 +283,7 @@ func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
 // is how the caller knows a co-review was just set in motion and the schedule
 // computed before it is now too long.
 func (s *Service) advance(ctx context.Context, repo string, pr int, feedback FeedbackReport) (bool, error) {
-	if feedback.PrimaryUnavailable || feedback.CodeRabbitDeferred {
+	if feedback.quotaFree() || feedback.CodeRabbitDeferred {
 		if _, handled, err := s.advanceQuotaFree(ctx, repo, pr); err != nil {
 			return false, err
 		} else if handled {

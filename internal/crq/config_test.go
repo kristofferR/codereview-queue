@@ -550,6 +550,75 @@ func TestLoadConfigCoBotRequiredFoldsIntoRequiredBots(t *testing.T) {
 	}
 }
 
+// Greptile reviews a pull request when it opens and every command spends a
+// credit, so it defaults to reviewing each pull request once; set to every
+// push, it is nudged for the heads it missed, and asked outright when required.
+func TestLoadConfigGreptileDefaults(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "greptile")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	greptile, ok := coBotByName(cfg, "greptile")
+	if !ok || greptile.Trigger != engine.TriggerSelfHeal || greptile.Command != "@greptile" || greptile.Required {
+		t.Fatalf("greptile defaults wrong: %+v", greptile)
+	}
+	if !containsBot(cfg.OnceBots, dialect.GreptileLogin) || containsBot(cfg.OnceBots, cfg.Bot) {
+		t.Fatalf("only greptile reviews once by default: %#v", cfg.OnceBots)
+	}
+	if !dialect.InBots(dialect.BotSet(cfg.FeedbackBots), dialect.GreptileLogin) {
+		t.Fatalf("an enabled Greptile must surface findings: %#v", cfg.FeedbackBots)
+	}
+
+	t.Setenv("CRQ_COBOT_GREPTILE_REQUIRED", "1")
+	if cfg, err = LoadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if greptile, _ = coBotByName(cfg, "greptile"); greptile.Trigger != engine.TriggerAlways {
+		t.Fatalf("required greptile trigger = %v, want always", greptile.Trigger)
+	}
+}
+
+// CRQ_REVIEW_ONCE names the reviewers, primary included, that review each pull
+// request once; empty makes every reviewer review every push. A typo cannot be
+// recorded fleet-wide, where a failing parse would drop every fleet setting.
+func TestReviewOnceSetting(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "codex,greptile")
+	t.Setenv("CRQ_REVIEW_ONCE", "coderabbitai,codex")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.policy()
+	once := map[string]bool{}
+	for _, cp := range p.CoReviewers {
+		once[cp.Login] = cp.Once
+	}
+	if !p.PrimaryOnce || !once[dialect.CodexBotLogin] || once[dialect.GreptileLogin] {
+		t.Fatalf("policy = primary once %v, co %v; want coderabbit and codex once, greptile every push", p.PrimaryOnce, once)
+	}
+
+	t.Setenv("CRQ_REVIEW_ONCE", "")
+	if cfg, err = LoadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.OnceBots) != 0 {
+		t.Fatalf("empty CRQ_REVIEW_ONCE = %v, want every reviewer every push", cfg.OnceBots)
+	}
+
+	if err := validateEnvValue("CRQ_REVIEW_ONCE", "greptil"); err == nil {
+		t.Fatal("a misspelt reviewer must be refused")
+	}
+	if err := validateEnvValue("CRQ_REVIEW_ONCE", "greptile,coderabbitai,sonar[bot]"); err != nil {
+		t.Fatalf("known names and bot logins must be accepted: %v", err)
+	}
+}
+
 func TestLoadConfigRequiredBotsListingEnablesCoBot(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "coderabbitai[bot],"+dialect.CodexBotLogin)

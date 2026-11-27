@@ -1,0 +1,107 @@
+{
+  "id": 140747703905,
+  "name": "Greptile Review",
+  "node_id": "CR_kwDOQ2eS6c8AAAAgxTeGYQ",
+  "head_sha": "605a68e7ff137a4adc5b446074aede196d4db158",
+  "external_id": "",
+  "url": "https://api.github.com/repos/kristofferR/ha-adjustable-bed/check-runs/140747703905",
+  "html_url": "https://github.com/kristofferR/ha-adjustable-bed/runs/140747703905",
+  "details_url": "https://app.greptile.com/-/switch-tenant?tenant=kristofferr&next=%2Fkristofferr%2Fha-adjustable-bed%2Fpull%2F1242",
+  "status": "completed",
+  "conclusion": "success",
+  "started_at": "2026-11-27T21:32:59Z",
+  "completed_at": "2026-11-27T21:35:37Z",
+  "output": {
+    "title": "Base review",
+    "summary": "Greptile has reviewed the Pull Request.\n\n30 files reviewed, 0 comments added.",
+    "text": null,
+    "annotations_count": 0,
+    "annotations_url": "https://api.github.com/repos/kristofferR/ha-adjustable-bed/check-runs/140747703905/annotations"
+  },
+  "check_suite": {
+    "id": 124637824696
+  },
+  "app": {
+    "id": 867647,
+    "client_id": "Iv1.5ad00a8cea2f6701",
+    "slug": "greptile-apps",
+    "node_id": "A_kwHOCFqEf84ADT0_",
+    "owner": {
+      "login": "greptileai",
+      "id": 140149887,
+      "node_id": "O_kgDOCFqEfw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/140149887?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/greptileai",
+      "html_url": "https://github.com/greptileai",
+      "followers_url": "https://api.github.com/users/greptileai/followers",
+      "following_url": "https://api.github.com/users/greptileai/following{/other_user}",
+      "gists_url": "https://api.github.com/users/greptileai/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/greptileai/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/greptileai/subscriptions",
+      "organizations_url": "https://api.github.com/users/greptileai/orgs",
+      "repos_url": "https://api.github.com/users/greptileai/repos",
+      "events_url": "https://api.github.com/users/greptileai/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/greptileai/received_events",
+      "type": "Organization",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "name": "Greptile Apps",
+    "description": "Greptile is an AI agent that reviews pull requests with full context of your codebase. It can catch hidden bugs, security vulnerabilities, and anti-patterns. ",
+    "external_url": "https://greptile.com/",
+    "html_url": "https://github.com/apps/greptile-apps",
+    "created_at": "2024-04-02T00:16:23Z",
+    "updated_at": "2026-11-24T18:21:02Z",
+    "permissions": {
+      "actions": "read",
+      "administration": "read",
+      "checks": "write",
+      "contents": "write",
+      "deployments": "read",
+      "issues": "write",
+      "members": "read",
+      "metadata": "read",
+      "pull_requests": "write",
+      "secret_scanning_alerts": "read",
+      "security_events": "read",
+      "statuses": "write",
+      "vulnerability_alerts": "read",
+      "workflows": "write"
+    },
+    "events": [
+      "issues",
+      "issue_comment",
+      "pull_request",
+      "pull_request_review",
+      "pull_request_review_comment",
+      "pull_request_review_thread",
+      "repository"
+    ]
+  },
+  "pull_requests": [
+    {
+      "url": "https://api.github.com/repos/kristofferR/ha-adjustable-bed/pulls/1242",
+      "id": 5533352080,
+      "number": 1242,
+      "head": {
+        "ref": "t3/askona-ble-support",
+        "sha": "605a68e7ff137a4adc5b446074aede196d4db158",
+        "repo": {
+          "id": 1130861289,
+          "url": "https://api.github.com/repos/kristofferR/ha-adjustable-bed",
+          "name": "ha-adjustable-bed"
+        }
+      },
+      "base": {
+        "ref": "main",
+        "sha": "a0dc53998230a9dd2beb8226e61f6bf53a3ab5a6",
+        "repo": {
+          "id": 1130861289,
+          "url": "https://api.github.com/repos/kristofferR/ha-adjustable-bed",
+          "name": "ha-adjustable-bed"
+        }
+      }
+    }
+  ]
+}

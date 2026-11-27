@@ -754,3 +754,34 @@ func TestClearingTheLastKnownFieldKeepsACarriedMember(t *testing.T) {
 		t.Errorf("a carried member was erased by clearing the fields around it:\n%s", out)
 	}
 }
+
+// A note a newer binary wrote with an extra member keeps it through this
+// binary's read and write, as every record nested in State must.
+func TestCoUnableNoteKeepsUnknownMembers(t *testing.T) {
+	foreign := `{"co_unable": {"greptile-apps": {"o": {
+	  "at": "2026-11-27T10:05:00Z", "repo": "o/r", "pr": 7, "future_note_flag": {"tier": "apex"}
+	}}}}`
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	st.NoteCoAnswerSeen("greptile-apps[bot]", "o/r", time.Date(2026, 11, 27, 11, 0, 0, 0, time.UTC))
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	notes, _ := back["co_unable"].(map[string]any)
+	byOwner, _ := notes["greptile-apps"].(map[string]any)
+	note, _ := byOwner["o"].(map[string]any)
+	carried, _ := note["future_note_flag"].(map[string]any)
+	if carried == nil || carried["tier"] != "apex" {
+		t.Fatalf("a note member this binary does not know was erased:\n%s", out)
+	}
+	if note["answered_at"] != "2026-11-27T11:00:00Z" {
+		t.Errorf("answered_at = %#v, want the recorded answer", note["answered_at"])
+	}
+}

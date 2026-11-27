@@ -109,6 +109,9 @@ type CoReviewer struct {
 	// DefaultOnce makes the bot review each pull request once, rather than
 	// every push, unless CRQ_REVIEW_ONCE or a repository says otherwise.
 	DefaultOnce bool
+	// UnableMeans says, for a person, what this bot's cannot-review notice
+	// (EvCoUnable or CheckUnable) means; "" when it has none.
+	UnableMeans string
 
 	// ClassifyComment classifies an issue comment authored by this bot.
 	// Kind EvOther means "no special meaning" (may still be actionable text).
@@ -167,6 +170,7 @@ func KnownCoReviewers() []CoReviewer {
 			// Codex predates the registry: its command env var is still read,
 			// and it only ever triggered at fire time when required.
 			LegacyCommandEnv: "CRQ_CODEX_CMD",
+			UnableMeans:      "usage limit reached",
 			DefaultTrigger:   "never",
 			RequiredTrigger:  "always",
 			ClassifyComment: func(body string) CoEvent {
@@ -216,6 +220,7 @@ func KnownCoReviewers() []CoReviewer {
 			AppSlug:         "macroscopeapp",
 			Command:         "@macroscope-app review",
 			Budget:          BudgetNone,
+			UnableMeans:     "billing issue — the workspace cannot pay for reviews",
 			DefaultTrigger:  "selfheal",
 			ClassifyComment: ClassifyMacroscopeComment,
 			ClassifyCheck:   ClassifyMacroscopeCheck,
@@ -237,6 +242,7 @@ func KnownCoReviewers() []CoReviewer {
 			// spends a credit. So it defaults to once per pull request, and when
 			// set to review every push crq asks for each head it missed.
 			DefaultOnce:     true,
+			UnableMeans:     "out of review credits",
 			DefaultTrigger:  "selfheal",
 			RequiredTrigger: "always",
 			ClassifyComment: ClassifyGreptileComment,

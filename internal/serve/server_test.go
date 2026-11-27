@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/codereview-queue/internal/dialect"
 	"github.com/kristofferR/codereview-queue/internal/state"
 )
 
@@ -1112,5 +1113,36 @@ func TestPRStateOnlyReadSkipsGitHubObservationAndPricing(t *testing.T) {
 	}
 	if observer.calls != 0 || coster.calls != 0 {
 		t.Fatalf("state-only read made %d observation and %d cost calls", observer.calls, coster.calls)
+	}
+}
+
+// A bot that said it cannot review at all — Greptile out of credits — reads as
+// unable, with what that means and where crq saw it, until it answers again.
+func TestBotCardShowsUnableUntilTheBotAnswersAgain(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	greptile := dialect.GreptileLogin
+	running := []BotName{{Login: greptile, Name: "greptile"}}
+	cfg := FleetConfig{GateRepo: "o/gate"}
+	st := state.State{}
+	st.NoteCoUnable(greptile, "o/repo", 7, now.Add(-2*time.Hour))
+	card := func(st state.State) BotCard {
+		for _, c := range botCards(st, cfg, func(string) []BotName { return running }, now) {
+			if c.Login == greptile {
+				return c
+			}
+		}
+		t.Fatal("no Greptile card")
+		return BotCard{}
+	}
+	got := card(st)
+	if got.Status != "unable" || got.UnableReason != "out of review credits" || got.UnableOn != "o/repo#7" {
+		t.Fatalf("card = %+v, want unable: out of review credits on o/repo#7", got)
+	}
+
+	answered := now.Add(-time.Hour)
+	st.Rounds = map[string]state.Round{"o/repo#8": {Repo: "o/repo", PR: 8, Head: "abcdef123",
+		CoBots: map[string]state.CoBotRound{"greptile-apps": {AnsweredAt: &answered}}}}
+	if got := card(st); got.Status == "unable" || got.UnableAt != nil {
+		t.Fatalf("an answer after the notice must clear it: %+v", got)
 	}
 }

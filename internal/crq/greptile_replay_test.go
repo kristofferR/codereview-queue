@@ -298,3 +298,26 @@ func TestGreptileFeedbackOnlySummaryIsNotAFinding(t *testing.T) {
 		}
 	}
 }
+
+// Greptile's out-of-credits comment, seen on any pull request crq drives, is
+// recorded fleet-wide for the dashboard.
+func TestGreptileCreditPauseIsRecordedForTheDashboard(t *testing.T) {
+	base := time.Date(2026, 11, 27, 14, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, greptileOnly(t, false))
+	repo, pr, sha := "o/r", 47, "3ee8653629153f67c8d1a3abf8de7d7a1c914635"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedRound(t, f.store, f.cfg, repo, pr, sha[:9], PhaseReviewing, base.Add(-10*time.Minute), 400)
+	f.greptileComment(repo, pr, 600, corpusMessage(t, "greptile/credits-exhausted.md"), base.Add(-time.Minute))
+	if _, err := f.svc.Feedback(f.ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, ok := st.CoUnable[dialect.NormalizeBotName(greptileLogin)]
+	if !ok || note.Repo != repo || note.PR != pr || !note.At.Equal(base.Add(-time.Minute)) {
+		t.Fatalf("CoUnable = %+v, want the credit pause on %s#%d", st.CoUnable, repo, pr)
+	}
+}

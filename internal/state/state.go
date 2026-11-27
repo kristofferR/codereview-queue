@@ -608,6 +608,11 @@ type State struct {
 	// observations of one review for new work. An explicitly empty entry is a
 	// reset cycle; Normalize must not reconstruct it from the archive.
 	ReviewedHeads map[string][]string `json:"reviewed_heads,omitempty"`
+	// CoUnable keeps, per reviewer, the newest notice crq observed in which it
+	// said it cannot review at all — out of credits, usage limit, billing. It
+	// is fleet-wide because those are account facts, and display-only: the
+	// decisions read the notice itself from the pull request.
+	CoUnable map[string]CoUnableNote `json:"co_unable,omitempty"`
 
 	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
@@ -1454,6 +1459,28 @@ func (s *State) CoReviewerAnswered(repo string, pr int, login string) bool {
 		}
 	}
 	return false
+}
+
+// CoUnableNote is one reviewer's newest cannot-review notice and where crq
+// saw it.
+type CoUnableNote struct {
+	At   time.Time `json:"at"`
+	Repo string    `json:"repo"`
+	PR   int       `json:"pr"`
+}
+
+// NoteCoUnable records login's cannot-review notice if it is newer than the
+// one on record, and reports whether it was.
+func (s *State) NoteCoUnable(login, repo string, pr int, at time.Time) bool {
+	login = coBotKey(login)
+	if cur, ok := s.CoUnable[login]; ok && !at.After(cur.At) {
+		return false
+	}
+	if s.CoUnable == nil {
+		s.CoUnable = map[string]CoUnableNote{}
+	}
+	s.CoUnable[login] = CoUnableNote{At: at.UTC(), Repo: strings.ToLower(repo), PR: pr}
+	return true
 }
 
 // ReviewerAnswered reports durable completed-review evidence for login on this

@@ -11,6 +11,13 @@ const STATUS: Record<
 > = {
   working: { tone: "ok", label: "Working", note: "crq saw it answer here in the last week" },
   quiet: { tone: "warn", label: "Quiet", note: "crq saw it answer once, but not lately" },
+  unable: {
+    tone: "bad",
+    label: "Can't review",
+    note:
+      "it said it cannot review at all and has not answered since — crq stops waiting for it " +
+      "and does not ask again, since no trigger can fix that",
+  },
   silent: {
     tone: "bad",
     label: "Never answered",
@@ -118,6 +125,30 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                     })()}
                   {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
                 </p>
+
+                {b.status === "unable" &&
+                  b.unable_at &&
+                  (() => {
+                    const [repo = "", number = ""] = (b.unable_on ?? "").split("#");
+                    const pr = Number(number);
+                    const where =
+                      repo && Number.isInteger(pr) && pr > 0 ? (
+                        <>
+                          {" on "}
+                          <PRLink repo={repo} pr={pr} />
+                        </>
+                      ) : null;
+                    return (
+                      <p className="mt-2 rounded-lg border border-bad-edge bg-bad-bg px-2.5 py-1.5 text-[12.5px] text-bad">
+                        {b.unable_reason
+                          ? `${b.unable_reason[0]?.toUpperCase()}${b.unable_reason.slice(1)}`
+                          : "Cannot review"}{" "}
+                        since {ago(b.unable_at, now)}
+                        {where}. It reviews again once that is fixed with the vendor; crq notices
+                        its next answer and clears this.
+                      </p>
+                    );
+                  })()}
 
                 {b.status === "silent" && b.last_asked && (
                   <p className="mt-2 rounded-lg border border-bad-edge bg-bad-bg px-2.5 py-1.5 text-[12.5px] text-bad">

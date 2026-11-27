@@ -354,7 +354,7 @@ function HeldHere({
 // from — worst last, because that is the order in which they are worth
 // considering.
 function rank(b: BotCard) {
-  return b.status === "working" ? 0 : b.status === "silent" ? 2 : 1;
+  return b.status === "working" ? 0 : b.status === "silent" || b.status === "unable" ? 2 : 1;
 }
 
 /** Runs and Required are separate ideas, so they get separate toggles. */
@@ -492,13 +492,21 @@ function ReviewerEditor({
                         <Link
                           to="/bots"
                           title={
-                            b.status === "silent"
-                              ? "crq has asked it and never seen an answer — most likely not set up"
-                              : "crq has never seen this bot work here"
+                            b.status === "unable"
+                              ? `it said it cannot review: ${b.unable_reason ?? "see Bots"}`
+                              : b.status === "silent"
+                                ? "crq has asked it and never seen an answer — most likely not set up"
+                                : "crq has never seen this bot work here"
                           }
                         >
-                          <Pill tone={b.status === "silent" ? "bad" : "mut"}>
-                            {b.status === "silent" ? "never answered" : "not set up?"}
+                          <Pill
+                            tone={b.status === "silent" || b.status === "unable" ? "bad" : "mut"}
+                          >
+                            {b.status === "unable"
+                              ? (b.unable_reason ?? "can't review")
+                              : b.status === "silent"
+                                ? "never answered"
+                                : "not set up?"}
                           </Pill>
                         </Link>
                       )}

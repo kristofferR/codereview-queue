@@ -452,6 +452,23 @@ func CoAnsweredRound(r state.Round, obs Observation, login string) bool {
 		r.Head != "" && obs.Head != "" && dialect.SHAPrefixMatch(r.Head, obs.Head)
 }
 
+// CoUnableAt reports the newest notice in this observation in which login said
+// it cannot review at all: an unable comment or an unable check run.
+func CoUnableAt(obs Observation, login string) (time.Time, bool) {
+	var latest time.Time
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCoUnable && eventConcerns(ev, login) && ev.ObservedTime().After(latest) {
+			latest = ev.ObservedTime()
+		}
+	}
+	for _, c := range coChecks(obs, login) {
+		if c.Verdict == dialect.CheckUnable && c.CompletedAt.After(latest) {
+			latest = c.CompletedAt
+		}
+	}
+	return latest, !latest.IsZero()
+}
+
 // CoAnsweredPR reports an answer that binds to the pull request but to no
 // head: a Codex thumbs-up. CoAnsweredRound credits it to a round only on that
 // round's head; seen after a push it still answers the pull request.

@@ -3580,6 +3580,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	}
 	var active, prAnswers []string
 	answered := map[string]bool{}
+	unable := map[string]time.Time{}
 	for _, cb := range cfg.CoBots {
 		// Setup status is not head-scoped: activity on an earlier head still
 		// proves that the reviewer is installed and working.
@@ -3594,6 +3595,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		if !answer && engine.CoAnsweredPR(obs, cb.Login) {
 			prAnswers = append(prAnswers, cb.Login)
 		}
+		if at, ok := engine.CoUnableAt(obs, cb.Login); ok {
+			unable[cb.Login] = at
+		}
 	}
 	primary := cfg.Bot != "" &&
 		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
@@ -3601,18 +3605,24 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	for _, didAnswer := range answered {
 		reviewed = reviewed || (cfg.MaxReviewRounds > 0 && didAnswer)
 	}
-	if len(active) == 0 && !primary && len(prAnswers) == 0 {
+	if len(active) == 0 && !primary && len(prAnswers) == 0 && len(unable) == 0 {
 		return nil, nil
 	}
 	newSettledCommand := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		newSettledCommand = false
 		budgetChanged := reviewed && st.NoteReviewedHead(round.Repo, round.PR, round.Head)
-		prAnswered := false
+		// Pull-request and fleet indexes that change nothing about a round.
+		indexChanged := false
 		for _, login := range prAnswers {
 			if !st.CoReviewerAnswered(round.Repo, round.PR, login) {
 				st.RememberCoAnswer(round.Repo, round.PR, login, now)
-				prAnswered = true
+				indexChanged = true
+			}
+		}
+		for login, at := range unable {
+			if st.NoteCoUnable(login, round.Repo, round.PR, at) {
+				indexChanged = true
 			}
 		}
 		noteHistorical := func(r *Round) {
@@ -3633,7 +3643,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				}
 				before := archived.CoBots
 				noteHistorical(archived)
-				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) && !budgetChanged && !prAnswered {
+				if sameCoAnswers(before, archived.CoBots) && sameCoActivity(before, archived.CoBots) && !budgetChanged && !indexChanged {
 					return ErrNoChange
 				}
 				st.RememberCoActivity(*archived)
@@ -3644,7 +3654,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			// directly in the per-PR index so a later round can still carry it.
 			before := round.CoBots
 			noteHistorical(&round)
-			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) && !budgetChanged && !prAnswered {
+			if sameCoAnswers(before, round.CoBots) && sameCoActivity(before, round.CoBots) && !budgetChanged && !indexChanged {
 				return ErrNoChange
 			}
 			st.RememberCoActivity(round)
@@ -3666,8 +3676,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 				}
 			}
 			if sameCoActivity(before, r.CoBots) && !answerChanged && !budgetChanged {
-				if prAnswered {
-					// Only the pull request's answer index changed: nothing
+				if indexChanged {
+					// Only a pull-request or fleet index changed: nothing
 					// about this round is new, so it must not be reopened.
 					return nil
 				}
@@ -3701,7 +3711,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			}
 			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
-		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged && !prAnswered {
+		if sameCoAnswers(before, r.CoBots) && sameCoActivity(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt && !budgetChanged && !indexChanged {
 			return ErrNoChange
 		}
 		st.PutRound(*r)

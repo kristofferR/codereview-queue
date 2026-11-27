@@ -212,12 +212,20 @@ type BotCard struct {
 	LastAsked *time.Time `json:"last_asked,omitempty"`
 	SeenOn    string     `json:"seen_on,omitempty"`
 	RepoCount int        `json:"repo_count"`
+	// UnableAt is the newest notice in which the bot said it cannot review at
+	// all, UnableOn where crq saw it, and UnableReason what that means for this
+	// bot ("out of review credits"). Status is "unable" while no answer since.
+	UnableAt     *time.Time `json:"unable_at,omitempty"`
+	UnableOn     string     `json:"unable_on,omitempty"`
+	UnableReason string     `json:"unable_reason,omitempty"`
 
 	// Status is what crq can honestly say about setup, from its OWN records —
 	// a trigger it posted, a claim it saw — never a status read from the vendor:
 	//
 	//	working    crq saw it answer within the week
 	//	quiet      it answered once, but not lately
+	//	unable     it said it cannot review at all (out of credits, usage
+	//	           limit, billing) and has not answered since
 	//	silent     crq has asked it and never seen an answer — the case that
 	//	           matters, and the whole reason answering is tracked apart
 	//	           from asking
@@ -647,6 +655,16 @@ func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) [
 			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
 			RepoCount: repoCount[key],
 			Status:    botStatus(on, seen[key], asked[key], now, answerLog),
+		}
+		if note, ok := st.CoUnable[key]; ok && (seen[key] == nil || note.At.After(*seen[key])) {
+			at := note.At
+			card.UnableAt, card.UnableOn = &at, note.Repo+"#"+itoa(int64(note.PR))
+			if co, ok := dialect.CoReviewerByName(login); ok {
+				card.UnableReason = co.UnableMeans
+			}
+			if on {
+				card.Status = "unable"
+			}
 		}
 		if v, ok := dialect.VendorFor(login); ok {
 			card.Site, card.Docs = v.Site, v.Docs

@@ -962,6 +962,11 @@ func TestReviewOncePerPullRequest(t *testing.T) {
 	if !ReviewedPR(thumbs, dialect.CodexBotLogin) || !CoAnsweredRound(round, thumbs, dialect.CodexBotLogin) {
 		t.Fatal("a Codex thumbs-up is a completed review")
 	}
+	// It is also the answer that clears a usage-limit notice on the dashboard.
+	thumbs.CodexThumbsUpAt = now.Add(-time.Minute)
+	if at, ok := CoLatestAnswerAt(thumbs, dialect.CodexBotLogin); !ok || !at.Equal(thumbs.CodexThumbsUpAt) {
+		t.Fatalf("CoLatestAnswerAt = %v,%v, want the thumbs-up time", at, ok)
+	}
 	// It names no commit, so it never answers a round for an earlier head.
 	stale := state.Round{Head: "aaaaaaaaa", FiredAt: &fired}
 	if CoAnsweredRound(stale, thumbs, dialect.CodexBotLogin) {

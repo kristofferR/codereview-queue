@@ -146,7 +146,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                         {b.unable_reason
                           ? `${b.unable_reason[0]?.toUpperCase()}${b.unable_reason.slice(1)}`
                           : "Cannot review"}{" "}
-                        for {unableUnder.join(", ")} — said so {ago(b.unable_at, now)}
+                        for {unableUnder.join(", ")} — latest notice {ago(b.unable_at, now)}
                         {where}. It reviews there again once that is fixed with the vendor; this
                         clears when crq next sees it answer there.
                       </p>

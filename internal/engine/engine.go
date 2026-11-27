@@ -148,8 +148,11 @@ type Observation struct {
 	// Reacted reports a configured-bot reaction on the round's fired command.
 	Reacted bool
 	// CodexThumbsUp reports a current Codex +1 on the PR or the fired command
-	// (pre-fetched only when a Codex-gated completion needs it).
-	CodexThumbsUp bool
+	// (pre-fetched only when a Codex-gated completion needs it), and
+	// CodexThumbsUpAt when GitHub says the newest one was given (zero when the
+	// reaction carried no time).
+	CodexThumbsUp   bool
+	CodexThumbsUpAt time.Time
 
 	// HeadAt is when the observed head commit was created, the cutoff for
 	// evidence that names no commit of its own. Zero when unknown.

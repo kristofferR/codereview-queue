@@ -248,6 +248,9 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 				}
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
 					o.eng.CodexThumbsUp = true
+					if reaction.CreatedAt.After(o.eng.CodexThumbsUpAt) {
+						o.eng.CodexThumbsUpAt = reaction.CreatedAt
+					}
 				}
 			}
 		}
@@ -259,6 +262,9 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 			for _, reaction := range reactions {
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
 					o.eng.CodexThumbsUp = true
+					if reaction.CreatedAt.After(o.eng.CodexThumbsUpAt) {
+						o.eng.CodexThumbsUpAt = reaction.CreatedAt
+					}
 					break
 				}
 			}

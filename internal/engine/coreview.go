@@ -471,9 +471,12 @@ func CoUnableAt(obs Observation, login string) (time.Time, bool) {
 
 // CoLatestAnswerAt reports the newest completed answer by login in this
 // observation, by GitHub's clock: a submitted review, a clean summary's last
-// edit, or a completed check run.
+// edit, a completed check run, or a Codex thumbs-up.
 func CoLatestAnswerAt(obs Observation, login string) (time.Time, bool) {
 	var latest time.Time
+	if CoAnsweredPR(obs, login) && obs.CodexThumbsUpAt.After(latest) {
+		latest = obs.CodexThumbsUpAt
+	}
 	for _, review := range obs.Reviews {
 		if sameBot(review.Bot, login) && review.SubmittedAt.After(latest) {
 			latest = review.SubmittedAt

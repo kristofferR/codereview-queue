@@ -515,6 +515,17 @@ func TestGoldenCoReviewers(t *testing.T) {
 		})
 	}
 
+	// The reviewed-commit footer's label is a commit subject, which may contain
+	// brackets of its own; the SHA comes from the link either way.
+	clean := readGolden(t, "greptile/summary-clean.md")
+	bracketed := strings.Replace(clean, `["feat: add Askona bed profiles"]`, `["fix [BLE] support"]`, 1)
+	if bracketed == clean {
+		t.Fatal("corpus clean summary no longer carries the expected footer label")
+	}
+	if got := GreptileReviewedCommitSHA(bracketed); got != "605a68e7ff137a4adc5b446074aede196d4db158" {
+		t.Errorf("GreptileReviewedCommitSHA with a bracketed subject = %q", got)
+	}
+
 	// The Bugbot footer must strip from surfaced finding bodies.
 	high := readGolden(t, "bugbot/inline-finding-high.md")
 	if cleaned := CleanBugbotCommentText(high); strings.Contains(cleaned, "Reviewed by [Cursor Bugbot]") {

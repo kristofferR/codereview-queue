@@ -254,7 +254,9 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 				}
 			}
 		}
-		if !o.eng.CodexThumbsUp && cfg.codexRelevant(o.eng) {
+		// Read even after a thumbs-up on the command: a newer one on the pull
+		// request is the answer time the dashboard compares notices against.
+		if cfg.codexRelevant(o.eng) {
 			reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
 			if err != nil {
 				return observation{}, err
@@ -265,7 +267,6 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 					if reaction.CreatedAt.After(o.eng.CodexThumbsUpAt) {
 						o.eng.CodexThumbsUpAt = reaction.CreatedAt
 					}
-					break
 				}
 			}
 		}

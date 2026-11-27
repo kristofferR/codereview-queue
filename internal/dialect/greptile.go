@@ -39,7 +39,9 @@ var (
 	greptileFindingsRE = regexp.MustCompile(`(?im)^\s*(?:<h[1-6]>\s*Findings\s*</h[1-6]>|#{1,6}\s+Findings\s*$)|badges/p[0-3]\.svg`)
 	// greptileReviewedRE captures the SHA from the summary's footer:
 	// `Last reviewed commit: ["subject"](https://github.com/o/r/commit/<sha>)`.
-	greptileReviewedRE = regexp.MustCompile(`(?i)Last reviewed commit:\s*\[[^\]]*\]\([^)]*/commit/([0-9a-f]{7,40})\)`)
+	// It looks for the commit link rather than parsing the label, which is a
+	// commit subject and may contain brackets of its own.
+	greptileReviewedRE = regexp.MustCompile(`(?i)Last reviewed commit:[^\n]*?/commit/([0-9a-f]{7,40})\)`)
 	// greptileCreditPauseRE matches the notice posted when the organization's
 	// prepaid credits are spent. Reviews stop until someone buys more.
 	greptileCreditPauseRE = regexp.MustCompile(`<!--\s*greptile-credit-pause:|(?i)run out of review credits`)

@@ -394,6 +394,10 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	var post []string
 	wait := false
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
+	// A primary that reviews each pull request once and already has never
+	// fires on this head, so the fire step that would have asked always-mode
+	// co-reviewers never runs: ask them here instead.
+	primaryDone := !primaryUnavailable && p.doneForPR(obs, p.Bot)
 	for _, cp := range p.coReviewers() {
 		if p.doneForPR(obs, cp.Login) {
 			continue
@@ -401,7 +405,8 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		co := obs.co(cp.Login)
 		carried := cp.Trigger != TriggerNever && r.Co(cp.Login).SeenActiveAt != nil
 		checksUnknown := r.FiredAt != nil && co.ChecksUnknown
-		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable || r.ForceCoReviewer(cp.Login)
+		gates := requiredBot(p, cp.Login) || co.AutoActive || carried || checksUnknown || primaryUnavailable ||
+			r.ForceCoReviewer(cp.Login) || (primaryDone && cp.Trigger == TriggerAlways)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -423,7 +428,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// it reports the bot, and so the primary, unfinished — leaving Loop to
 		// time out and requeue into the same cycle. A bounded wait is the
 		// honest state: the bot has not spoken, and the deadline ends it.
-		if primaryUnavailable && requiredBot(p, cp.Login) {
+		if (primaryUnavailable || primaryDone) && requiredBot(p, cp.Login) {
 			wait = true
 		}
 	}

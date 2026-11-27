@@ -999,3 +999,28 @@ func TestUnableNoticeSuppressesAlwaysTrigger(t *testing.T) {
 		t.Fatal("an always reviewer that said it cannot finish this round must not be asked again")
 	}
 }
+
+// A once primary that already reviewed never fires on a later head, so this
+// head's co-reviewers are dispatched from the dedupe path: an always-mode bot
+// is still asked, and a silent required one still holds the round.
+func TestOncePrimaryLaterHeadStillDispatchesCoReviewers(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	head := "bbbbbbbbb"
+	queued := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseQueued, EnqueuedAt: now.Add(-time.Minute)}
+	obs := Observation{Head: head, Open: true,
+		Reviews:    []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "aaaaaaaaa0000", SubmittedAt: now.Add(-time.Hour)}},
+		ReviewedPR: map[string]bool{"coderabbitai": true}}
+
+	always := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"}, PrimaryOnce: true,
+		CoReviewers: []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways}}}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, always); d.Verdict != FireCoOnly ||
+		len(d.PostCo) != 1 || !sameBot(d.PostCo[0], dialect.CodexBotLogin) {
+		t.Fatalf("an always-mode co-reviewer must still be asked on a later head: %+v", d)
+	}
+
+	required := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]", dialect.GreptileLogin}, PrimaryOnce: true,
+		CoReviewers: []CoReviewerPolicy{{Login: dialect.GreptileLogin, Trigger: TriggerNever}}}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, required); d.Verdict != FireCoReviewWait {
+		t.Fatalf("a silent required co-reviewer must hold the round, not dedupe it: %+v", d)
+	}
+}

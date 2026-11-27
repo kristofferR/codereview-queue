@@ -968,3 +968,20 @@ func TestReviewOncePerPullRequest(t *testing.T) {
 		t.Fatal("a thumbs-up seen after a push must not answer the previous head's round")
 	}
 }
+
+// An out-of-credits (unable) notice in this round's window suppresses every
+// trigger mode: asking a bot that said it cannot finish only adds a comment.
+func TestUnableNoticeSuppressesAlwaysTrigger(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	cp := CoReviewerPolicy{Login: dialect.GreptileLogin, Command: "@greptile", Trigger: TriggerAlways}
+	round := state.Round{Head: "bbbbbbbbb", EnqueuedAt: now.Add(-time.Hour)}
+	obs := Observation{Head: "bbbbbbbbb", Open: true}
+	if !DecideCoPost(round, obs, cp, false, time.Time{}, now) {
+		t.Fatal("an always reviewer with nothing said is asked")
+	}
+	obs.Events = []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: dialect.GreptileLogin,
+		CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}}
+	if DecideCoPost(round, obs, cp, false, time.Time{}, now) {
+		t.Fatal("an always reviewer that said it cannot finish this round must not be asked again")
+	}
+}

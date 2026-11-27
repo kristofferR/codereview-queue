@@ -274,3 +274,27 @@ func TestThumbsUpAfterPushKeepsACompletedReplacement(t *testing.T) {
 		t.Fatal("the answer must still be recorded")
 	}
 }
+
+// Read only through CRQ_FEEDBACK_BOTS, Greptile is not an enabled co-reviewer,
+// but its summary still lists findings its threads carry and is not one itself.
+func TestGreptileFeedbackOnlySummaryIsNotAFinding(t *testing.T) {
+	base := time.Date(2026, 11, 27, 13, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, func(cfg *Config) {
+		cfg.CoBots = nil
+		cfg.FeedbackBots = unionBots(cfg.RequiredBots, []string{greptileLogin})
+	})
+	repo, pr, sha := "o/r", 46, "3ee8653629153f67c8d1a3abf8de7d7a1c914635"
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	f.greptileComment(repo, pr, 600, corpusMessage(t, "greptile/summary-findings.md"), base.Add(-time.Minute))
+	f.greptileComment(repo, pr, 601, corpusMessage(t, "greptile/summary-clean.md"), base.Add(-time.Minute))
+	rep, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range rep.Findings {
+		if fd.CommentID == 600 || fd.CommentID == 601 {
+			t.Fatalf("a Greptile summary surfaced as a finding: %+v", fd)
+		}
+	}
+}

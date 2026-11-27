@@ -162,7 +162,8 @@ once reviewers (default `greptile`; empty means every push for all; fleet-wide v
 `crq fleet env CRQ_REVIEW_ONCE <a,b>`), and `crq reviewers set REPO --once <a,b>` overrides it per
 repository. After a once reviewer's first review anywhere on the PR, crq neither asks it again nor
 waits for it on later heads; for CodeRabbit that means no further fire or quota. Its unresolved
-findings still block, and resolving them queues no confirmation pass. Greptile is once by default because it reviews a PR when it opens and every
+findings still block, and resolving them queues no confirmation pass. Its thread-less findings stay
+bound to the head they were reported on and are not re-reported after a push: fix or dismiss first. Greptile is once by default because it reviews a PR when it opens and every
 `@greptile` spends a prepaid credit; set to every push, it is nudged for each head it missed.
 
 The persisted feedback deadline bounds unattended rounds too. Once it expires, crq retires the

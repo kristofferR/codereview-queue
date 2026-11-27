@@ -737,7 +737,9 @@ reviews each pull request once. `CRQ_REVIEW_ONCE` names the once reviewers fleet
 push. After a once reviewer's first review anywhere on a PR, crq neither asks it again nor waits for
 it on later heads — for CodeRabbit that means no further fires and no further quota — though its
 unresolved findings still block convergence. Resolving them does not queue a same-head confirmation
-pass either, since that reviewer will not take one. Greptile is once by default: it reviews a PR when it
+pass either, since that reviewer will not take one. Findings with no thread (review-body,
+outside-diff, issue-comment) stay tied to the head they were reported on, as for every reviewer:
+a once reviewer will not report them again after a push, so fix or dismiss them first. Greptile is once by default: it reviews a PR when it
 opens unless its `greptile.json` sets `triggerOnUpdates`, and every `@greptile` spends a prepaid
 credit. Set it to every push and crq nudges it for each head it missed.
 

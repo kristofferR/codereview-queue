@@ -3228,7 +3228,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			primaryUnavailable = report.PrimaryUnavailable
+			primaryUnavailable = report.quotaFree()
 			// Return current-head findings immediately, plus a delayed review
 			// attached to the previous commit when it actually arrived after this
 			// round was queued. The latter is real new feedback, not the old carried

@@ -511,6 +511,11 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	if coCheckAny(obs, cp.Login) {
 		return false
 	}
+	// A bot that said it cannot finish this round (out of credits, usage
+	// limit) cannot be helped by asking again, whatever the mode.
+	if coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) {
+		return false
+	}
 	switch cp.Trigger {
 	case TriggerAlways:
 		// "Always" is the operator's explicit instruction to ask this reviewer
@@ -532,9 +537,6 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 			return true
 		}
 		co := obs.co(cp.Login)
-		if coUnableSince(obs, cp.Login, coSelfHealCutoff(r, cp.Login)) {
-			return false
-		}
 		if !co.AutoActive && !co.ActiveThisRound && r.Co(cp.Login).SeenActiveAt == nil {
 			return false
 		}

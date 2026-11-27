@@ -88,7 +88,15 @@ type FeedbackReport struct {
 	confirmationRoundSeq int64
 	// unreviewable is Completion's reason no reviewer can answer for this head.
 	unreviewable string
+	// primaryDone says the primary reviews each pull request once and already
+	// has, so this head needs nothing from it or from the account quota.
+	primaryDone bool
 }
+
+// quotaFree reports that nothing this round still waits for depends on the
+// account quota: the primary either cannot review this head or already
+// reviewed the pull request once.
+func (r FeedbackReport) quotaFree() bool { return r.PrimaryUnavailable || r.primaryDone }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
 type CoReviewerStatus struct {
@@ -356,7 +364,8 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 		verdictCutoff = obs.eng.HeadAt
 	}
 	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" && !cfg.policy().DoneForPR(obs.eng, cfg.Bot) {
+	report.primaryDone = cfg.policy().DoneForPR(obs.eng, cfg.Bot)
+	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" && !report.primaryDone {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = cfg.Bot + " " + why
 	}
@@ -628,6 +637,13 @@ func (s *Service) feedbackIn(ctx context.Context, st State, repo string, pr int,
 			continue
 		}
 		if cfg.isConfiguredBot(comment.User.Login) {
+			continue
+		}
+		// A registry reviewer read only through CRQ_FEEDBACK_BOTS is not among
+		// the enabled ones the classifier knows, but its summaries and notices
+		// are still not findings.
+		if co, ok := dialect.CoReviewerByName(comment.User.Login); ok && co.ClassifyComment != nil &&
+			co.ClassifyComment(comment.Body).Kind != dialect.EvOther {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
@@ -989,7 +1005,7 @@ func (s *Service) loopClaimed(ctx context.Context, repo string, pr int) (Feedbac
 		// deadline, slow its poll to the block window, and narrate a limit that
 		// has nothing to do with it — while the co-reviewers it IS waiting for
 		// answer in minutes. Leave blockedUntil nil so none of that applies.
-		if !report.PrimaryUnavailable {
+		if !report.quotaFree() {
 			if st, _, lerr := s.store.Load(ctx); lerr == nil {
 				if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
 					blockedUntil = &until

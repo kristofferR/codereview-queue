@@ -1471,6 +1471,10 @@ type CoUnableNote struct {
 	Repo       string    `json:"repo"`
 	PR         int       `json:"pr"`
 	AnsweredAt time.Time `json:"answered_at,omitempty"`
+
+	// unknown carries members a newer binary added inside a note; "co_unable"
+	// is a member this binary recognises, so the State carrier cannot.
+	unknown unknownFields
 }
 
 // Unable reports whether the notice still stands: no answer since.

@@ -951,6 +951,15 @@ func TestReviewOncePerPullRequest(t *testing.T) {
 	if got := Completion(queued, earlier, primary); !got.Done {
 		t.Fatalf("a once primary that already reviewed must not gate a later head: %+v", got)
 	}
+	// The primary not firing must not leave a co-reviewer that is reviewing
+	// this head unwaited for.
+	withCodex := primary
+	withCodex.CoReviewers = []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Trigger: TriggerNever}}
+	reviewing := earlier
+	reviewing.Co = map[string]CoSeen{dialect.NormalizeBotName(dialect.CodexBotLogin): {ActiveThisRound: true}}
+	if got := Completion(queued, reviewing, withCodex); got.Done {
+		t.Fatalf("a participating co-reviewer must gate a head the once primary skips: %+v", got)
+	}
 	primary.PrimaryOnce = false
 	if d := DecideFire(Global{SlotFree: true}, queued, earlier, now, primary); d.Verdict != FirePost {
 		t.Fatalf("an every-push primary fires on each head, got %v (%s)", d.Verdict, d.Reason)

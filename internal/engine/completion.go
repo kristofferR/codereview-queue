@@ -82,7 +82,10 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			break
 		}
 	}
-	roundActivated := r.FiredAt != nil || primaryUnavailable
+	// A primary that reviews each pull request once and already has never
+	// fires on a later head, so — like one that cannot review this head — it
+	// must not leave a participating co-reviewer's review unwaited for.
+	roundActivated := r.FiredAt != nil || primaryUnavailable || p.doneForPR(obs, p.Bot)
 	if roundActivated || carriedReviewer {
 		for _, cp := range p.coReviewers() {
 			if requiredBot(p, cp.Login) || p.doneForPR(obs, cp.Login) {

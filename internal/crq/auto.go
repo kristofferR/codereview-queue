@@ -41,11 +41,25 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		if err != nil {
 			if _, ok := ghapi.ThrottleWait(err); ok {
 				if cont, serr := s.sleepThrottle(ctx, opts, poll, "leader", err); serr != nil || !cont {
-					return serr
+					return s.finishAutoReview(ctx, token, serr)
 				}
 				continue
 			}
-			return err
+			// GitHub failing one lease renewal is not a reason to stop being the
+			// daemon: exiting restarts into the same failure, and the lease this
+			// process holds stays valid for its TTL either way.
+			if ghapi.IsUpstreamFailure(err) && !opts.Once {
+				if s.log != nil {
+					s.log.Printf("autoreview: leader lease: %v; retrying in %s", err, poll.Round(time.Second))
+				}
+				if serr := ghapi.SleepCtx(ctx, poll); serr != nil {
+					return s.finishAutoReview(ctx, token, serr)
+				}
+				continue
+			}
+			// This run may hold the lease from an earlier pass, and a shutdown
+			// that lands mid-renewal must still hand it back.
+			return s.finishAutoReview(ctx, token, err)
 		}
 		// Positive only. A record of "0s" would otherwise turn every daemon in
 		// the fleet into a spin loop from one save, which is a far worse thing

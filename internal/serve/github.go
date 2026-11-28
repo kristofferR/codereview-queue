@@ -60,6 +60,12 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "GitHub request body is too large"})
 		return
 	}
+	// The deadline was for reading the request, and it has been read. Left in
+	// place it expires under a forward that is still running, and net/http
+	// treats that as the client going away: the request context is cancelled and
+	// the caller gets a 502 "context canceled" for a request GitHub was about to
+	// answer. A client that really disconnects still cancels it.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	requestURI, ok := githubRequestURI(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid GitHub gateway path"})
@@ -90,9 +96,12 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(result.Body)
 }
 
+// gatewayReadFloor is the shortest window a gateway request body gets.
+var gatewayReadFloor = 60 * time.Second
+
 func gatewayBodyReadTimeout(contentLength int64) time.Duration {
+	minimum := gatewayReadFloor
 	const (
-		minimum = 60 * time.Second
 		maximum = 45 * time.Minute
 		// 128 KiB/s lets the full gateway body arrive in about 35 minutes while
 		// still expiring a stalled authenticated upload.

@@ -220,7 +220,8 @@ Every GitHub-backed command fails closed when the server is unavailable. `crq au
 running daemon that loses its control plane exits non-zero rather than retrying silently, so the
 service manager's restart policy is the retry and the failure is visible from outside its log. That
 covers a proxy that outlives its backend: `serve` stamps every gateway reply, so a 502 invented by
-the proxy in front of a stopped server is told apart from one GitHub actually returned.
+the proxy in front of a stopped server is told apart from one GitHub actually returned. A 5xx that
+GitHub did return is not a reason to exit: the daemon logs it and retries on its next pass.
 `crq --direct <command>` is the explicit recovery path for an operator; agents and daemons should
 never use it, and nothing falls back to it automatically — that would recreate one poller per host.
 
@@ -870,16 +871,18 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; unacknowledged fires retry after `CRQ_INFLIGHT_TIMEOUT`, while acknowledged reviews retire after `CRQ_FEEDBACK_WAIT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
-| `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
+| `GitHub … rate limit hit … resets …` | The account's GitHub quota is spent. `crq serve` answers every caller at once with the reset time and stops asking GitHub until then, apart from one probe every 30s; each command or daemon waits the reset out itself and carries on. Short pauses GitHub asks for between bursts are absorbed by the server. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |
 
 ## How concurrency works (for the curious)
 
 Every queue change is a **compare-and-swap** on the state ref: crq reads the current commit + tree,
-applies the mutation in memory, writes a new blob/tree/commit, and moves the ref **only if it still
-points where it did** — GitHub rejects a stale update, and crq retries. That gives a real
-cross-machine guarantee with no separate lock to wedge or break. FIFO order uses a monotonic sequence
+applies the mutation in memory, writes a new tree and commit, and moves the ref **only if it still
+points where it did** — GitHub rejects a stale update, and crq retries after a short random pause.
+That gives a real cross-machine guarantee with no separate lock to wedge or break. A revision is
+fetched from GitHub once: commits, trees and blobs are addressed by hash, so `crq serve` keeps the
+recent ones and every other read of that revision costs only the check that the ref has not moved. FIFO order uses a monotonic sequence
 counter (not timestamps), so it's immune to clock differences between machines, and the `autoreview`
 daemon coordinates via a short-lived leader lease stored in the same state.
 

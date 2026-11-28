@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/exec"
@@ -337,6 +338,15 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 		st.Normalize(now)
 		if err := s.compareAndSwap(ctx, &st, rev); err != nil {
 			if errors.Is(err, ErrCASConflict) {
+				if i == attempts-1 {
+					break
+				}
+				// Another writer landed first. Retrying at once is what turns two
+				// writers that woke on the same tick into a run of collisions, each
+				// costing a whole upload — so the losers spread out instead.
+				if serr := gh.SleepCtx(ctx, casRetryDelay(i)); serr != nil {
+					return State{}, serr
+				}
 				continue
 			}
 			return State{}, err
@@ -345,6 +355,19 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 	}
 	return State{}, ErrCASConflict
 }
+
+// casRetryDelay is a random wait that widens with each lost attempt, up to a
+// few seconds.
+func casRetryDelay(attempt int) time.Duration {
+	return rand.N(casRetryBase << min(attempt, 5))
+}
+
+var casRetryBase = 100 * time.Millisecond
+
+// maxInlineState bounds the state a tree request carries inline. GitHub
+// documents no limit for inline tree content; this is comfortably above the
+// size it is known to accept, and a larger state takes the blob route instead.
+var maxInlineState = 2 << 20
 
 func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revision) error {
 	dashboard := RenderDashboard(*st, s.renderConfig(*st))
@@ -356,17 +379,22 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 	if s.gitFallback {
 		return s.compareAndSwapGit(ctx, st.Rev, append(stateJSON, '\n'), []byte(dashboard), rev)
 	}
-	stateBlob, err := s.gh.CreateBlob(ctx, s.cfg.GateRepo, append(stateJSON, '\n'))
-	if err != nil {
-		return err
-	}
-	dashboardBlob, err := s.gh.CreateBlob(ctx, s.cfg.GateRepo, []byte(dashboard))
-	if err != nil {
-		return err
+	// Both files travel inside the tree request and GitHub writes the blobs
+	// itself, so a write is three requests rather than five. Every attempt pays
+	// for them, including the ones that lose the swap.
+	stateEntry := map[string]any{"path": statePath, "mode": "100644", "type": "blob"}
+	if len(stateJSON) < maxInlineState {
+		stateEntry["content"] = string(stateJSON) + "\n"
+	} else {
+		stateBlob, err := s.gh.CreateBlob(ctx, s.cfg.GateRepo, append(stateJSON, '\n'))
+		if err != nil {
+			return err
+		}
+		stateEntry["sha"] = stateBlob
 	}
 	treeSHA, err := s.gh.CreateTree(ctx, s.cfg.GateRepo, rev.TreeSHA, []map[string]any{
-		{"path": statePath, "mode": "100644", "type": "blob", "sha": stateBlob},
-		{"path": dashboardPath, "mode": "100644", "type": "blob", "sha": dashboardBlob},
+		stateEntry,
+		{"path": dashboardPath, "mode": "100644", "type": "blob", "content": dashboard},
 	})
 	if err != nil {
 		return err

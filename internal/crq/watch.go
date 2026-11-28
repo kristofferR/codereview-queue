@@ -160,28 +160,37 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		}
 		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
-			if !throttled {
+			switch {
+			case opts.Once:
+				// A one-shot run is somebody's cron or CI job, and it does not get
+				// to sleep out a reset that may be an hour away. Report the failure:
+				// exiting 0 after checking part of the fleet — or none of it — makes
+				// an incomplete scan look like a clean one, which is the same lie the
+				// per-PR failure path above already refuses to tell.
+				return err
+			case throttled:
+				// Retrying on the ordinary interval hammers an exhausted quota and
+				// pushes the reset further out, which is the opposite of waiting it
+				// out. Sleep for what the API said.
+				if reset > wait {
+					wait = reset
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %v; waiting %s for the reset", err, wait.Round(time.Second))
+				}
+			case ghapi.IsUpstreamFailure(err):
+				// GitHub failed this pass, not this watcher. Exiting hands the retry
+				// to the service manager, which restarts straight into the same
+				// failure — a restart loop for as long as GitHub is unwell, each
+				// start paying for a cold cache. The next pass is the retry.
+				if s.log != nil {
+					s.log.Printf("watch: %v; retrying in %s", err, wait.Round(time.Second))
+				}
+			default:
 				// Includes an unreachable control plane: the service manager's
 				// restart policy is the retry, and a non-zero exit is what makes a
 				// worker with no gateway visible from outside its own log.
 				return err
-			}
-			// A one-shot run is somebody's cron or CI job, and it does not get to
-			// sleep out a reset that may be an hour away. Report the throttle:
-			// exiting 0 after checking part of the fleet — or none of it — makes an
-			// incomplete scan look like a clean one, which is the same lie the
-			// per-PR failure path above already refuses to tell.
-			if opts.Once {
-				return err
-			}
-			// Retrying on the ordinary interval hammers an exhausted quota and
-			// pushes the reset further out, which is the opposite of waiting it
-			// out. Sleep for what the API said.
-			if reset > wait {
-				wait = reset
-			}
-			if s.log != nil {
-				s.log.Printf("watch: %v; waiting %s for the reset", err, wait.Round(time.Second))
 			}
 		}
 		if opts.Once {

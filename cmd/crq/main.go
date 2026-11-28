@@ -136,6 +136,9 @@ func run(ctx context.Context, args []string) int {
 	}
 	if args[0] == "serve" {
 		gh.EnableGETCoalescing()
+		// A client waits out an exhausted quota itself; the gateway only absorbs
+		// the short pauses GitHub asks for between bursts.
+		gh.LimitThrottleWait(10 * time.Second)
 	}
 	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})

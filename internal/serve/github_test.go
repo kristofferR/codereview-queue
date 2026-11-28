@@ -112,6 +112,40 @@ func TestGitHubGatewayAcceptsStateBlobRequestsBeyondTheOldLimit(t *testing.T) {
 	}
 }
 
+type slowGateway struct{ delay time.Duration }
+
+func (g slowGateway) Forward(ctx context.Context, _ string, _ string, _ []byte) (GitHubResponse, error) {
+	select {
+	case <-ctx.Done():
+		return GitHubResponse{}, ctx.Err()
+	case <-time.After(g.delay):
+		return GitHubResponse{Status: http.StatusOK, Body: []byte(`{"number":7}`)}, nil
+	}
+}
+
+func (slowGateway) CanWrite(context.Context, string) (bool, error) { return true, nil }
+
+// The read deadline covers reading the request. Still armed while the forward
+// runs, it expired under any upstream call slower than itself and cancelled the
+// request context, which the caller saw as a 502 "context canceled".
+func TestGatewayForwardOutlivesTheRequestReadDeadline(t *testing.T) {
+	old := gatewayReadFloor
+	gatewayReadFloor = 50 * time.Millisecond
+	t.Cleanup(func() { gatewayReadFloor = old })
+
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Gateway: slowGateway{delay: 400 * time.Millisecond}})
+	httpServer := httptest.NewServer(srv.routes())
+	defer httpServer.Close()
+
+	client, err := ghapi.NewGitHubViaServer(httpServer.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pull, err := client.GetPull(t.Context(), "o/r", 7); err != nil || pull.Number != 7 {
+		t.Fatalf("pull = %+v, err = %v", pull, err)
+	}
+}
+
 func TestGatewayBodyReadTimeoutScalesWithDeclaredSize(t *testing.T) {
 	if got := gatewayBodyReadTimeout(-1); got != time.Minute {
 		t.Fatalf("unknown-length timeout = %s, want one minute", got)

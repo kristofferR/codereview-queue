@@ -26,8 +26,10 @@ type gitData struct {
 	trees   map[string]map[string]string // tree -> path -> blob
 	blobs   map[string]string
 	calls   map[string]int
-	// beforeSwap runs once, ahead of the next ref update, outside the lock.
+	// beforeSwap runs once, ahead of the next ref update, outside the lock;
+	// beforeTree likewise ahead of the next tree upload.
 	beforeSwap func()
+	beforeTree func()
 }
 
 type gitDataCommit struct{ tree, parent string }
@@ -64,13 +66,17 @@ func (d *gitData) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var in map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&in)
 
-	if r.Method == http.MethodPatch {
+	if r.Method == http.MethodPatch || r.Method == http.MethodPost && kind == "trees" {
 		d.mu.Lock()
-		hook := d.beforeSwap
-		d.beforeSwap = nil
+		hook := &d.beforeSwap
+		if r.Method == http.MethodPost {
+			hook = &d.beforeTree
+		}
+		run := *hook
+		*hook = nil
 		d.mu.Unlock()
-		if hook != nil {
-			hook()
+		if run != nil {
+			run()
 		}
 	}
 
@@ -280,5 +286,39 @@ func TestRESTUpdateStopsWaitingWhenCancelled(t *testing.T) {
 	data.mu.Unlock()
 	if _, err := store.Update(ctx, setWarn("mine")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// A writer that landed while this one was loading is noticed before the upload,
+// for one request rather than three.
+func TestRESTWriteSpendsNothingOnAnAttemptThatAlreadyLost(t *testing.T) {
+	old := casRetryBase
+	casRetryBase = time.Millisecond
+	t.Cleanup(func() { casRetryBase = old })
+
+	data := newGitData()
+	store, rival := restStore(t, data), restStore(t, data)
+	ctx := context.Background()
+	if _, err := store.Update(ctx, setWarn("seed")); err != nil {
+		t.Fatal(err)
+	}
+	first := true
+	data.resetCounts()
+	if _, err := store.Update(ctx, func(st *State) error {
+		if first {
+			first = false
+			if _, err := rival.Update(ctx, setWarn("rival")); err != nil {
+				t.Errorf("rival write: %v", err)
+			}
+		}
+		st.CalibrationIssue = 7
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The rival's write and this one's retry upload; the attempt that had
+	// already lost does not.
+	if got := data.count("POST trees"); got != 2 {
+		t.Fatalf("tree uploads = %d, want 2", got)
 	}
 }

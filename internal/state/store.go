@@ -379,6 +379,17 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 	if s.gitFallback {
 		return s.compareAndSwapGit(ctx, st.Rev, append(stateJSON, '\n'), []byte(dashboard), rev)
 	}
+	// Most lost swaps were lost before this attempt began uploading: another
+	// writer landed while this one loaded and rendered. Asking first is usually
+	// free — the gateway revalidates the ref this attempt just loaded, and an
+	// unchanged ref answers 304 — and when it has moved it costs one request
+	// instead of the three below. The swap itself still decides; a failed or
+	// stale answer here just falls through to it.
+	if rev.CommitSHA != "" {
+		if current, err := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef); err == nil && current != rev.CommitSHA {
+			return ErrCASConflict
+		}
+	}
 	// Both files travel inside the tree request and GitHub writes the blobs
 	// itself, so a write is three requests rather than five. Every attempt pays
 	// for them, including the ones that lose the swap.

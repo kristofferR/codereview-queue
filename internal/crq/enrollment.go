@@ -164,7 +164,7 @@ func (s *Service) SetEnrollmentAt(ctx context.Context, repo string, enabled bool
 		if expectedRev != nil && st.Rev != *expectedRev {
 			return fmt.Errorf("fleet state moved from revision %d to %d; preview enrollment again", *expectedRev, st.Rev)
 		}
-		if enabled && s.cfg.WithFleet(st.Fleet).ExcludeRepos[repo] {
+		if cfg := s.cfg.WithFleet(st.Fleet); enabled && (cfg.ExcludeRepos[repo] || excludedByOldName(*st, cfg, repo)) {
 			return fmt.Errorf("%s is in the fleet CRQ_EXCLUDE policy — shared enrollment does not override it", repo)
 		}
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {

@@ -586,8 +586,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if abortsPass(cleanupErr) {
 		return cleanupErr
 	}
+	// One batched write for the whole pass instead of N (#2). Before the sweep
+	// below, so that a throttle it runs into cannot throw away a scan that has
+	// already been paid for.
+	enqueueErr := s.enqueueBatch(ctx, candidates)
 	if sweepErr := s.sweepMergedRecords(ctx, state); sweepErr != nil {
-		if abortsPass(sweepErr) {
+		if abortsPass(sweepErr) && enqueueErr == nil {
 			return sweepErr
 		}
 		// Housekeeping: it is tried again on a later pass, and its failure is
@@ -596,8 +600,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			s.log.Printf("warning: sweeping merged pull requests: %v", sweepErr)
 		}
 	}
-	// One batched write for the whole pass instead of N (#2).
-	return errors.Join(append(targetErrs, cleanupErr, s.enqueueBatch(ctx, candidates))...)
+	return errors.Join(append(targetErrs, cleanupErr, enqueueErr)...)
 }
 
 // retireMergedEvidence inspects at most one terminal PR per repository. It is

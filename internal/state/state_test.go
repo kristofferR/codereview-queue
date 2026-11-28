@@ -912,8 +912,11 @@ func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
 	if _, ok := s.ReviewedHeads[key]; ok {
 		t.Fatal("merged PR kept its review ledger")
 	}
-	if len(s.TidiedCommands[key]) != 0 || s.TidyReactionCursors[key] != 0 {
+	if _, ok := s.TidiedCommands[key]; ok {
 		t.Fatal("merged PR kept its tidy tombstones")
+	}
+	if _, ok := s.TidyReactionCursors[key]; ok {
+		t.Fatal("merged PR kept its tidy reaction cursor")
 	}
 
 	// The archived round still carries the answer; loading must not put the

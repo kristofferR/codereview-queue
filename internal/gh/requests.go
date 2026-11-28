@@ -298,7 +298,9 @@ func ServerRequests(ctx context.Context, serverURL, token string, window time.Du
 		return RequestReport{}, fmt.Errorf("reading request accounting from crq serve: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	// Generous: rows are bounded per minute, not per report, and a report
+	// truncated here would not parse at all.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 	if err != nil {
 		return RequestReport{}, err
 	}

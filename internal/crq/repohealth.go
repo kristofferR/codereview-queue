@@ -97,6 +97,15 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 	apply := func(st *State) bool {
 		notes, holdOff, deferred = notes[:0], map[string]bool{}, deferred[:0]
 		changed := false
+		// What the env lists is read before any rename below rewrites the
+		// fleet's own list: a name that is listed only because a rename in this
+		// very write put it there is not a later, deliberate statement.
+		listed := s.cfg.WithFleet(st.Fleet).AllowRepos
+		// Enrollment carried over from an env listing is written last, once
+		// every record has moved: an "on" written for one old name must not
+		// win over an explicit "off" another old name of the same repository
+		// brings with it.
+		var carry []rename
 		for _, name := range stale {
 			if st.ForgetAlias(name) {
 				changed = true
@@ -125,14 +134,13 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 				}
 				continue
 			}
-			cfg := s.cfg.WithFleet(st.Fleet)
 			record, recorded := st.Enrollment(r.from)
 			_, destination := st.Enrollment(r.to)
 			// An off record under the old name is usually the workaround for
 			// this very rename. Where the new name is listed outright, that
 			// listing is the later and more deliberate statement, so the off
 			// record is dropped instead of being carried over to switch it off.
-			if recorded && !record.Enabled && cfg.AllowRepos[r.to] {
+			if recorded && !record.Enabled && listed[r.to] {
 				st.ClearEnrollment(r.from)
 				recorded, changed = false, true
 			}
@@ -147,10 +155,8 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 			// A name only this host's env enrolled leaves no record to move, and
 			// the new name would silently stop being reviewed. Never where a
 			// record already answers for either name: that answer stands.
-			if reviewed && !recorded && !destination && !s.reviewsRepo(*st, r.to) {
-				st.SetEnrollment(r.to, RepoEnrollment{Enabled: true, Reason: "renamed from " + r.from, By: s.cfg.Host, UpdatedAt: &now})
-				changed = true
-				notes = append(notes, r.to+" enrolled: it is what "+r.from+" is called now")
+			if reviewed && !recorded && !destination {
+				carry = append(carry, r)
 			}
 			// Rounds that arrived under a name the fleet has switched off must
 			// not fire there. Only a record decides that: this host's own env
@@ -158,6 +164,14 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 			if record, ok := st.Enrollment(r.to); ok && !record.Enabled && s.abandonPendingRounds(st, r.to) {
 				changed = true
 			}
+		}
+		for _, r := range carry {
+			if _, decided := st.Enrollment(r.to); decided || s.reviewsRepo(*st, r.to) {
+				continue
+			}
+			st.SetEnrollment(r.to, RepoEnrollment{Enabled: true, Reason: "renamed from " + r.from, By: s.cfg.Host, UpdatedAt: &now})
+			changed = true
+			notes = append(notes, r.to+" enrolled: it is what "+r.from+" is called now")
 		}
 		for _, repo := range missing {
 			_, already := st.RepoMissing(repo)
@@ -205,7 +219,14 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 			return nil
 		})
 		if err != nil {
-			return st, nil, err
+			// Records that could not be moved are still under the old name —
+			// a hold among them. Acting on the new name meanwhile would act
+			// without them, so both names wait for a write that lands.
+			failed := map[string]bool{}
+			for _, r := range renames {
+				failed[r.from], failed[r.to] = true, true
+			}
+			return st, failed, err
 		}
 		next = written
 		if wrote {
@@ -213,8 +234,12 @@ func (s *Service) reconcileRepos(ctx context.Context, st State, seen map[string]
 		}
 	}
 	if s.log != nil {
+		prefix := "repos: "
+		if s.cfg.DryRun {
+			prefix = "repos (dry run, nothing written): "
+		}
 		for _, note := range notes {
-			s.log.Printf("repos: %s", note)
+			s.log.Printf("%s%s", prefix, note)
 		}
 	}
 	for _, r := range deferred {
@@ -387,7 +412,16 @@ func (s *Service) sweepMergedRecords(ctx context.Context, st State) error {
 	for repo := range leftovers {
 		repos = append(repos, repo)
 	}
-	sort.Strings(repos)
+	// Least recently served first, so one turn a pass reaches every repository
+	// in turn; by name alone, a repository late in the alphabet could wait for
+	// ever behind earlier ones whose cooldowns keep running out first.
+	sort.Slice(repos, func(i, j int) bool {
+		a, b := s.mergedSweep[repos[i]].doneAt, s.mergedSweep[repos[j]].doneAt
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return repos[i] < repos[j]
+	})
 	now := s.clock()
 	if s.mergedSweep == nil {
 		s.mergedSweep = map[string]mergedSweepCursor{}

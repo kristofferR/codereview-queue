@@ -266,6 +266,18 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	if excluded := sortedRepoList(fleetCfg.ExcludeRepos); len(excluded) > 0 {
 		looked, lerr := s.gh.LookupRepos(ctx, nil, excluded)
 		if lerr == nil {
+			for _, repo := range excluded {
+				// Not knowing what an excluded repository is called now is a
+				// check that did not happen, and a one-shot run says so.
+				if found := looked[repo]; found.Err != nil {
+					if s.log != nil {
+						s.log.Printf("watch: could not check what excluded %s is called now: %v", repo, found.Err)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s: checking the exclusion: %v", repo, found.Err))
+					}
+				}
+			}
 			var waiting map[string]bool
 			st, waiting, lerr = s.reconcileRepos(ctx, st, looked, nil)
 			for repo := range waiting {
@@ -288,7 +300,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// fleet died with "fork/exec kristofferr/codereview-queue: no such file or
 	// directory". A caller's slice is the caller's.
 	repos := make([]string, 0, len(opts.Repos)+len(fleetCfg.AllowRepos))
-	repos = append(repos, opts.Repos...)
+	// A repository named on the command line follows its recorded rename, or a
+	// long-running watch keeps asking for a name whose records have moved on.
+	for _, repo := range opts.Repos {
+		repos = append(repos, st.ResolveRepo(repo))
+	}
 	if len(repos) == 0 {
 		// Enrollment is a fleet-wide record, and autoreview already builds its
 		// scan list from it. Reading only CRQ_REPOS here meant a repository
@@ -402,6 +418,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				if s.log != nil {
 					s.log.Printf("watch: %s is now %s, and its records could not be moved: %v", repo, current, rerr)
 				}
+				if opts.Once {
+					failures = append(failures, fmt.Sprintf("%s: moving its records to %s: %v", repo, current, rerr))
+				}
+				for name := range waiting {
+					holdOff[name] = true // the records are still under the old name
+				}
 				continue
 			}
 			st = moved
@@ -460,6 +482,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// through the old one.
 		if holdOff[NormalizeRepo(c.repo)] {
 			continue
+		}
+		// Read from the state as it stands after the pass's renames: a
+		// prioritized round moved from an old name counts for the candidate
+		// gathered under the new one before the move.
+		if round := st.Round(c.repo, c.pull.Number); round != nil && round.Seq < 0 {
+			c.priority = round.Seq
 		}
 		if c.priority < 0 {
 			prioritized = append(prioritized, c)

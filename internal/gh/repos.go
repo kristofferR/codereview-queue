@@ -126,6 +126,10 @@ func (g *GitHub) MoreOpenPRs(ctx context.Context, repo, cursor string) ([]Search
 	if state.Missing {
 		return nil, "", ErrNotFound
 	}
+	if state.Archived {
+		// Archived since the first page: nothing in it can be reviewed now.
+		return nil, "", nil
+	}
 	return state.PRs, state.Next, nil
 }
 

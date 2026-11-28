@@ -212,3 +212,25 @@ func TestNoteRepoMissingCountsSeparateDaysOnly(t *testing.T) {
 		t.Fatal("an unconfirmed lookup on a later day changed the record")
 	}
 }
+
+// A confirmation from a lookup that began before midnight, landing on a record
+// a later one already counted, is not a new day.
+func TestNoteRepoMissingNeverCountsAnEarlierDay(t *testing.T) {
+	st := New()
+	day := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	st.NoteRepoMissing("o/app", day, true)
+	if late, changed := st.NoteRepoMissing("o/app", day.Add(-12*time.Hour), true); changed || late.Days != 1 || late.LastDay != "2026-11-28" {
+		t.Fatalf("an earlier day = %+v, %v; want nothing counted and LastDay unchanged", late, changed)
+	}
+}
+
+// The name GitHub just answered with is plainly not missing.
+func TestRenameRepoClearsTheMissingMarkOfTheNewNameToo(t *testing.T) {
+	st := New()
+	day := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	st.NoteRepoMissing("o/new", day, true)
+	st.RenameRepo("o/old", "o/new")
+	if _, marked := st.RepoMissing("o/new"); marked {
+		t.Fatal("the name a rename resolved to is still marked missing")
+	}
+}

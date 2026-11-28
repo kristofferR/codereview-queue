@@ -962,3 +962,129 @@ func (f *mergeFailingGitHub) MergedPRs(ctx context.Context, repo string, prs []i
 	}
 	return f.fakeGitHub.MergedPRs(ctx, repo, prs)
 }
+
+// A rename whose write failed leaves the records — a hold among them — under
+// the old name, so neither name may be acted on until a write lands.
+func TestReconcileHoldsOffBothNamesWhenTheMoveCannotBeWritten(t *testing.T) {
+	cfg := autoReviewConfig()
+	store := &upstreamFailingStore{StateStore: NewMemoryStore(cfg), failUpdate: 1}
+	gh := newFakeGitHub()
+	gh.renamedRepos = map[string]string{"o/old": "o/new"}
+	svc := NewService(cfg, gh, store, nil)
+	looked, err := gh.LookupRepos(context.Background(), nil, []string{"o/old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, holdOff, err := svc.reconcileRepos(context.Background(), State{}, looked, nil)
+	if err == nil || !holdOff["o/old"] || !holdOff["o/new"] {
+		t.Fatalf("holdOff = %v, err = %v; want both names held off after a failed write", holdOff, err)
+	}
+}
+
+// Two old names of one repository, one listed by this host's env and one
+// switched off by a record: the explicit off is what carries over.
+func TestRenameKeepsAnExplicitOffOverAnEnvListingOfAnotherOldName(t *testing.T) {
+	ctx := context.Background()
+	cfg := autoReviewConfig()
+	cfg.AllowRepos = map[string]bool{"o/a": true}
+	gh := newFakeGitHub()
+	gh.renamedRepos = map[string]string{"o/a": "o/c", "o/b": "o/c"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetEnrollment(ctx, "o/b", false, "stopped on purpose"); err != nil {
+		t.Fatal(err)
+	}
+	looked, err := gh.LookupRepos(ctx, nil, []string{"o/a", "o/b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.reconcileRepos(ctx, loadState(t, store), looked, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record, ok := st.Enrollment("o/c"); !ok || record.Enabled {
+		t.Fatalf("enrollment at o/c = %+v (%v), want the explicit off carried over", record, ok)
+	}
+}
+
+// A repository named on the command line follows its recorded rename.
+func TestWatchFollowsARecordedRenameOfAnExplicitTarget(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number = "open", 7
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/new", 7)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetEnrollment("o/old", RepoEnrollment{Enabled: true})
+		st.RenameRepo("o/old", "o/new")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{Repos: []string{"o/old"}}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Repo != "o/new" {
+		t.Fatalf("events = %+v, want the pull request watched under the name its records moved to", events)
+	}
+}
+
+func TestEnrollingANewNameRespectsAnExclusionOfItsOldName(t *testing.T) {
+	ctx := context.Background()
+	cfg := autoReviewConfig()
+	cfg.ExcludeRepos = map[string]bool{"o/old": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.RenameRepo("o/old", "o/new")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnrollment(ctx, "o/new", true, ""); err == nil {
+		t.Fatal("enrolled a repository this host's CRQ_EXCLUDE names by its old name")
+	}
+}
+
+// One turn a pass, least recently served first: a repository late in the
+// alphabet is not kept waiting behind earlier ones.
+func TestMergedSweepServesTheLeastRecentlySweptRepositoryFirst(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	var merged ghapi.Pull
+	merged.State, merged.Merged = "closed", true
+	gh.pulls[fakeKey("o/a", 1)] = merged
+	gh.pulls[fakeKey("o/z", 1)] = merged
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	svc.mergedSweep = map[string]mergedSweepCursor{"o/a": {doneAt: now.Add(-mergedSweepEvery - time.Hour)}}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.RecordTidied("o/a", 1, PostedCommand{ID: 1, Bot: "coderabbitai", At: now})
+		st.RecordTidied("o/z", 1, PostedCommand{ID: 2, Bot: "coderabbitai", At: now})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.sweepMergedRecords(ctx, loadState(t, store)); err != nil {
+		t.Fatal(err)
+	}
+	st := loadState(t, store)
+	if _, ok := st.TidiedCommands[QueueKey("o/z", 1)]; ok {
+		t.Fatal("the never-swept repository waited behind one swept before")
+	}
+	if _, ok := st.TidiedCommands[QueueKey("o/a", 1)]; !ok {
+		t.Fatal("more than one repository was swept in one pass")
+	}
+}

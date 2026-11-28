@@ -39,7 +39,9 @@ func (s *State) NoteRepoMissing(repo string, now time.Time, confirmed bool) (Mis
 	if !marked {
 		missing.Since = now.UTC()
 	}
-	if confirmed && missing.LastDay != today {
+	// Days only move forward: a lookup that began before midnight, or a write
+	// retried against a record a later one already counted, says nothing new.
+	if confirmed && today > missing.LastDay {
 		missing.Days++
 		missing.LastDay = today
 		changed = true
@@ -169,10 +171,13 @@ func (s *State) RenameRepo(from, to string) bool {
 		}
 	}
 
-	// A repository that answers under a new name is not missing.
-	if _, marked := s.MissingRepos[from]; marked {
-		delete(s.MissingRepos, from)
-		changed = true
+	// A repository that answers under a new name is not missing, and neither
+	// is the name GitHub just answered with.
+	for _, name := range []string{from, to} {
+		if _, marked := s.MissingRepos[name]; marked {
+			delete(s.MissingRepos, name)
+			changed = true
+		}
 	}
 	// Earlier names follow along, and the current name leads nowhere.
 	for old, current := range s.RepoAliases {

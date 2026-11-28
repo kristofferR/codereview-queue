@@ -1088,3 +1088,24 @@ func TestMergedSweepServesTheLeastRecentlySweptRepositoryFirst(t *testing.T) {
 		t.Fatal("more than one repository was swept in one pass")
 	}
 }
+
+// A host whose binary predates rename handling recreates rounds under the old
+// name. Every view of a repository crq followed through a rename names it.
+func TestRenamedRepositoryNamesHostsThatDoNotFollowRenames(t *testing.T) {
+	now := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	st := DefaultState(cfg)
+	st.RenameRepo("o/old", "o/new")
+	st.SetHostReport(HostReport{Host: "old-watcher", Caps: CapsRepoReconcile - 1, Roles: []string{"autofix"}}, now)
+
+	for _, repo := range []string{"o/old", "o/new"} {
+		if view := svc.EnrollmentIn(st, repo); len(view.Lagging) != 1 || view.Lagging[0] != "old-watcher" {
+			t.Errorf("%s: lagging = %v, want the watcher that predates rename handling", repo, view.Lagging)
+		}
+	}
+	if view := svc.EnrollmentIn(st, "o/unrelated"); len(view.Lagging) != 0 {
+		t.Errorf("an unrelated repository names lagging hosts: %v", view.Lagging)
+	}
+}

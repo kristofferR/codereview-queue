@@ -82,6 +82,9 @@ const (
 	// CapsPreflightSkipBlocked is the capability a host needs to honour the
 	// shared blocked-preflight policy.
 	CapsPreflightSkipBlocked = crqstate.CapsPreflightSkipBlocked
+	// CapsRepoReconcile is the capability autoreview/autofix hosts need to
+	// follow renamed and missing repositories.
+	CapsRepoReconcile = crqstate.CapsRepoReconcile
 	// WriterCaps is what THIS binary understands, recorded in each host's
 	// self-report so a fleet can see why a host ignores a setting.
 	WriterCaps = crqstate.WriterCaps

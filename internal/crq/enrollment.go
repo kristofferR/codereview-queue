@@ -67,6 +67,11 @@ func (s *Service) Enrollment(ctx context.Context, repo string) (EnrollmentView, 
 // fleet that never touches this.
 func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 	view := s.enrollmentDecided(st, repo)
+	// A repository crq has followed through a rename, or marked missing, is
+	// handled correctly only by hosts that read those records; name the others.
+	if _, marked := st.RepoMissing(repo); marked || st.ResolveRepo(repo) != NormalizeRepo(repo) || aliasTarget(st, repo) {
+		view.Lagging = mergeHosts(view.Lagging, st.LaggingRoleWriters(CapsRepoReconcile, s.clock().UTC(), "autoreview", "autofix"))
+	}
 	if missing, ok := st.RepoMissing(repo); ok && view.Source != "excluded" {
 		// There is nothing on GitHub to review, so every scan path skips it
 		// without each having to learn why. Whatever enrolled it still stands
@@ -124,6 +129,29 @@ func (s *Service) enrollmentDecided(st State, repo string) EnrollmentView {
 		view.Source, view.Enabled = "off", false
 	}
 	return view
+}
+
+// aliasTarget reports whether repo is what an earlier name now leads to.
+func aliasTarget(st State, repo string) bool {
+	for _, current := range st.RepoAliases {
+		if current == NormalizeRepo(repo) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeHosts(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, host := range append(append([]string(nil), a...), b...) {
+		if !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // excludedByOldName reports a repository this host's CRQ_EXCLUDE names by a name

@@ -708,7 +708,13 @@ const SchemaVersion = 7
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 19
+const WriterCaps = 20
+
+// CapsRepoReconcile is the capability autoreview and autofix hosts need to
+// honour RepoAliases and MissingRepos. An older watcher still named for a
+// renamed repository recreates its rounds under the old name, without the
+// holds, settings and review markers that moved to the new one.
+const CapsRepoReconcile = 20
 
 // CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
 // daemons do not recognise that terminal same-head marker and could otherwise

@@ -137,7 +137,12 @@ func run(ctx context.Context, args []string) int {
 	}
 	// Who a gateway attributes this process's requests to.
 	ghapi.Caller = args[0] + "@" + cfg.Host
+	// The lease crq serve hands out so the fleet's state writes queue instead
+	// of colliding; its own writes take the same one.
+	var writeLock *ghapi.WriteLock
 	if args[0] == "serve" {
+		writeLock = &ghapi.WriteLock{}
+		gh.ShareWriteLock(writeLock)
 		gh.EnableGETCoalescing()
 		gh.EnableRequestLog("serve")
 		// A client waits out an exhausted quota itself; the gateway only absorbs
@@ -860,6 +865,7 @@ func run(ctx context.Context, args []string) int {
 			Gateway:        githubGateway{client: gh},
 			GatewayToken:   cfg.ServerToken,
 			Requests:       func(window time.Duration) any { return gh.Requests(window) },
+			WriteLock:      writeLock,
 			Observer:       prObserver{svc: service, readOnly: dashboardReadOnly},
 			ObserverWrites: !dashboardReadOnly,
 			Coster:         prCoster{service},

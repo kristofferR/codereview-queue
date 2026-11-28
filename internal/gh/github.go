@@ -83,6 +83,9 @@ type GitHub struct {
 	// requests counts what this client asked of GitHub; nil unless enabled. See
 	// requests.go.
 	requests *requestLog
+	// writeLock is the state-write lease crq serve hands out, shared with its
+	// own client. See writelock.go.
+	writeLock *WriteLock
 }
 
 type requestGate struct {

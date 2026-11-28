@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -320,5 +321,39 @@ func TestRESTWriteSpendsNothingOnAnAttemptThatAlreadyLost(t *testing.T) {
 	// already lost does not.
 	if got := data.count("POST trees"); got != 2 {
 		t.Fatalf("tree uploads = %d, want 2", got)
+	}
+}
+
+// Writers that share the lease take turns, so none of them loses a swap.
+func TestRESTWritersSharingTheLeaseDoNotCollide(t *testing.T) {
+	data := newGitData()
+	srv := httptest.NewServer(data)
+	t.Cleanup(srv.Close)
+	client := gh.NewTestClient(srv.URL, srv.Client())
+	client.ShareWriteLock(&gh.WriteLock{})
+	cfg := StoreConfig{GateRepo: "owner/state", StateRef: "crq-state-v3", Scope: []string{"owner"}, Host: "test"}
+	ctx := context.Background()
+	if _, err := NewGitStateStore(cfg, client, nil).Update(ctx, setWarn("seed")); err != nil {
+		t.Fatal(err)
+	}
+	data.resetCounts()
+
+	const writers, writes = 4, 5
+	var wg sync.WaitGroup
+	for w := range writers {
+		store := NewGitStateStore(cfg, client, nil)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range writes {
+				if _, err := store.Update(ctx, setWarn(fmt.Sprintf("%d-%d", w, i))); err != nil {
+					t.Errorf("write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := data.count("PATCH refs"); got != writers*writes {
+		t.Fatalf("ref updates = %d for %d writes: writers sharing the lease still collided", got, writers*writes)
 	}
 }

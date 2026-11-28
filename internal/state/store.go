@@ -314,46 +314,58 @@ func (s *GitStateStore) fresh() State {
 func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
 	const attempts = 12
 	for i := 0; i < attempts; i++ {
-		st, rev, err := s.Load(ctx)
-		if err != nil {
-			return State{}, err
+		st, err := s.attempt(ctx, mutate)
+		if !errors.Is(err, ErrCASConflict) {
+			return st, err
 		}
-		var normalized State
-		if rev.normalizedMergedEvidence {
-			normalized = Clone(st)
+		if i == attempts-1 {
+			break
 		}
-		if err := mutate(&st); err != nil {
-			if errors.Is(err, ErrNoChange) && !rev.normalizedMergedEvidence {
-				return st, nil
-			}
-			if !errors.Is(err, ErrNoChange) {
-				return State{}, err
-			}
-			st = normalized
+		// Another writer landed first. Retrying at once is what turns two
+		// writers that woke on the same tick into a run of collisions, each
+		// costing a whole upload — so the losers spread out instead.
+		if serr := gh.SleepCtx(ctx, casRetryDelay(i)); serr != nil {
+			return State{}, serr
 		}
-		now := time.Now().UTC()
-		st.Rev++
-		st.UpdatedAt = &now
-		st.NoteWriter(s.cfg.Host, WriterCaps, now)
-		st.Normalize(now)
-		if err := s.compareAndSwap(ctx, &st, rev); err != nil {
-			if errors.Is(err, ErrCASConflict) {
-				if i == attempts-1 {
-					break
-				}
-				// Another writer landed first. Retrying at once is what turns two
-				// writers that woke on the same tick into a run of collisions, each
-				// costing a whole upload — so the losers spread out instead.
-				if serr := gh.SleepCtx(ctx, casRetryDelay(i)); serr != nil {
-					return State{}, serr
-				}
-				continue
-			}
-			return State{}, err
-		}
-		return st, nil
 	}
 	return State{}, ErrCASConflict
+}
+
+// attempt is one load, mutate and swap, holding the fleet's state-write lease
+// throughout (see gh.LockStateWrites): a swap only fails when another write
+// lands between this one's load and its ref update, and the lease is what keeps
+// that from happening.
+func (s *GitStateStore) attempt(ctx context.Context, mutate func(*State) error) (State, error) {
+	if s.gh != nil {
+		release := s.gh.LockStateWrites(ctx)
+		defer release()
+	}
+	st, rev, err := s.Load(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	var normalized State
+	if rev.normalizedMergedEvidence {
+		normalized = Clone(st)
+	}
+	if err := mutate(&st); err != nil {
+		if errors.Is(err, ErrNoChange) && !rev.normalizedMergedEvidence {
+			return st, nil
+		}
+		if !errors.Is(err, ErrNoChange) {
+			return State{}, err
+		}
+		st = normalized
+	}
+	now := time.Now().UTC()
+	st.Rev++
+	st.UpdatedAt = &now
+	st.NoteWriter(s.cfg.Host, WriterCaps, now)
+	st.Normalize(now)
+	if err := s.compareAndSwap(ctx, &st, rev); err != nil {
+		return State{}, err
+	}
+	return st, nil
 }
 
 // casRetryDelay is a random wait that widens with each lost attempt, up to a

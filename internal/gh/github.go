@@ -73,6 +73,19 @@ type GitHub struct {
 	coalesceGETs bool
 	getGateMu    sync.Mutex
 	getGates     map[string]*requestGate
+	// Git objects fetched by hash, served without revalidation. See gitobjects.go.
+	gitObjects gitObjectCache
+	// Allowances GitHub has said are exhausted. See throttle.go.
+	throttles throttleMemo
+	// maxThrottleWait is the longest this client holds one request while a
+	// throttle clears; 0 waits out any known reset. See LimitThrottleWait.
+	maxThrottleWait time.Duration
+	// requests counts what this client asked of GitHub; nil unless enabled. See
+	// requests.go.
+	requests *requestLog
+	// writeLock is the state-write lease crq serve hands out, shared with its
+	// own client. See writelock.go.
+	writeLock *WriteLock
 }
 
 type requestGate struct {
@@ -122,6 +135,7 @@ type etagEntry struct {
 	etag   string
 	body   []byte
 	header http.Header
+	at     time.Time // when a git object was fetched; unused by the ETag cache
 }
 
 // maxETagEntries bounds the per-process cache; polling workloads touch a small,
@@ -207,17 +221,21 @@ func (r *prefixReadCloser) Close() error {
 	return r.closer.Close()
 }
 
-// cacheGET reads a fresh 200 GET body, remembers it under its ETag, and hands
-// the caller an equivalent response. Responses without an ETag or over the size
-// cap pass through uncached.
-func (g *GitHub) cacheGET(url string, resp *http.Response) (*http.Response, error) {
+// cacheGET reads a fresh 200 GET body, remembers it, and hands the caller an
+// equivalent response. A git object is kept by its hash; anything else under its
+// ETag. Responses over the size cap, or with neither, pass through uncached.
+func (g *GitHub) cacheGET(url string, resp *http.Response, gitObject bool, credential int) (*http.Response, error) {
+	limit := maxETagBody
+	if gitObject {
+		limit = maxGitObjectBody
+	}
 	body := resp.Body
-	b, err := io.ReadAll(io.LimitReader(body, maxETagBody+1))
+	b, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
 	if err != nil {
 		_ = body.Close()
 		return nil, err
 	}
-	if len(b) > maxETagBody {
+	if len(b) > limit {
 		resp.Body = &prefixReadCloser{
 			reader: io.MultiReader(bytes.NewReader(b), body),
 			closer: body,
@@ -225,7 +243,9 @@ func (g *GitHub) cacheGET(url string, resp *http.Response) (*http.Response, erro
 		return resp, nil
 	}
 	_ = body.Close()
-	if etag := resp.Header.Get("ETag"); etag != "" && len(b) <= maxETagBody {
+	if gitObject {
+		g.gitObjects.put(url, &etagEntry{body: b, header: resp.Header.Clone(), at: time.Now()}, credential)
+	} else if etag := resp.Header.Get("ETag"); etag != "" {
 		g.etagStore(url, &etagEntry{etag: etag, body: b, header: resp.Header.Clone()})
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(b))
@@ -262,8 +282,13 @@ func (g *GitHub) authToken() string {
 func (g *GitHub) refreshToken(ctx context.Context) {
 	if t := lookupToken(ctx); t != "" {
 		g.tokenMu.Lock()
+		changed := g.token != t
 		g.token = t
 		g.tokenMu.Unlock()
+		if changed {
+			// What the old credential could read is not what the new one can.
+			g.gitObjects.clear()
+		}
 	}
 }
 
@@ -356,6 +381,13 @@ func (g *GitHub) SetLogger(l Logger) { g.log = l }
 // first. crq serve enables it on its one persistent direct client; ordinary
 // direct clients retain the existing concurrency semantics.
 func (g *GitHub) EnableGETCoalescing() { g.coalesceGETs = true }
+
+// LimitThrottleWait makes a throttle that will not clear within d an immediate
+// error instead of a wait. crq serve sets it on its gateway client: the caller
+// on the other end of a forwarded request is the one that should wait, and it
+// can only do that if it is told. Holding the request instead kept a client
+// waiting on a server that answered an hour later, or never.
+func (g *GitHub) LimitThrottleWait(d time.Duration) { g.maxThrottleWait = d }
 
 // ProbeServer verifies that the configured crq control plane is healthy and,
 // when requested, accepts the writes a daemon needs. It performs no GitHub API
@@ -491,8 +523,9 @@ type graphQLEnvelope struct {
 // gateway uses this same path, so a short-lived remote client never becomes a
 // second owner of GraphQL retry or backoff.
 func (g *GitHub) graphQLResponse(ctx context.Context, body []byte) (*http.Response, graphQLEnvelope, error) {
-	for attempt := 0; ; attempt++ {
-		resp, err := g.send(ctx, http.MethodPost, g.graphBase, body)
+	var tw throttleWait
+	for {
+		resp, err := g.sendWith(ctx, http.MethodPost, g.graphBase, body, &tw)
 		if err != nil {
 			return nil, graphQLEnvelope{}, err
 		}
@@ -508,43 +541,55 @@ func (g *GitHub) graphQLResponse(ctx context.Context, body []byte) (*http.Respon
 			return nil, graphQLEnvelope{}, fmt.Errorf("GitHub response exceeded %d bytes", maxForwardBody)
 		}
 		var envelope graphQLEnvelope
-		decodeErr := json.Unmarshal(payload, &envelope)
-		reset := resp.Header.Get("X-RateLimit-Reset")
-		if decodeErr != nil {
-			return nil, graphQLEnvelope{}, decodeErr
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return nil, graphQLEnvelope{}, err
 		}
 		if len(envelope.Errors) > 0 {
-			msg := envelope.Errors[0].Message
-			// GraphQL reports rate limits as a 200 with a RATE_LIMITED error
-			// rather than 403/429, so retry it with the same backoff as send.
-			if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(strings.ToLower(msg), "rate limit") {
-				rl := &RateLimitError{Kind: "graphql", Method: http.MethodPost, URL: g.graphBase, Remaining: -1}
-				if reset != "" {
-					if epoch, perr := strconv.ParseInt(reset, 10, 64); perr == nil {
-						rl.Until = time.Unix(epoch, 0)
-					}
+			msg := strings.ToLower(envelope.Errors[0].Message)
+			// GraphQL reports rate limits as a 200 with an error rather than
+			// 403/429, so retry it with the same backoff as send.
+			if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(msg, "rate limit") {
+				rl := graphQLRateLimit(resp.Header, msg)
+				rl.Method, rl.URL = http.MethodPost, g.graphBase
+				g.countRequest(ctx, http.MethodPost, g.graphBase, outcomeLimited)
+				// The reset header is always the primary window's. It is the
+				// moment this allowance returns only when the allowance is what
+				// ran out.
+				if rl.Kind == "graphql" && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+					g.noteThrottle("graphql", rl)
 				}
-				wait, known, ok := g.backoffWait(rl, attempt)
-				if !ok {
-					return nil, graphQLEnvelope{}, rl
-				}
-				if g.log != nil {
-					if known {
-						g.log.Printf("github graphql rate limit; waiting %s until reset", wait.Round(time.Second))
-					} else {
-						g.log.Printf("github graphql rate limit; backing off %s (attempt %d/%d)", wait.Round(time.Second), attempt+1, g.maxRetries)
-					}
-				}
-				if serr := SleepCtx(ctx, wait); serr != nil {
-					return nil, graphQLEnvelope{}, serr
+				if werr := g.rideOutThrottle(ctx, rl, &tw); werr != nil {
+					return nil, graphQLEnvelope{}, werr
 				}
 				continue
 			}
 		}
+		// Only here is the allowance known to be back: send saw a 200 either way.
+		g.clearThrottle("graphql", tw.sentAt)
+		g.countRequest(ctx, http.MethodPost, g.graphBase, strconv.Itoa(http.StatusOK))
 		resp.Body = io.NopCloser(bytes.NewReader(payload))
 		resp.ContentLength = int64(len(payload))
 		return resp, envelope, nil
 	}
+}
+
+// graphQLRateLimit classifies a rate limit GitHub reported inside a GraphQL
+// envelope. A secondary limit arrives this way too, and waits for Retry-After
+// (or backs off) rather than for the primary window's reset.
+func graphQLRateLimit(header http.Header, lowerMessage string) *RateLimitError {
+	if ra := strings.TrimSpace(header.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil {
+			return &RateLimitError{Kind: "secondary", Remaining: -1, Until: time.Now().Add(time.Duration(secs) * time.Second)}
+		}
+	}
+	if strings.Contains(lowerMessage, "secondary rate limit") {
+		return &RateLimitError{Kind: "secondary", Remaining: -1}
+	}
+	rl := &RateLimitError{Kind: "graphql", Remaining: -1}
+	if epoch, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+		rl.Until = time.Unix(epoch, 0)
+	}
+	return rl
 }
 
 // UserAgent identifies crq to the GitHub API; the crq package stamps its
@@ -555,6 +600,9 @@ func (g *GitHub) decorate(req *http.Request) {
 	if g.gatewayURL != "" {
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-CRQ-Client", "1")
+		if Caller != "" {
+			req.Header.Set("X-CRQ-Caller", Caller)
+		}
 		if g.gatewayToken != "" {
 			req.Header.Set("Authorization", "Bearer "+g.gatewayToken)
 		}
@@ -621,6 +669,18 @@ func IsRecoverableRead(err error) bool {
 	return errors.As(err, &network)
 }
 
+// IsUpstreamFailure reports that GitHub, or the gateway answering for it, failed
+// the request with a 5xx. It is a statement about that moment, not about the
+// resource or the caller: the same request is expected to work shortly, so a
+// daemon retries on its next pass rather than exiting over it.
+func IsUpstreamFailure(err error) bool {
+	if IsServerUnreachable(err) {
+		return false
+	}
+	var api *APIError
+	return errors.As(err, &api) && api.Status >= 500
+}
+
 // ThrottleWait returns how long to wait before retrying a rate-limited error.
 // The bool is true when err is a rate limit; the duration is 0 when GitHub gave
 // no reset hint (the caller should apply its own default backoff).
@@ -649,8 +709,16 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 	// GitHub returned it inside a 200 GraphQL envelope. Preserve the typed error
 	// across the gateway without adding Retry-After, which would make the remote
 	// client become a second retry/backoff owner.
+	resetUntil := func() time.Time {
+		if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+			if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
+				return time.Unix(epoch, 0)
+			}
+		}
+		return time.Time{}
+	}
 	if kind := strings.TrimSpace(resp.Header.Get("X-CRQ-RateLimit-Kind")); kind != "" {
-		return &RateLimitError{Kind: kind, Remaining: -1}
+		return &RateLimitError{Kind: kind, Remaining: -1, Until: resetUntil()}
 	}
 	lower := strings.ToLower(body)
 	// Secondary limit: honor an explicit Retry-After (seconds).
@@ -665,21 +733,20 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 			remaining = n
 		}
 	}
-	resetUntil := func() time.Time {
-		if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
-			if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
-				return time.Unix(epoch, 0)
-			}
-		}
-		return time.Time{}
-	}
 	// Primary limit: the quota is exhausted; wait until the window resets.
 	if remaining == 0 || strings.Contains(lower, "api rate limit exceeded") {
 		return &RateLimitError{Kind: "primary", Remaining: 0, Until: resetUntil()}
 	}
 	// Secondary/abuse limit without a Retry-After header: caller backs off.
 	if strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "exceeded a secondary") || strings.Contains(lower, "abuse detection") {
-		return &RateLimitError{Kind: "secondary", Remaining: remaining}
+		rl := &RateLimitError{Kind: "secondary", Remaining: remaining}
+		// From GitHub the reset header is the primary window's and says nothing
+		// about this limit. From the gateway it is the wait GitHub asked for,
+		// which the gateway hands on instead of sitting through.
+		if resp.Header.Get("X-CRQ-Gateway") == "1" {
+			rl.Until = resetUntil()
+		}
+		return rl
 	}
 	return nil
 }
@@ -693,16 +760,27 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 // It also retries 5xx and backs off GitHub rate limits with the bounded
 // maxRetries/maxWait budget. Real caller cancellation (ctx done) is never retried.
 func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) (*http.Response, error) {
+	return g.sendWith(ctx, method, fullURL, body, &throttleWait{})
+}
+
+// sendWith is send with the caller's retry and throttle budget, for a caller
+// that makes several attempts of its own on top of the ones made here.
+func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []byte, tw *throttleWait) (*http.Response, error) {
 	requestURL, err := g.transportURL(fullURL)
 	if err != nil {
 		return nil, err
 	}
-	attempt := 0    // bounded retries for 5xx + rate limits
 	netAttempt := 0 // consecutive transient-network retries
 	var offlineSince time.Time
+	bucket := quotaBucket(fullURL)
 	// Conditional GETs: replaying a cached body on 304 keeps repeated polls of
 	// unchanged resources free of REST-quota cost.
 	conditional := method == http.MethodGet && body == nil
+	// Only the client that talks to GitHub keeps git objects: behind a gateway
+	// the gateway's copy is the one whose age says when GitHub last allowed the
+	// read, and a second cache in front of it would stretch that.
+	gitObject := conditional && g.gatewayURL == "" && isGitObjectURL(fullURL)
+	credential := g.gitObjects.credentialNow()
 	var cached *etagEntry
 	if conditional {
 		if g.coalesceGETs {
@@ -712,9 +790,23 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			defer release()
 		}
-		cached = g.etagLookup(fullURL)
+		if gitObject {
+			if object := g.gitObjects.get(fullURL); object != nil {
+				g.countRequest(ctx, method, fullURL, outcomeCached)
+				return object.response(nil), nil
+			}
+		} else {
+			cached = g.etagLookup(fullURL)
+		}
 	}
 	for {
+		if rl := g.throttled(bucket, method, fullURL); rl != nil {
+			g.countRequest(ctx, method, fullURL, outcomeThrottled)
+			if err := g.rideOutThrottle(ctx, rl, tw); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		var rdr io.Reader
 		if body != nil {
 			rdr = bytes.NewReader(body)
@@ -730,12 +822,14 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		if cached != nil {
 			req.Header.Set("If-None-Match", cached.etag)
 		}
+		tw.sentAt = time.Now()
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
 			// Caller cancelled or its deadline passed: surface that, don't retry.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			g.countRequest(ctx, method, fullURL, outcomeError)
 			if isRetryableNetErr(err) {
 				if offlineSince.IsZero() {
 					offlineSince = time.Now()
@@ -798,6 +892,15 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			continue
 		}
+		g.noteQuota(resp.Header)
+		// A refused request is counted once it is known to be a rate limit and
+		// not a permission error, and a GraphQL 200 once its envelope has been
+		// read, since that is where GraphQL says it was refused; everything
+		// else is counted by its status.
+		refusal := resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests
+		if !refusal && !(bucket == "graphql" && resp.StatusCode == http.StatusOK) {
+			g.countRequest(ctx, method, fullURL, strconv.Itoa(resp.StatusCode))
+		}
 		// A response came back: connectivity is fine, reset the offline tracker.
 		if !offlineSince.IsZero() && g.log != nil {
 			g.log.Printf("%s reachable again after %s offline; resuming", g.networkTarget(), time.Since(offlineSince).Round(time.Second))
@@ -810,10 +913,10 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if wait, ok := g.retryBackoff(attempt); ok {
-				attempt++
+			if wait, ok := g.retryBackoff(tw.attempt); ok {
+				tw.attempt++
 				if g.log != nil {
-					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
+					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), tw.attempt, g.maxRetries)
 				}
 				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
@@ -831,10 +934,10 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if wait, ok := g.retryBackoff(attempt); ok {
-				attempt++
+			if wait, ok := g.retryBackoff(tw.attempt); ok {
+				tw.attempt++
 				if g.log != nil {
-					g.log.Printf("github %s %s: HTTP %d with an HTML body (edge error); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
+					g.log.Printf("github %s %s: HTTP %d with an HTML body (edge error); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), tw.attempt, g.maxRetries)
 				}
 				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
@@ -852,11 +955,11 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if wait, ok := g.retryBackoff(attempt); ok {
+			if wait, ok := g.retryBackoff(tw.attempt); ok {
 				g.refreshToken(ctx)
-				attempt++
+				tw.attempt++
 				if g.log != nil {
-					g.log.Printf("github %s %s: 401 unauthorized; refreshing token and retrying in %s (attempt %d/%d)", method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
+					g.log.Printf("github %s %s: 401 unauthorized; refreshing token and retrying in %s (attempt %d/%d)", method, shortURL(fullURL), wait.Round(time.Second), tw.attempt, g.maxRetries)
 				}
 				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
@@ -865,14 +968,19 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
-		if resp.StatusCode == http.StatusNotModified && cached != nil {
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-			_ = resp.Body.Close()
-			return cached.replay(req, resp.Header), nil
-		}
 		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+			// GitHub answered, so whatever throttle was remembered has lifted. A
+			// GraphQL limit arrives inside a 200, so that caller decides instead.
+			if bucket != "graphql" {
+				g.clearThrottle(bucket, tw.sentAt)
+			}
+			if resp.StatusCode == http.StatusNotModified && cached != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+				_ = resp.Body.Close()
+				return cached.replay(req, resp.Header), nil
+			}
 			if conditional && resp.StatusCode == http.StatusOK {
-				return g.cacheGET(fullURL, resp)
+				return g.cacheGET(fullURL, resp, gitObject, credential)
 			}
 			return resp, nil
 		}
@@ -880,24 +988,13 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		resp.Body.Close()
 		rl := rateLimitFrom(resp, string(b))
 		if rl == nil {
+			g.countRequest(ctx, method, fullURL, strconv.Itoa(resp.StatusCode))
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
+		g.countRequest(ctx, method, fullURL, outcomeLimited)
 		rl.Method, rl.URL = method, fullURL
-		wait, known, ok := g.backoffWait(rl, attempt)
-		if !ok {
-			return nil, rl
-		}
-		if !known {
-			attempt++ // hint-less and expired-reset backoffs consume the bounded budget
-		}
-		if g.log != nil {
-			if known {
-				g.log.Printf("github %s rate limit on %s %s; waiting %s until reset", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second))
-			} else {
-				g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
-			}
-		}
-		if err := SleepCtx(ctx, wait); err != nil {
+		g.noteThrottle(bucket, rl)
+		if err := g.rideOutThrottle(ctx, rl, tw); err != nil {
 			return nil, err
 		}
 	}
@@ -1193,6 +1290,12 @@ type Pull struct {
 	Base struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
+		// Repo is the repository the pull request belongs to, under its current
+		// name. Asking by an old name still answers, through GitHub's redirect,
+		// and this is what says the name has moved on.
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"base"`
 	Merged         bool   `json:"merged"`
 	Mergeable      *bool  `json:"mergeable"`

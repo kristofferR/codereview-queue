@@ -80,6 +80,12 @@ type Options struct {
 	// GatewayToken authenticates non-loopback gateway clients. Empty is safe
 	// only for the default loopback-bound server; the handler enforces that.
 	GatewayToken string
+	// Requests reports what the gateway asked of GitHub over the last window
+	// (zero means all it has). Nil serves no accounting.
+	Requests func(window time.Duration) any
+	// WriteLock hands out the lease that lets one state write proceed at a
+	// time across the fleet. Nil serves none, and writers go ahead unqueued.
+	WriteLock WriteLocker
 	// EnrollFor resolves whether crq reviews one repository. Nil falls back to
 	// reading the env lists alone, which is what the dashboard did before
 	// enrollment records existed.
@@ -224,6 +230,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/gateway/health", s.handleGatewayHealth)
+	mux.HandleFunc("GET /api/requests", s.handleRequests)
+	mux.HandleFunc("POST /api/state-lock", s.handleStateLock)
+	mux.HandleFunc("DELETE /api/state-lock", s.handleStateUnlock)
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete} {
 		mux.HandleFunc(method+" /api/github/{path...}", s.handleGitHub)
 	}

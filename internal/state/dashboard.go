@@ -3,7 +3,6 @@ package state
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,11 +10,7 @@ import (
 	"time"
 )
 
-const (
-	stateBegin    = "<!-- crq:state"
-	stateEnd      = "-->"
-	crqProjectURL = "https://github.com/kristofferR/codereview-queue"
-)
+const crqProjectURL = "https://github.com/kristofferR/codereview-queue"
 
 // firstStranded finds an in-flight round that reserved the slot but no longer
 // holds it: it cannot receive feedback (no command was posted) and Pump cannot
@@ -450,7 +445,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	}
 
 	fmt.Fprintf(&b, "\n---\n")
-	fmt.Fprintf(&b, "<sub>🤖 Managed by [crq](%s) · rev %d · updated %s · do not edit by hand (machine state is in the hidden block at the top).</sub>\n",
+	fmt.Fprintf(&b, "<sub>🤖 Managed by [crq](%s) · rev %d · updated %s · do not edit by hand.</sub>\n",
 		crqProjectURL, st.Rev, fmtStamp(st.UpdatedAt, loc))
 	return b.String()
 }
@@ -482,12 +477,24 @@ func RenderTitle(st State, cfg StoreConfig) string {
 	}
 }
 
+// IssueBody is the dashboard issue's text: the dashboard, with a footer that
+// does not change on every revision.
+//
+// It used to carry the whole machine state in a hidden block as well. The
+// state lives in the git ref and nothing read the copy, but it grew past
+// GitHub's 65,536-character limit for an issue body: GitHub kept the old body,
+// so the issue never matched what crq rendered and every sync PATCHed it again
+// — the whole state uploaded once per state write, by every process. The
+// revision number and write time are left out for the same reason: with them
+// the body changed on every write, so every write paid for a read and an edit
+// of the issue that told a reader nothing new.
 func IssueBody(st State, cfg StoreConfig) (string, error) {
-	machine, err := json.Marshal(st)
-	if err != nil {
-		return "", err
+	body := RenderDashboard(st, cfg)
+	if i := strings.LastIndex(body, "\n---\n"); i >= 0 {
+		body = body[:i]
 	}
-	return fmt.Sprintf("%s\n%s\n%s\n\n%s", stateBegin, machine, stateEnd, RenderDashboard(st, cfg)), nil
+	return body + fmt.Sprintf("\n---\n<sub>🤖 Managed by [crq](%s) · do not edit by hand · state: `%s` in %s</sub>\n",
+		crqProjectURL, cfg.StateRef, cfg.GateRepo), nil
 }
 
 func hashString(value string) string {

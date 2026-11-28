@@ -345,6 +345,12 @@ func TestGoldenReplyVerdict(t *testing.T) {
 		// left the thread actionable for ever.
 		{file: "coderabbit/reply-acknowledged.md", withdrawn: true},
 		{file: "coderabbit/reply-acknowledged-follow-up.md", withdrawn: true},
+		// Acceptances of the decision that add "I'm not marking the finding as
+		// addressed": CodeRabbit leaves the resolving to the author, and does
+		// not contest the decline.
+		{file: "coderabbit/reply-accepted-tradeoff.md", withdrawn: true},
+		{file: "coderabbit/reply-understood-decision.md", withdrawn: true},
+		{file: "coderabbit/reply-understood-declining.md", withdrawn: true},
 		{file: "coderabbit/reply-retained.md", retained: true},
 	}
 	for _, tc := range cases {

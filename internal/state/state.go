@@ -655,6 +655,15 @@ type State struct {
 	// RepoAutofix answers "may crq fix pull requests here?" per repository. Absent
 	// means the default, which is yes — see AutofixEnabled.
 	RepoAutofix map[string]RepoAutofixSwitch `json:"repo_autofix,omitempty"`
+	// MissingRepos are the repositories GitHub has stopped resolving. One is
+	// skipped by every scan while it is here, whoever enrolled it and however,
+	// and forgotten once it has been confirmed missing on enough separate days.
+	// See rename.go.
+	MissingRepos map[string]MissingRepo `json:"missing_repos,omitempty"`
+	// RepoAliases maps a repository's earlier names to its current one, so a
+	// command still using an old name — a checkout whose remote was never
+	// updated — reaches the records that moved rather than starting new ones.
+	RepoAliases map[string]string `json:"repo_aliases,omitempty"`
 	// TidiedCommands are durable tombstones for trigger comments Tidy removed.
 	// Unlike Archive, they are not bounded: GitHub can deliver a delayed reply
 	// for as long as the PR conversation exists, and command/reply FIFO pairing
@@ -699,7 +708,13 @@ const SchemaVersion = 7
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 19
+const WriterCaps = 20
+
+// CapsRepoReconcile is the capability autoreview and autofix hosts need to
+// honour RepoAliases and MissingRepos. An older watcher still named for a
+// renamed repository recreates its rounds under the old name, without the
+// holds, settings and review markers that moved to the new one.
+const CapsRepoReconcile = 20
 
 // CapsExpiredRounds is the capability needed to persist PhaseExpired. Older
 // daemons do not recognise that terminal same-head marker and could otherwise
@@ -1355,18 +1370,22 @@ func (r Round) Merged() bool {
 }
 
 // RetireMerged forgets what crq keeps per pull request once it merged: the
-// review-round ledger and the co-reviewer activity and answer indexes. Those
-// indexes are unbounded precisely so a closed PR can reopen with its evidence
-// intact; a merged one cannot, so keeping them would only grow the state ref
-// for ever. Matching archive entries are marked first so Normalize cannot
-// rebuild the retired indexes. Reports whether anything changed.
+// review-round ledger, the co-reviewer activity and answer indexes, and the
+// record of trigger comments written and tidied. Those indexes are unbounded
+// precisely so a closed PR can reopen with its evidence intact; a merged one
+// cannot, so keeping them would only grow the state ref for ever — the tidy
+// tombstones alone had become a third of it. Matching archive entries are
+// marked first so Normalize cannot rebuild the retired indexes. Reports whether
+// anything changed.
 func (s *State) RetireMerged(repo string, pr int) bool {
 	key := Key(repo, pr)
 	_, ledger := s.ReviewedHeads[key]
 	_, activity := s.CoActivity[key]
 	_, answers := s.CoAnswers[key]
 	_, written := s.WrittenCommands[key]
-	changed := ledger || activity || answers || written
+	_, tidied := s.TidiedCommands[key]
+	_, cursor := s.TidyReactionCursors[key]
+	changed := ledger || activity || answers || written || tidied || cursor
 	for i := range s.Archive {
 		round := &s.Archive[i]
 		if Key(round.Repo, round.PR) == key && !round.Merged() {
@@ -1378,6 +1397,8 @@ func (s *State) RetireMerged(repo string, pr int) bool {
 	delete(s.CoActivity, key)
 	delete(s.CoAnswers, key)
 	delete(s.WrittenCommands, key)
+	delete(s.TidiedCommands, key)
+	delete(s.TidyReactionCursors, key)
 	return changed
 }
 

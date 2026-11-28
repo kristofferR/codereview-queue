@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,7 +54,7 @@ type githubGateway struct {
 }
 
 func (g githubGateway) Forward(ctx context.Context, method, requestURI string, body []byte) (serve.GitHubResponse, error) {
-	result, err := g.client.Forward(ctx, method, requestURI, body)
+	result, err := g.client.Forward(ghapi.WithCaller(ctx, serve.CallerOf(ctx)), method, requestURI, body)
 	if err != nil {
 		return serve.GitHubResponse{}, err
 	}
@@ -134,13 +135,25 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
+	// Who a gateway attributes this process's requests to.
+	ghapi.Caller = args[0] + "@" + cfg.Host
+	// The lease crq serve hands out so the fleet's state writes queue instead
+	// of colliding; its own writes take the same one.
+	var writeLock *ghapi.WriteLock
 	if args[0] == "serve" {
+		writeLock = &ghapi.WriteLock{}
+		gh.ShareWriteLock(writeLock)
 		gh.EnableGETCoalescing()
+		gh.EnableRequestLog("serve")
+		// A client waits out an exhausted quota itself; the gateway only absorbs
+		// the short pauses GitHub asks for between bursts.
+		gh.LimitThrottleWait(10 * time.Second)
 	}
 	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
+	args = resolveRenamedRepos(ctx, service, args)
 
 	switch args[0] {
 	case "init":
@@ -187,6 +200,31 @@ func run(ctx context.Context, args []string) int {
 			return 0
 		}
 		fmt.Print(dashboard)
+		// What the gateway spent, beside the queue it was spent on. Best effort:
+		// a server that predates the accounting simply has none to show.
+		if !direct {
+			if report, rerr := ghapi.ServerRequests(ctx, cfg.ServerURL, cfg.ServerToken, time.Hour); rerr == nil {
+				fmt.Print(formatRequests(report, time.Now(), 15))
+			}
+		}
+		return 0
+	case "requests":
+		fs := flag.NewFlagSet("requests", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		window := fs.Duration("window", time.Hour, "how far back to count, to the minute, up to 1h")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if direct {
+			fatal(errors.New("request accounting is kept by crq serve; --direct has none to read"))
+			return 1
+		}
+		report, err := ghapi.ServerRequests(ctx, cfg.ServerURL, cfg.ServerToken, *window)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
 		return 0
 	case "feedback":
 		repo, pr, err := target(ctx, service, args[1:], "crq feedback [<repo> <pr>]")
@@ -826,6 +864,8 @@ func run(ctx context.Context, args []string) int {
 			LookupToken:    ghapi.LookupToken,
 			Gateway:        githubGateway{client: gh},
 			GatewayToken:   cfg.ServerToken,
+			Requests:       func(window time.Duration) any { return gh.Requests(window) },
+			WriteLock:      writeLock,
 			Observer:       prObserver{svc: service, readOnly: dashboardReadOnly},
 			ObserverWrites: !dashboardReadOnly,
 			Coster:         prCoster{service},
@@ -1138,6 +1178,7 @@ USAGE
                                    local CodeRabbit CLI pre-push review as JSON
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
+  crq requests [--window 15m]      what crq serve asked of GitHub, by caller and endpoint
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
   crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
@@ -1500,6 +1541,18 @@ the fleet disagree in silence.
 
 Removing needs --reason. The repository disappears from every queue, and "why did
 this stop being reviewed" is a question the fleet should be able to answer itself.
+
+Renames and deletions are followed without anyone editing this list. A repository
+GitHub now knows by another name has its record, its settings and every per-PR
+record moved to that name, and stays reviewed; the move waits for any fix session
+or interactive loop still working under the old name, and a command that goes on
+using the old name afterwards is led to the new one. A repository GitHub no
+longer resolves is skipped at once and shown with .missing_since; it is reviewed
+again if it comes back, and forgotten once it has been confirmed missing on seven
+separate days. (Not at once: "not found" is also what a credential that lost its
+access sees.) A name that only this host's CRQ_REPOS or CRQ_EXCLUDE still carries
+is something crq cannot rewrite; it says so in its log, and an excluded
+repository stays excluded under its new name.
 `)
 	case "autofix":
 		fmt.Print(`crq autofix install [--agent <path>] [--dry-run] [<repo>...]
@@ -1793,6 +1846,29 @@ Print the dashboard rendered from the CAS state ref.
 That answers "is it still going?" continuously, which is otherwise the question a
 session spends the most tool calls on. It names the next PR only when the queue
 actually knows which one that is.
+
+Below the dashboard, status adds what crq serve asked of GitHub over the last hour:
+the allowances as GitHub last reported them, and the busiest endpoints by caller.
+crq requests prints the same accounting in full.
+`)
+	case "requests":
+		fmt.Print(`crq requests [--window <duration>]
+
+What crq serve asked of GitHub, as JSON: one row per caller and endpoint, busiest
+first, over the last --window (default and maximum 1h, counted by the minute).
+
+  .counted   requests that reached GitHub and drew on the allowance
+  .free      answered 304 — a conditional request GitHub does not charge for
+  .local     never left the server: a cached git object, or a remembered throttle
+  .refused   turned away by GitHub for an exhausted allowance
+  .outcomes  the same activity by status; for PATCH /repos/*/git/refs/heads/* a
+             200 is a state write that landed and a 422 one that lost its swap
+  .quota     each allowance as GitHub last reported it on a response
+
+Every GitHub request in the fleet goes through the one server, so this is the
+whole account's crq traffic — and the place to look when the quota runs dry.
+A caller is the command and host that asked ("autofix@host"); "serve" is the
+server's own polling. Counting restarts with the server (.since).
 `)
 	case "cancel":
 		fmt.Print("crq cancel <repo> <pr>\n\nRemove a PR from queued/in-flight crq state.\n")
@@ -2140,12 +2216,43 @@ func hasFlag(args []string, flag string) bool {
 func target(ctx context.Context, service *crq.Service, args []string, usage string) (string, int, error) {
 	switch repo, pr, ok := repoPR(args); {
 	case ok:
-		return repo, pr, nil
+		return repo, pr, nil // already resolved by resolveRenamedRepos
 	case len(args) == 0:
-		return service.InferTarget(ctx)
+		inferred, number, err := service.InferTarget(ctx)
+		if err != nil {
+			return "", 0, err
+		}
+		// A checkout keeps the remote it was cloned with, so after a rename it
+		// goes on naming the repository the old way. The records moved; follow.
+		return service.CurrentRepo(ctx, inferred), number, nil
 	default:
 		return "", 0, fmt.Errorf("usage: %s", usage)
 	}
+}
+
+// repoArg is an owner/name argument.
+var repoArg = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+
+// resolveRenamedRepos rewrites every owner/name argument that names a
+// repository by a name it no longer has to the name its records moved to.
+//
+// Every command that takes a repository — hold, unhold, dismiss, repos,
+// reviewers, autofix and the rest — would otherwise act on the old name: an
+// unhold that reports success without releasing the hold that moved, an
+// override written where nothing reads it. The resume instructions crq posts on
+// pull requests, and an operator's memory, keep using the old name for a long
+// time. Arguments after "--" belong to another program and are left alone.
+func resolveRenamedRepos(ctx context.Context, service *crq.Service, args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 1; i < len(out); i++ {
+		if out[i] == "--" {
+			break
+		}
+		if repoArg.MatchString(out[i]) {
+			out[i] = service.CurrentRepo(ctx, out[i])
+		}
+	}
+	return out
 }
 
 // unknownFlag returns the first flag in args that is not in allowed.

@@ -76,7 +76,12 @@ func IsReviewFindingWithdrawn(text string) bool {
 		// Agreeing to drop the request concedes too: the bot accepted the
 		// decline and answers every further reply with another acknowledgement.
 		strings.Contains(t, "i won't request this change") ||
-		strings.Contains(t, "i won't request that change")
+		strings.Contains(t, "i won't request that change") ||
+		// Accepting the decision concedes in the same way, even where the
+		// reply adds that it will not mark the finding addressed itself.
+		strings.Contains(t, "i accept the trade-off") ||
+		strings.Contains(t, "i understand the decision") ||
+		strings.Contains(t, "you're declining")
 }
 
 // IsReviewFindingRetained reports whether a bot's reply retains or contests its

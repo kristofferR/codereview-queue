@@ -47,7 +47,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   configured roots and a current-token resolver.
 - `internal/serve/` — persistent control plane and dashboard. Its GitHub gateway is the only
   ordinary path to api.github.com: short-lived CLI processes proxy REST/GraphQL through it, sharing
-  one ETag cache, retry/backoff owner, and same-URL GET coalescer. Command semantics stay in `crq`;
+  one ETag cache, retry/backoff owner, and same-URL GET coalescer. That client also keeps git
+  objects fetched by hash (a state revision is downloaded once, however many processes read it),
+  remembers an exhausted allowance so nothing re-asks GitHub before its reset, and counts every
+  request by caller and endpoint (`crq requests`). Command semantics stay in `crq`;
   `serve` receives narrow interfaces wired by `cmd/crq`.
 - `internal/state/` — persisted schema v7: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
@@ -149,6 +152,22 @@ that the success it reported invites. Every fire gate asks `SlotHeld`, not
 ## observe → decide → apply
 
 One flow drives both the daemon and the loop:
+
+Before any of it, a pass settles what the repositories are called. `autoReviewPass`
+asks about every repository the state names in one batched lookup (`gh.LookupRepos`,
+GraphQL — no search request per repository), and `reconcileRepos` (`crq/repohealth.go`)
+acts on the answer. `State.RenameRepo` moves a renamed repository's enrollment, settings
+and every per-PR record to its current name and remembers the rename in `RepoAliases`,
+which is what leads a command still using the old name to the moved records
+(`Service.CurrentRepo`, at the CLI door) and keeps a host's `CRQ_EXCLUDE` in force under
+the new one. The move is deferred while `State.RepoBusy` — a fix session or an
+interactive loop holds the old name in its own memory — and both names are left alone
+until it has happened. A repository GitHub no longer resolves goes into `MissingRepos`:
+its rounds are taken out of scheduling, `enrollmentOf` reads it as not reviewed however
+it was enrolled, and it is dropped (`State.DropRepo`) only once it has been confirmed
+missing on seven separate days, because "not found" is also what a credential that lost
+its access sees. The watcher lists by REST, which follows a rename silently, so it reads
+the current name off the pull requests themselves and reconciles the same way.
 
 1. **observe** (`crq/observe.go`) — the single place that asks GitHub "what
    happened on this PR" and reduces it to an `engine.Observation` (head, open,

@@ -111,7 +111,7 @@ Durable queue state lives in one small **gate repo** (private is fine), with one
 |-------|-----------|
 | 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database or service account. |
 | 🌐 **Control plane** | `crq serve` owns the GitHub credential, REST/GraphQL retries, backoff, and the shared ETag cache. CLI commands fail closed through it instead of each process spending GitHub quota independently. |
-| 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
+| 📊 **Dashboard issue** | A tracking **issue** renders the live state: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
 ---
@@ -220,7 +220,8 @@ Every GitHub-backed command fails closed when the server is unavailable. `crq au
 running daemon that loses its control plane exits non-zero rather than retrying silently, so the
 service manager's restart policy is the retry and the failure is visible from outside its log. That
 covers a proxy that outlives its backend: `serve` stamps every gateway reply, so a 502 invented by
-the proxy in front of a stopped server is told apart from one GitHub actually returned.
+the proxy in front of a stopped server is told apart from one GitHub actually returned. A 5xx that
+GitHub did return is not a reason to exit: the daemon logs it and retries on its next pass.
 `crq --direct <command>` is the explicit recovery path for an operator; agents and daemons should
 never use it, and nothing falls back to it automatically — that would recreate one poller per host.
 
@@ -547,6 +548,8 @@ crq solver clear <repo> | crq solver clear --fleet
 
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
+                          #    a renamed repository is followed to its new name on its own, and
+                          #    one that is gone is skipped at once and forgotten a week later
 
 crq reviewers <repo>      # which bots review this project, and what each costs
 crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
@@ -557,7 +560,9 @@ crq reviewers clear <repo>                                 # back to the fleet d
 crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
-crq status                # show the dashboard: queue, in-flight, quota, next slot
+crq status                # show the dashboard: queue, in-flight, quota, next slot — and what
+                          #    crq serve asked of GitHub over the last hour
+crq requests [--window 15m] # that request accounting in full, as JSON, by caller and endpoint
 crq doctor                # JSON readiness report (gh/auth/config/CLI) — never writes to GitHub
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
 crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
@@ -870,16 +875,20 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; unacknowledged fires retry after `CRQ_INFLIGHT_TIMEOUT`, while acknowledged reviews retire after `CRQ_FEEDBACK_WAIT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
-| `GitHub … rate limit hit … resets …` | The server backs off once for the whole fleet (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
+| A repository was renamed or deleted | Nothing to do. Each pass asks GitHub about every repository crq knows in one batched query. A renamed one has its enrollment, settings and per-PR records moved to the new name once no fix session or interactive loop is still working under the old one, and commands that keep using the old name are led to the new. A missing one is skipped and marked (`crq repos` shows `.missing_since`) and forgotten once it has been confirmed missing on seven separate days. Only a stale name in a host's own `CRQ_REPOS` or `CRQ_EXCLUDE` needs editing, and the daemon log says which. |
+| The GitHub quota keeps running out | `crq requests` says who asked for what: every request goes through `crq serve`, which counts them by caller and endpoint, separating the ones that cost quota from 304s and from answers it gave without asking GitHub. A `422` on `PATCH …/git/refs/heads/*` is a state write that lost its compare-and-swap. |
+| `GitHub … rate limit hit … resets …` | The account's GitHub quota is spent. `crq serve` answers every caller at once with the reset time and stops asking GitHub until then, apart from one probe every 30s; each command or daemon waits the reset out itself and carries on. Short pauses GitHub asks for between bursts are absorbed by the server. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |
 
 ## How concurrency works (for the curious)
 
 Every queue change is a **compare-and-swap** on the state ref: crq reads the current commit + tree,
-applies the mutation in memory, writes a new blob/tree/commit, and moves the ref **only if it still
-points where it did** — GitHub rejects a stale update, and crq retries. That gives a real
-cross-machine guarantee with no separate lock to wedge or break. FIFO order uses a monotonic sequence
+applies the mutation in memory, writes a new tree and commit, and moves the ref **only if it still
+points where it did** — GitHub rejects a stale update, and crq retries after a short random pause.
+That gives a real cross-machine guarantee with no separate lock to wedge or break. A revision is
+fetched from GitHub once: commits, trees and blobs are addressed by hash, so `crq serve` keeps the
+recent ones and every other read of that revision costs only the check that the ref has not moved. FIFO order uses a monotonic sequence
 counter (not timestamps), so it's immune to clock differences between machines, and the `autoreview`
 daemon coordinates via a short-lived leader lease stored in the same state.
 

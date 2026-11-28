@@ -160,28 +160,37 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		}
 		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
-			if !throttled {
+			switch {
+			case opts.Once:
+				// A one-shot run is somebody's cron or CI job, and it does not get
+				// to sleep out a reset that may be an hour away. Report the failure:
+				// exiting 0 after checking part of the fleet — or none of it — makes
+				// an incomplete scan look like a clean one, which is the same lie the
+				// per-PR failure path above already refuses to tell.
+				return err
+			case throttled:
+				// Retrying on the ordinary interval hammers an exhausted quota and
+				// pushes the reset further out, which is the opposite of waiting it
+				// out. Sleep for what the API said.
+				if reset > wait {
+					wait = reset
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %v; waiting %s for the reset", err, wait.Round(time.Second))
+				}
+			case ghapi.IsUpstreamFailure(err):
+				// GitHub failed this pass, not this watcher. Exiting hands the retry
+				// to the service manager, which restarts straight into the same
+				// failure — a restart loop for as long as GitHub is unwell, each
+				// start paying for a cold cache. The next pass is the retry.
+				if s.log != nil {
+					s.log.Printf("watch: %v; retrying in %s", err, wait.Round(time.Second))
+				}
+			default:
 				// Includes an unreachable control plane: the service manager's
 				// restart policy is the retry, and a non-zero exit is what makes a
 				// worker with no gateway visible from outside its own log.
 				return err
-			}
-			// A one-shot run is somebody's cron or CI job, and it does not get to
-			// sleep out a reset that may be an hour away. Report the throttle:
-			// exiting 0 after checking part of the fleet — or none of it — makes an
-			// incomplete scan look like a clean one, which is the same lie the
-			// per-PR failure path above already refuses to tell.
-			if opts.Once {
-				return err
-			}
-			// Retrying on the ordinary interval hammers an exhausted quota and
-			// pushes the reset further out, which is the opposite of waiting it
-			// out. Sleep for what the API said.
-			if reset > wait {
-				wait = reset
-			}
-			if s.log != nil {
-				s.log.Printf("watch: %v; waiting %s for the reset", err, wait.Round(time.Second))
 			}
 		}
 		if opts.Once {
@@ -191,6 +200,17 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 			return err
 		}
 	}
+}
+
+// currentRepoName is the name GitHub gives the repository these pull requests
+// belong to, or "" when the listing does not say.
+func currentRepoName(pulls []ghapi.Pull) string {
+	for _, pull := range pulls {
+		if name := NormalizeRepo(pull.Base.Repo.FullName); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // abortsPass reports a failure that belongs to the whole pass, not to the
@@ -235,6 +255,44 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		return fmt.Errorf("loading shared state for watch pass: %w", stateErr)
 	}
 	fleetCfg := s.cfg.WithFleet(st.Fleet)
+	// CRQ_EXCLUDE names a repository by the name it had when the line was
+	// written. This host may be the only one that excludes it, so nobody else
+	// will ever ask GitHub what that name is called now — and until somebody
+	// does, the repository is watched under its new name as if the kill switch
+	// did not exist. One query, only on a host that has exclusions.
+	// A rename that has to wait for work in flight records no alias yet, so the
+	// names it leaves alone are carried into this pass's own.
+	holdOff := map[string]bool{}
+	if excluded := sortedRepoList(fleetCfg.ExcludeRepos); len(excluded) > 0 {
+		looked, lerr := s.gh.LookupRepos(ctx, nil, excluded)
+		if lerr == nil {
+			for _, repo := range excluded {
+				// Not knowing what an excluded repository is called now is a
+				// check that did not happen, and a one-shot run says so.
+				if found := looked[repo]; found.Err != nil {
+					if s.log != nil {
+						s.log.Printf("watch: could not check what excluded %s is called now: %v", repo, found.Err)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s: checking the exclusion: %v", repo, found.Err))
+					}
+				}
+			}
+			var waiting map[string]bool
+			st, waiting, lerr = s.reconcileRepos(ctx, st, looked, nil)
+			for repo := range waiting {
+				holdOff[repo] = true
+			}
+		}
+		if lerr != nil {
+			if abortsPass(lerr) {
+				return lerr
+			}
+			if s.log != nil {
+				s.log.Printf("watch: checking what the CRQ_EXCLUDE repositories are called now: %v", lerr)
+			}
+		}
+	}
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
@@ -242,7 +300,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// fleet died with "fork/exec kristofferr/codereview-queue: no such file or
 	// directory". A caller's slice is the caller's.
 	repos := make([]string, 0, len(opts.Repos)+len(fleetCfg.AllowRepos))
-	repos = append(repos, opts.Repos...)
+	// A repository named on the command line follows its recorded rename, or a
+	// long-running watch keeps asking for a name whose records have moved on.
+	for _, repo := range opts.Repos {
+		repos = append(repos, st.ResolveRepo(repo))
+	}
 	if len(repos) == 0 {
 		// Enrollment is a fleet-wide record, and autoreview already builds its
 		// scan list from it. Reading only CRQ_REPOS here meant a repository
@@ -289,7 +351,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// A repository turned off from the dashboard must stop being watched on the
 	// next pass, not on restart.
 	notEnrolled := map[string]bool{}
+	watching := make(map[string]bool, len(repos))
 	for _, repo := range repos {
+		watching[NormalizeRepo(repo)] = true
 		if !st.AutofixEnabled(repo) {
 			autofixOff[NormalizeRepo(repo)] = true
 		}
@@ -315,7 +379,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 		// "crq does not go here" has to mean that to every path, including the
 		// one that spends an agent on a fix session.
-		if notEnrolled[NormalizeRepo(repo)] {
+		if notEnrolled[NormalizeRepo(repo)] || holdOff[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
@@ -336,6 +400,51 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				failures = append(failures, fmt.Sprintf("%s: %v", repo, err))
 			}
 			continue
+		}
+		// A repository asked about by an old name still answers, through
+		// GitHub's redirect, and every pull request it lists says what the
+		// repository is called now. Carrying on under the old name tracks the
+		// same pull requests twice, and reviews them twice.
+		if current := currentRepoName(pulls); current != "" && current != NormalizeRepo(repo) {
+			// Moved first, and only then deduplicated: the records under the old
+			// name — holds, reviewer overrides, the rounds that say a head was
+			// already reviewed — are what the current name is about to be
+			// watched with, whether or not it is in this pass on its own account.
+			moved, waiting, rerr := s.reconcileRepos(ctx, st, map[string]ghapi.RepoState{NormalizeRepo(repo): {Name: current}}, nil)
+			if rerr != nil {
+				if abortsPass(rerr) {
+					return rerr
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %s is now %s, and its records could not be moved: %v", repo, current, rerr)
+				}
+				if opts.Once {
+					failures = append(failures, fmt.Sprintf("%s: moving its records to %s: %v", repo, current, rerr))
+				}
+				for name := range waiting {
+					holdOff[name] = true // the records are still under the old name
+				}
+				continue
+			}
+			st = moved
+			if waiting[current] {
+				// Work in flight still holds the old name. Until it finishes,
+				// neither name is acted on: the same pull request would be
+				// worked from both sides.
+				holdOff[current] = true
+				continue
+			}
+			if watching[current] {
+				continue // its current name is in this pass as well
+			}
+			repo = current
+			watching[current] = true
+			if !s.reviewsRepo(st, repo) {
+				continue
+			}
+			if !st.AutofixEnabled(repo) {
+				autofixOff[repo] = true
+			}
 		}
 		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
@@ -369,6 +478,17 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// repository/PR order from starving the tail when dispatch capacity is full.
 	var prioritized, regular []candidate
 	for _, c := range candidates {
+		// Gathered under its current name before the rename was noticed
+		// through the old one.
+		if holdOff[NormalizeRepo(c.repo)] {
+			continue
+		}
+		// Read from the state as it stands after the pass's renames: a
+		// prioritized round moved from an old name counts for the candidate
+		// gathered under the new one before the move.
+		if round := st.Round(c.repo, c.pull.Number); round != nil && round.Seq < 0 {
+			c.priority = round.Seq
+		}
 		if c.priority < 0 {
 			prioritized = append(prioritized, c)
 		} else {

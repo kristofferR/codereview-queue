@@ -42,6 +42,7 @@ var (
 	onePassFields         = jsonFieldNames(reflect.TypeOf(OnePassProgress{}))
 	onePassEvidenceFields = jsonFieldNames(reflect.TypeOf(OnePassEvidence{}))
 	coUnableFields        = jsonFieldNames(reflect.TypeOf(CoUnableNote{}))
+	missingRepoFields     = jsonFieldNames(reflect.TypeOf(MissingRepo{}))
 )
 
 // UnmarshalJSON decodes campaign review evidence while preserving fields from
@@ -315,6 +316,31 @@ func (e *RepoEnrollment) UnmarshalJSON(raw []byte) error {
 func (e RepoEnrollment) MarshalJSON() ([]byte, error) {
 	type plain RepoEnrollment
 	return mergeUnknown(plain(e), e.unknown)
+}
+
+// UnmarshalJSON decodes a missing-repository record and remembers anything it
+// did not recognise: "missing_repos" is a member every binary that has the map
+// recognises, so only the record can carry a member a newer one added inside it.
+func (m *MissingRepo) UnmarshalJSON(raw []byte) error {
+	type plain MissingRepo
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, missingRepoFields)
+	if err != nil {
+		return err
+	}
+	*m = MissingRepo(decoded)
+	m.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a missing-repository record back with the members it did
+// not recognise intact.
+func (m MissingRepo) MarshalJSON() ([]byte, error) {
+	type plain MissingRepo
+	return mergeUnknown(plain(m), m.unknown)
 }
 
 // UnmarshalJSON decodes a repository autofix switch and remembers anything it

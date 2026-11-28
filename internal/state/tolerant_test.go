@@ -785,3 +785,25 @@ func TestCoUnableNoteKeepsUnknownMembers(t *testing.T) {
 		t.Errorf("answered_at = %#v, want the recorded answer", note["answered_at"])
 	}
 }
+
+// A missing-repository record is nested beneath a known State member, so a
+// member a newer binary adds inside it must survive an older one counting a day.
+func TestMissingRepoCarriesUnknownFields(t *testing.T) {
+	var st State
+	if err := json.Unmarshal([]byte(`{
+	  "v": 7,
+	  "missing_repos": {
+	    "owner/repo": {"since": "2026-11-28T00:00:00Z", "days": 1, "last_day": "2026-11-28", "future_missing_policy": {"mode": "audit"}}
+	  }
+	}`), &st); err != nil {
+		t.Fatal(err)
+	}
+	st.NoteRepoMissing("owner/repo", time.Date(2026, 11, 29, 0, 0, 0, 0, time.UTC), true)
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"future_missing_policy":{"mode":"audit"}`) || !strings.Contains(string(out), `"days":2`) {
+		t.Fatalf("counting a day dropped a future field or lost the count: %s", out)
+	}
+}

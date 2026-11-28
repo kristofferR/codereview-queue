@@ -17,6 +17,8 @@ type MissingRepo struct {
 	// repository, and neither do two failures a week apart.
 	Days    int    `json:"days"`
 	LastDay string `json:"last_day,omitempty"`
+
+	unknown unknownFields
 }
 
 // RepoMissing reports whether repo is marked missing, and since when.

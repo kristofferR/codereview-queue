@@ -111,7 +111,7 @@ Durable queue state lives in one small **gate repo** (private is fine), with one
 |-------|-----------|
 | 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database or service account. |
 | 🌐 **Control plane** | `crq serve` owns the GitHub credential, REST/GraphQL retries, backoff, and the shared ETag cache. CLI commands fail closed through it instead of each process spending GitHub quota independently. |
-| 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
+| 📊 **Dashboard issue** | A tracking **issue** renders the live state: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
 ---

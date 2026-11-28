@@ -1100,3 +1100,36 @@ func TestCoReviewerCellListsOnlyCoBotOverrides(t *testing.T) {
 		}
 	}
 }
+
+// The dashboard issue holds what a person reads, and nothing that changes on
+// every write. With the whole state embedded it outgrew GitHub's issue-body
+// limit and was rewritten on every sync; with the revision in its footer it
+// changed on every write.
+func TestIssueBodyStaysSmallAndStableAcrossRevisions(t *testing.T) {
+	st := New()
+	for i := range 2000 {
+		st.Archive = append(st.Archive, Round{Repo: "owner/repo", PR: i + 1, Head: "abcdef123"})
+	}
+	cfg := StoreConfig{GateRepo: "owner/gate", StateRef: "crq-state-v3"}
+	first, err := IssueBody(st, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := st
+	later.Rev += 5
+	now := time.Now().UTC()
+	later.UpdatedAt = &now
+	second, err := IssueBody(later, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("the issue body changed with nothing but the revision and write time")
+	}
+	if len(first) > 65536 || strings.Contains(first, `"archive"`) {
+		t.Fatalf("the issue body carries machine state (%d bytes)", len(first))
+	}
+	if !strings.Contains(first, "crq-state-v3") {
+		t.Fatal("the issue body no longer says where the state lives")
+	}
+}

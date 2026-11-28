@@ -582,6 +582,7 @@ Diagnostics only:
 ```bash
 crq doctor
 crq status
+crq requests              # what crq serve asked of GitHub, by caller and endpoint (JSON)
 crq debug forget-host <host>
 crq debug state
 crq debug refresh

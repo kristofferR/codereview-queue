@@ -47,7 +47,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← {engine, serve}`, `engine
   configured roots and a current-token resolver.
 - `internal/serve/` — persistent control plane and dashboard. Its GitHub gateway is the only
   ordinary path to api.github.com: short-lived CLI processes proxy REST/GraphQL through it, sharing
-  one ETag cache, retry/backoff owner, and same-URL GET coalescer. Command semantics stay in `crq`;
+  one ETag cache, retry/backoff owner, and same-URL GET coalescer. That client also keeps git
+  objects fetched by hash (a state revision is downloaded once, however many processes read it),
+  remembers an exhausted allowance so nothing re-asks GitHub before its reset, and counts every
+  request by caller and endpoint (`crq requests`). Command semantics stay in `crq`;
   `serve` receives narrow interfaces wired by `cmd/crq`.
 - `internal/state/` — persisted schema v7: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the

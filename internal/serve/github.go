@@ -75,7 +75,7 @@ func (s *Server) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this server is read-only"})
 		return
 	}
-	result, err := s.opts.Gateway.Forward(r.Context(), r.Method, requestURI, body)
+	result, err := s.opts.Gateway.Forward(withCaller(r), r.Method, requestURI, body)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return

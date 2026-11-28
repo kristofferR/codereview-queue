@@ -558,7 +558,9 @@ crq reviewers clear <repo>                                 # back to the fleet d
 crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
-crq status                # show the dashboard: queue, in-flight, quota, next slot
+crq status                # show the dashboard: queue, in-flight, quota, next slot — and what
+                          #    crq serve asked of GitHub over the last hour
+crq requests [--window 15m] # that request accounting in full, as JSON, by caller and endpoint
 crq doctor                # JSON readiness report (gh/auth/config/CLI) — never writes to GitHub
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
 crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
@@ -871,6 +873,7 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; unacknowledged fires retry after `CRQ_INFLIGHT_TIMEOUT`, while acknowledged reviews retire after `CRQ_FEEDBACK_WAIT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
+| The GitHub quota keeps running out | `crq requests` says who asked for what: every request goes through `crq serve`, which counts them by caller and endpoint, separating the ones that cost quota from 304s and from answers it gave without asking GitHub. A `422` on `PATCH …/git/refs/heads/*` is a state write that lost its compare-and-swap. |
 | `GitHub … rate limit hit … resets …` | The account's GitHub quota is spent. `crq serve` answers every caller at once with the reset time and stops asking GitHub until then, apart from one probe every 30s; each command or daemon waits the reset out itself and carries on. Short pauses GitHub asks for between bursts are absorbed by the server. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |

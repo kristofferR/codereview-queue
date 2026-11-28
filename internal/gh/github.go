@@ -80,6 +80,9 @@ type GitHub struct {
 	// maxThrottleWait is the longest this client holds one request while a
 	// throttle clears; 0 waits out any known reset. See LimitThrottleWait.
 	maxThrottleWait time.Duration
+	// requests counts what this client asked of GitHub; nil unless enabled. See
+	// requests.go.
+	requests *requestLog
 }
 
 type requestGate struct {
@@ -592,6 +595,9 @@ func (g *GitHub) decorate(req *http.Request) {
 	if g.gatewayURL != "" {
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-CRQ-Client", "1")
+		if Caller != "" {
+			req.Header.Set("X-CRQ-Caller", Caller)
+		}
 		if g.gatewayToken != "" {
 			req.Header.Set("Authorization", "Bearer "+g.gatewayToken)
 		}
@@ -781,6 +787,7 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 		}
 		if gitObject {
 			if object := g.gitObjects.get(fullURL); object != nil {
+				g.countRequest(ctx, method, fullURL, outcomeCached)
 				return object.response(nil), nil
 			}
 		} else {
@@ -789,6 +796,7 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 	}
 	for {
 		if rl := g.throttled(bucket, method, fullURL); rl != nil {
+			g.countRequest(ctx, method, fullURL, outcomeThrottled)
 			if err := g.rideOutThrottle(ctx, rl, tw); err != nil {
 				return nil, err
 			}
@@ -816,6 +824,7 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			g.countRequest(ctx, method, fullURL, outcomeError)
 			if isRetryableNetErr(err) {
 				if offlineSince.IsZero() {
 					offlineSince = time.Now()
@@ -877,6 +886,12 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 				return nil, serr
 			}
 			continue
+		}
+		g.noteQuota(resp.Header)
+		// A refused request is counted once it is known to be a rate limit and
+		// not a permission error; everything else is counted by its status.
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+			g.countRequest(ctx, method, fullURL, strconv.Itoa(resp.StatusCode))
 		}
 		// A response came back: connectivity is fine, reset the offline tracker.
 		if !offlineSince.IsZero() && g.log != nil {
@@ -965,8 +980,10 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 		resp.Body.Close()
 		rl := rateLimitFrom(resp, string(b))
 		if rl == nil {
+			g.countRequest(ctx, method, fullURL, strconv.Itoa(resp.StatusCode))
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
+		g.countRequest(ctx, method, fullURL, outcomeLimited)
 		rl.Method, rl.URL = method, fullURL
 		g.noteThrottle(bucket, rl)
 		if err := g.rideOutThrottle(ctx, rl, tw); err != nil {

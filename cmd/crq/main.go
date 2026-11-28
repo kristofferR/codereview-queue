@@ -53,7 +53,7 @@ type githubGateway struct {
 }
 
 func (g githubGateway) Forward(ctx context.Context, method, requestURI string, body []byte) (serve.GitHubResponse, error) {
-	result, err := g.client.Forward(ctx, method, requestURI, body)
+	result, err := g.client.Forward(ghapi.WithCaller(ctx, serve.CallerOf(ctx)), method, requestURI, body)
 	if err != nil {
 		return serve.GitHubResponse{}, err
 	}
@@ -134,8 +134,11 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
+	// Who a gateway attributes this process's requests to.
+	ghapi.Caller = args[0] + "@" + cfg.Host
 	if args[0] == "serve" {
 		gh.EnableGETCoalescing()
+		gh.EnableRequestLog("serve")
 		// A client waits out an exhausted quota itself; the gateway only absorbs
 		// the short pauses GitHub asks for between bursts.
 		gh.LimitThrottleWait(10 * time.Second)
@@ -190,6 +193,31 @@ func run(ctx context.Context, args []string) int {
 			return 0
 		}
 		fmt.Print(dashboard)
+		// What the gateway spent, beside the queue it was spent on. Best effort:
+		// a server that predates the accounting simply has none to show.
+		if !direct {
+			if report, rerr := ghapi.ServerRequests(ctx, cfg.ServerURL, cfg.ServerToken, time.Hour); rerr == nil {
+				fmt.Print(formatRequests(report, time.Now(), 15))
+			}
+		}
+		return 0
+	case "requests":
+		fs := flag.NewFlagSet("requests", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		window := fs.Duration("window", time.Hour, "how far back to count, up to 1h")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if direct {
+			fatal(errors.New("request accounting is kept by crq serve; --direct has none to read"))
+			return 1
+		}
+		report, err := ghapi.ServerRequests(ctx, cfg.ServerURL, cfg.ServerToken, *window)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
 		return 0
 	case "feedback":
 		repo, pr, err := target(ctx, service, args[1:], "crq feedback [<repo> <pr>]")
@@ -829,6 +857,7 @@ func run(ctx context.Context, args []string) int {
 			LookupToken:    ghapi.LookupToken,
 			Gateway:        githubGateway{client: gh},
 			GatewayToken:   cfg.ServerToken,
+			Requests:       func(window time.Duration) any { return gh.Requests(window) },
 			Observer:       prObserver{svc: service, readOnly: dashboardReadOnly},
 			ObserverWrites: !dashboardReadOnly,
 			Coster:         prCoster{service},
@@ -1141,6 +1170,7 @@ USAGE
                                    local CodeRabbit CLI pre-push review as JSON
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
+  crq requests [--window 15m]      what crq serve asked of GitHub, by caller and endpoint
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
   crq debug <enqueue|forget-host|merge-ready|pump|refresh|retire-merged|state>
@@ -1796,6 +1826,29 @@ Print the dashboard rendered from the CAS state ref.
 That answers "is it still going?" continuously, which is otherwise the question a
 session spends the most tool calls on. It names the next PR only when the queue
 actually knows which one that is.
+
+Below the dashboard, status adds what crq serve asked of GitHub over the last hour:
+the allowances as GitHub last reported them, and the busiest endpoints by caller.
+crq requests prints the same accounting in full.
+`)
+	case "requests":
+		fmt.Print(`crq requests [--window <duration>]
+
+What crq serve asked of GitHub, as JSON: one row per caller and endpoint, busiest
+first, over the last --window (default and maximum 1h).
+
+  .counted   requests that reached GitHub and drew on the allowance
+  .free      answered 304 — a conditional request GitHub does not charge for
+  .local     never left the server: a cached git object, or a remembered throttle
+  .refused   turned away by GitHub for an exhausted allowance
+  .outcomes  the same activity by status; for PATCH /repos/*/git/refs/heads/* a
+             200 is a state write that landed and a 422 one that lost its swap
+  .quota     each allowance as GitHub last reported it on a response
+
+Every GitHub request in the fleet goes through the one server, so this is the
+whole account's crq traffic — and the place to look when the quota runs dry.
+A caller is the command and host that asked ("autofix@host"); "serve" is the
+server's own polling. Counting restarts with the server (.since).
 `)
 	case "cancel":
 		fmt.Print("crq cancel <repo> <pr>\n\nRemove a PR from queued/in-flight crq state.\n")

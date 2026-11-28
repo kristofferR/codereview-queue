@@ -481,8 +481,8 @@ outside that scope is searched by name alongside it.
 
 Renames and deletions need no action. A repository GitHub now knows by another name has its record,
 settings and per-PR records moved to that name and stays reviewed. The move waits while a fix session
-or an interactive loop is still working under the old name, and afterwards `crq next`/`loop`/`wait`
-called with the old name (a checkout whose remote was never updated) act on the new one. A repository
+or an interactive loop is still working under the old name, and afterwards any command given the old
+name (a checkout whose remote was never updated, a resume line crq posted earlier) acts on the new one. A repository
 GitHub no longer resolves is skipped at once, reported with `.missing_since`, reviewed again if it
 returns, and forgotten once it has been confirmed missing on seven separate days. Do not add an "off"
 record for an old name as a workaround. Only a stale name in a host's own `CRQ_REPOS` or

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -147,6 +148,7 @@ func run(ctx context.Context, args []string) int {
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	defer store.Close()
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
+	args = resolveRenamedRepos(ctx, service, args)
 
 	switch args[0] {
 	case "init":
@@ -2206,23 +2208,45 @@ func hasFlag(args []string, flag string) bool {
 // inside the repository, so making them carry a repo and number they are already
 // standing in is two chances to name the wrong PR silently.
 func target(ctx context.Context, service *crq.Service, args []string, usage string) (string, int, error) {
-	var repo string
-	var pr int
-	switch named, number, ok := repoPR(args); {
+	switch repo, pr, ok := repoPR(args); {
 	case ok:
-		repo, pr = named, number
+		return repo, pr, nil // already resolved by resolveRenamedRepos
 	case len(args) == 0:
 		inferred, number, err := service.InferTarget(ctx)
 		if err != nil {
 			return "", 0, err
 		}
-		repo, pr = inferred, number
+		// A checkout keeps the remote it was cloned with, so after a rename it
+		// goes on naming the repository the old way. The records moved; follow.
+		return service.CurrentRepo(ctx, inferred), number, nil
 	default:
 		return "", 0, fmt.Errorf("usage: %s", usage)
 	}
-	// A checkout keeps the remote it was cloned with, so after a rename it goes
-	// on naming the repository the old way. The records moved; follow them.
-	return service.CurrentRepo(ctx, repo), pr, nil
+}
+
+// repoArg is an owner/name argument.
+var repoArg = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+
+// resolveRenamedRepos rewrites every owner/name argument that names a
+// repository by a name it no longer has to the name its records moved to.
+//
+// Every command that takes a repository — hold, unhold, dismiss, repos,
+// reviewers, autofix and the rest — would otherwise act on the old name: an
+// unhold that reports success without releasing the hold that moved, an
+// override written where nothing reads it. The resume instructions crq posts on
+// pull requests, and an operator's memory, keep using the old name for a long
+// time. Arguments after "--" belong to another program and are left alone.
+func resolveRenamedRepos(ctx context.Context, service *crq.Service, args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 1; i < len(out); i++ {
+		if out[i] == "--" {
+			break
+		}
+		if repoArg.MatchString(out[i]) {
+			out[i] = service.CurrentRepo(ctx, out[i])
+		}
+	}
+	return out
 }
 
 // unknownFlag returns the first flag in args that is not in allowed.

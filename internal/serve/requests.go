@@ -27,9 +27,11 @@ func withCaller(r *http.Request) context.Context {
 // handleRequests reports what this server asked of GitHub recently, by caller
 // and endpoint. It is how an exhausted quota gets explained from counts rather
 // than guessed at from traffic volume.
+//
+// Authorized like the gateway it describes: the report names the fleet's hosts
+// and what each was doing, and its only reader is the crq command line.
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
-	if err := s.addressedHere(r); err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+	if !s.authorizeGateway(w, r) {
 		return
 	}
 	if s.opts.Requests == nil {

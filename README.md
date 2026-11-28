@@ -548,6 +548,8 @@ crq solver clear <repo> | crq solver clear --fleet
 
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
+                          #    a renamed repository is followed to its new name on its own, and
+                          #    one that is gone is skipped at once and forgotten a week later
 
 crq reviewers <repo>      # which bots review this project, and what each costs
 crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
@@ -873,6 +875,7 @@ by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 | `crq serve unreachable` | Start or repair the configured `CRQ_SERVER_URL`; ordinary commands deliberately do not fall back to GitHub, and a daemon exits with this error so its service manager restarts it once the server is back. Use `crq --direct doctor` only for operator recovery. |
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; unacknowledged fires retry after `CRQ_INFLIGHT_TIMEOUT`, while acknowledged reviews retire after `CRQ_FEEDBACK_WAIT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
+| A repository was renamed or deleted | Nothing to do. Each pass asks GitHub about every repository crq knows in one batched query. A renamed one has its enrollment, settings and per-PR records moved to the new name once no fix session or interactive loop is still working under the old one, and commands that keep using the old name are led to the new. A missing one is skipped and marked (`crq repos` shows `.missing_since`) and forgotten once it has been confirmed missing on seven separate days. Only a stale name in a host's own `CRQ_REPOS` or `CRQ_EXCLUDE` needs editing, and the daemon log says which. |
 | The GitHub quota keeps running out | `crq requests` says who asked for what: every request goes through `crq serve`, which counts them by caller and endpoint, separating the ones that cost quota from 304s and from answers it gave without asking GitHub. A `422` on `PATCH …/git/refs/heads/*` is a state write that lost its compare-and-swap. |
 | `GitHub … rate limit hit … resets …` | The account's GitHub quota is spent. `crq serve` answers every caller at once with the reset time and stops asking GitHub until then, apart from one probe every 30s; each command or daemon waits the reset out itself and carries on. Short pauses GitHub asks for between bursts are absorbed by the server. |
 | Internet drops for a while | `crq serve` rides it out, retrying about every 30s with **no timeout by default** and recording recovery in its log. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |

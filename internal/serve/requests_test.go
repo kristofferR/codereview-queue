@@ -41,18 +41,28 @@ func TestRequestsEndpointServesTheAccountingItIsGiven(t *testing.T) {
 		asked = window
 		return map[string]int{"counted": 42}
 	}})
-	get := func(srv *Server, target string) *httptest.ResponseRecorder {
+	get := func(srv *Server, target string, asClient bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+		req.RemoteAddr = "127.0.0.1:4321"
+		if asClient {
+			req.Header.Set("X-CRQ-Client", "1")
+		}
 		rec := httptest.NewRecorder()
-		srv.routes().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+		srv.routes().ServeHTTP(rec, req)
 		return rec
 	}
-	rec := get(srv, "http://127.0.0.1:7777/api/requests?window=15m")
+	rec := get(srv, "http://127.0.0.1:7777/api/requests?window=15m", true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"counted": 42`) || asked != 15*time.Minute {
 		t.Fatalf("response = %d %s, window asked = %s", rec.Code, rec.Body.String(), asked)
 	}
+	// The report names hosts and what they were doing, so it is the gateway's
+	// clients that may read it, not whoever can reach the dashboard.
+	if rec := get(srv, "http://127.0.0.1:7777/api/requests", false); rec.Code != http.StatusForbidden {
+		t.Fatalf("status without the client header = %d, want 403", rec.Code)
+	}
 	// A server with no accounting says so rather than serving an empty report
 	// that reads as "nothing was asked".
-	if rec := get(New(&stubLoader{}, Options{Addr: "127.0.0.1:7777"}), "http://127.0.0.1:7777/api/requests"); rec.Code != http.StatusNotFound {
+	if rec := get(New(&stubLoader{}, Options{Addr: "127.0.0.1:7777"}), "http://127.0.0.1:7777/api/requests", true); rec.Code != http.StatusNotFound {
 		t.Fatalf("status without accounting = %d, want 404", rec.Code)
 	}
 }

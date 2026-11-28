@@ -38,6 +38,10 @@ type EnrollmentView struct {
 	By           string   `json:"by,omitempty"`
 	UpdatedAt    string   `json:"updated_at,omitempty"`
 	Lagging      []string `json:"lagging_hosts,omitempty"`
+	// MissingSince is when GitHub stopped resolving the repository's name. It is
+	// not reviewed while set, whatever enrolled it, and crq forgets it once it
+	// has been confirmed missing on seven separate days.
+	MissingSince string `json:"missing_since,omitempty"`
 }
 
 // Enrollment reports whether crq reviews repo, and why.
@@ -62,12 +66,27 @@ func (s *Service) Enrollment(ctx context.Context, repo string) (EnrollmentView, 
 // machine is not a switch. Env alone still enrolls, so nothing changes for a
 // fleet that never touches this.
 func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
+	view := s.enrollmentDecided(st, repo)
+	if missing, ok := st.RepoMissing(repo); ok && view.Source != "excluded" {
+		// There is nothing on GitHub to review, so every scan path skips it
+		// without each having to learn why. Whatever enrolled it still stands
+		// underneath, for the day the repository comes back.
+		view.Enabled, view.EnvConflict = false, false
+		view.MissingSince = missing.Since.UTC().Format("2006-01-02T15:04:05Z")
+		view.Reason = "not found on GitHub since " + missing.Since.UTC().Format("2006-01-02") +
+			" (deleted, or no longer visible to crq)"
+	}
+	return view
+}
+
+// enrollmentDecided is the answer from the env lists and the record alone.
+func (s *Service) enrollmentDecided(st State, repo string) EnrollmentView {
 	repo = NormalizeRepo(repo)
 	cfg := s.cfg.WithFleet(st.Fleet)
 	view := EnrollmentView{Repo: repo}
 	inEnv := cfg.AllowRepos[repo]
 	switch {
-	case cfg.ExcludeRepos[repo]:
+	case cfg.ExcludeRepos[repo], excludedByOldName(st, cfg, repo):
 		view.Source, view.Enabled = "excluded", false
 		return view
 	case repo == NormalizeRepo(cfg.GateRepo):
@@ -105,6 +124,18 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 		view.Source, view.Enabled = "off", false
 	}
 	return view
+}
+
+// excludedByOldName reports a repository this host's CRQ_EXCLUDE names by a name
+// it no longer has. The kill switch is a statement about the repository, and a
+// rename must not be a way out from under it.
+func excludedByOldName(st State, cfg Config, repo string) bool {
+	for old, current := range st.RepoAliases {
+		if current == repo && cfg.ExcludeRepos[old] {
+			return true
+		}
+	}
+	return false
 }
 
 // SetEnrollment records whether crq reviews repo. Turning one off needs a
@@ -169,18 +200,26 @@ func (s *Service) SetEnrollmentAt(ctx context.Context, repo string, enabled bool
 }
 
 func claimedTriggerRepo(st *State, repo string, now time.Time) bool {
+	return len(triggerClaimedPulls(st, repo, now)) > 0
+}
+
+// triggerClaimedPulls lists repo's pull requests with a review trigger that may
+// still be in the middle of being posted.
+func triggerClaimedPulls(st *State, repo string, now time.Time) []int {
+	repo = NormalizeRepo(repo)
+	var pulls []int
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
-			return true
+			pulls = append(pulls, round.PR)
 		}
 	}
 	for i := range st.Archive {
 		round := &st.Archive[i]
 		if NormalizeRepo(round.Repo) == repo && archivedTriggerPostClaimed(round, now) {
-			return true
+			pulls = append(pulls, round.PR)
 		}
 	}
-	return false
+	return pulls
 }
 
 // An archived round has no live queue owner left to clear a crashed poster's
@@ -214,7 +253,7 @@ func archivedTriggerPostClaimed(round *Round, now time.Time) bool {
 // Only the phases that have not spent anything are touched. A fired or
 // reviewing round already posted its command and holds the fire slot; the money
 // is gone and the answer is worth having, so it is left to finish.
-func (s *Service) abandonPendingRounds(st *State, repo string) {
+func (s *Service) abandonPendingRounds(st *State, repo string) (ended bool) {
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
@@ -224,6 +263,7 @@ func (s *Service) abandonPendingRounds(st *State, repo string) {
 		default:
 			continue
 		}
+		ended = true
 		// EndRound, not a bare Abandon: it archives the round rather than
 		// leaving it in Rounds as a "this head was dealt with" marker. Turning
 		// the repository back on then enqueues its current head again, which is
@@ -235,6 +275,7 @@ func (s *Service) abandonPendingRounds(st *State, repo string) {
 				round.Repo, round.PR, round.Head)
 		}
 	}
+	return ended
 }
 
 // ClearEnrollment drops the record, handing the repository back to the hosts'

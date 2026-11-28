@@ -166,7 +166,7 @@ func (g *GitHub) noteQuota(header http.Header) {
 }
 
 // Requests reports what this client asked of GitHub over the last window (at
-// most an hour), busiest endpoint first.
+// most an hour, to the minute), busiest endpoint first.
 func (g *GitHub) Requests(window time.Duration) RequestReport {
 	if window <= 0 || window > requestLogMinutes*time.Minute {
 		window = requestLogMinutes * time.Minute
@@ -182,7 +182,10 @@ func (g *GitHub) Requests(window time.Duration) RequestReport {
 	log.mu.Lock()
 	report.Since = log.since.UTC()
 	for slot, counts := range log.minutes {
-		if log.stamps[slot] <= oldest {
+		// The minute the window begins in is included whole: counts are kept
+		// by the minute, and leaving it out reported nothing at all for a
+		// window shorter than one.
+		if log.stamps[slot] < oldest {
 			continue
 		}
 		for key, n := range counts {

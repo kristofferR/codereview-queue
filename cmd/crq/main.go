@@ -204,7 +204,7 @@ func run(ctx context.Context, args []string) int {
 	case "requests":
 		fs := flag.NewFlagSet("requests", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
-		window := fs.Duration("window", time.Hour, "how far back to count, up to 1h")
+		window := fs.Duration("window", time.Hour, "how far back to count, to the minute, up to 1h")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 1
 		}
@@ -1533,6 +1533,18 @@ the fleet disagree in silence.
 
 Removing needs --reason. The repository disappears from every queue, and "why did
 this stop being reviewed" is a question the fleet should be able to answer itself.
+
+Renames and deletions are followed without anyone editing this list. A repository
+GitHub now knows by another name has its record, its settings and every per-PR
+record moved to that name, and stays reviewed; the move waits for any fix session
+or interactive loop still working under the old name, and a command that goes on
+using the old name afterwards is led to the new one. A repository GitHub no
+longer resolves is skipped at once and shown with .missing_since; it is reviewed
+again if it comes back, and forgotten once it has been confirmed missing on seven
+separate days. (Not at once: "not found" is also what a credential that lost its
+access sees.) A name that only this host's CRQ_REPOS or CRQ_EXCLUDE still carries
+is something crq cannot rewrite; it says so in its log, and an excluded
+repository stays excluded under its new name.
 `)
 	case "autofix":
 		fmt.Print(`crq autofix install [--agent <path>] [--dry-run] [<repo>...]
@@ -1835,7 +1847,7 @@ crq requests prints the same accounting in full.
 		fmt.Print(`crq requests [--window <duration>]
 
 What crq serve asked of GitHub, as JSON: one row per caller and endpoint, busiest
-first, over the last --window (default and maximum 1h).
+first, over the last --window (default and maximum 1h, counted by the minute).
 
   .counted   requests that reached GitHub and drew on the allowance
   .free      answered 304 — a conditional request GitHub does not charge for
@@ -2194,14 +2206,23 @@ func hasFlag(args []string, flag string) bool {
 // inside the repository, so making them carry a repo and number they are already
 // standing in is two chances to name the wrong PR silently.
 func target(ctx context.Context, service *crq.Service, args []string, usage string) (string, int, error) {
-	switch repo, pr, ok := repoPR(args); {
+	var repo string
+	var pr int
+	switch named, number, ok := repoPR(args); {
 	case ok:
-		return repo, pr, nil
+		repo, pr = named, number
 	case len(args) == 0:
-		return service.InferTarget(ctx)
+		inferred, number, err := service.InferTarget(ctx)
+		if err != nil {
+			return "", 0, err
+		}
+		repo, pr = inferred, number
 	default:
 		return "", 0, fmt.Errorf("usage: %s", usage)
 	}
+	// A checkout keeps the remote it was cloned with, so after a rename it goes
+	// on naming the repository the old way. The records moved; follow them.
+	return service.CurrentRepo(ctx, repo), pr, nil
 }
 
 // unknownFlag returns the first flag in args that is not in allowed.

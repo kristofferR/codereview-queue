@@ -893,6 +893,8 @@ func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
 	if s.CoActivity[key] == nil || s.CoAnswers[key] == nil || len(s.ReviewedHeads[key]) != 1 {
 		t.Fatalf("fixture did not populate the per-PR indexes: %+v", s)
 	}
+	s.RecordTidied("owner/repo", 21, PostedCommand{ID: 9, Bot: "coderabbitai", At: t0})
+	s.TidyReactionCursors = map[string]int64{key: 9}
 
 	s.EndRound("owner/repo", 21, NoteMerged)
 	if !s.RetireMerged("owner/repo", 21) {
@@ -909,6 +911,9 @@ func TestRetireMergedForgetsPerPRIndexesAndSurvivesNormalize(t *testing.T) {
 	}
 	if _, ok := s.ReviewedHeads[key]; ok {
 		t.Fatal("merged PR kept its review ledger")
+	}
+	if len(s.TidiedCommands[key]) != 0 || s.TidyReactionCursors[key] != 0 {
+		t.Fatal("merged PR kept its tidy tombstones")
 	}
 
 	// The archived round still carries the answer; loading must not put the

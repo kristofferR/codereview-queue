@@ -60,6 +60,22 @@ type fakeGitHub struct {
 	searchPRs   []ghapi.SearchPR
 	// searchErrs fails EachOpenPR for one search target.
 	searchErrs map[string]error
+	// renamedRepos (old name → current name) and goneRepos say what LookupRepos
+	// answers for a repository that is not what it was. lookupErr fails the
+	// whole lookup; lookups counts the calls and lookedUp the names asked.
+	renamedRepos map[string]string
+	goneRepos    map[string]bool
+	lookupErr    error
+	lookups      int
+	lookedUp     []string
+	// lookupRepoErrs fails one repository's answer; lookupHook runs during a
+	// lookup, outside the lock, to stand in for the time it takes.
+	lookupRepoErrs map[string]error
+	lookupHook     func()
+	// pageSize, when set, splits a repository's pull requests across pages.
+	pageSize int
+	// mergedAsked records each MergedPRs call as "repo: n" for its batch size.
+	mergedAsked []string
 	// foreignRepos are repositories the token user does not administer; every
 	// other repository reads as administered.
 	foreignRepos map[string]bool
@@ -394,6 +410,87 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, target string, _ bool, fn fun
 		}
 	}
 	return nil
+}
+
+// LookupRepos answers from the fixtures the search uses: a repository's open
+// pull requests are the searchPRs that name it, under whatever it is called now.
+func (f *fakeGitHub) LookupRepos(_ context.Context, withPRs, namesOnly []string) (map[string]ghapi.RepoState, error) {
+	if f.lookupHook != nil {
+		f.lookupHook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lookups++
+	if f.lookupErr != nil {
+		return nil, f.lookupErr
+	}
+	out := map[string]ghapi.RepoState{}
+	answer := func(repo string, prs bool) {
+		f.lookedUp = append(f.lookedUp, repo)
+		if err := f.lookupRepoErrs[NormalizeRepo(repo)]; err != nil {
+			out[repo] = ghapi.RepoState{Err: err}
+			return
+		}
+		if f.goneRepos[NormalizeRepo(repo)] {
+			out[repo] = ghapi.RepoState{Missing: true}
+			return
+		}
+		state := ghapi.RepoState{Name: repo}
+		if current := f.renamedRepos[NormalizeRepo(repo)]; current != "" {
+			state.Name = current
+		}
+		if prs {
+			state.PRs, state.Next = f.openPRPage(state.Name, 0)
+		}
+		out[repo] = state
+	}
+	for _, repo := range withPRs {
+		answer(repo, true)
+	}
+	for _, repo := range namesOnly {
+		answer(repo, false)
+	}
+	return out, nil
+}
+
+func (f *fakeGitHub) MoreOpenPRs(_ context.Context, repo, cursor string) ([]ghapi.SearchPR, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	from, _ := strconv.Atoi(cursor)
+	prs, next := f.openPRPage(repo, from)
+	return prs, next, nil
+}
+
+// MergedPRs answers from the pull fixtures; a pull request with none is unknown.
+func (f *fakeGitHub) MergedPRs(_ context.Context, repo string, prs []int) (map[int]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergedAsked = append(f.mergedAsked, fmt.Sprintf("%s: %d", repo, len(prs)))
+	out := map[int]bool{}
+	for _, pr := range prs {
+		if pull, ok := f.pulls[fakeKey(repo, pr)]; ok {
+			out[pr] = pull.Merged
+		}
+	}
+	return out, nil
+}
+
+// openPRPage is one page of a repository's open pull requests. The caller holds f.mu.
+func (f *fakeGitHub) openPRPage(repo string, from int) ([]ghapi.SearchPR, string) {
+	var all []ghapi.SearchPR
+	for _, pr := range f.searchPRs {
+		if NormalizeRepo(pr.Repo) == NormalizeRepo(repo) {
+			all = append(all, pr)
+		}
+	}
+	if from > len(all) {
+		from = len(all)
+	}
+	all = all[from:]
+	if f.pageSize > 0 && len(all) > f.pageSize {
+		return all[:f.pageSize], strconv.Itoa(from + f.pageSize)
+	}
+	return all, ""
 }
 
 // ListPulls answers the branch->PR lookup target inference uses.
@@ -4423,17 +4520,17 @@ func TestAutoReviewScanAppliesTheRepositorysOwnSkipAuthors(t *testing.T) {
 // A control plane that dies mid-scan must end the pass, not be logged once per
 // candidate: skipping PR by PR spends the offline cap on each one while the
 // pass still reports success, so the daemon looks healthy through the outage.
-func TestAutoReviewEnqueuesPastAnUnsearchableRepository(t *testing.T) {
+func TestAutoReviewEnqueuesPastAnUnsearchableOwner(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"o/app": true, "o/renamed": true}
+	cfg.Scope = []string{"gone", "o"}
 	cfg.LeaderTTL = time.Minute
 	cfg.AutoReviewMaxScan = 10
 	repo, pr := "o/app", 4
 	gh := newFakeGitHub()
 	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr, Author: "alice"}}
-	// GitHub search answers 422 for a repository renamed since it was enrolled.
-	gh.searchErrs = map[string]error{"o/renamed": &ghapi.APIError{Method: "GET", URL: "/search/issues", Status: 422}}
+	// GitHub search answers 422 for an owner that no longer exists.
+	gh.searchErrs = map[string]error{"gone": &ghapi.APIError{Method: "GET", URL: "/search/issues", Status: 422}}
 	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
@@ -4451,7 +4548,7 @@ func TestAutoReviewEnqueuesPastAnUnsearchableRepository(t *testing.T) {
 		t.Fatal(lerr)
 	}
 	if st.Round(repo, pr) == nil {
-		t.Fatalf("a failed search for another repository dropped %s#%d, rounds=%#v", repo, pr, st.Rounds)
+		t.Fatalf("a failed search for another owner dropped %s#%d, rounds=%#v", repo, pr, st.Rounds)
 	}
 }
 

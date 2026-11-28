@@ -202,6 +202,17 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 }
 
+// currentRepoName is the name GitHub gives the repository these pull requests
+// belong to, or "" when the listing does not say.
+func currentRepoName(pulls []ghapi.Pull) string {
+	for _, pull := range pulls {
+		if name := NormalizeRepo(pull.Base.Repo.FullName); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 // abortsPass reports a failure that belongs to the whole pass, not to the
 // repository or pull request it surfaced on: an exhausted GitHub quota, or a
 // control plane this host cannot reach. Both are logged-and-skipped at the
@@ -244,6 +255,32 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		return fmt.Errorf("loading shared state for watch pass: %w", stateErr)
 	}
 	fleetCfg := s.cfg.WithFleet(st.Fleet)
+	// CRQ_EXCLUDE names a repository by the name it had when the line was
+	// written. This host may be the only one that excludes it, so nobody else
+	// will ever ask GitHub what that name is called now — and until somebody
+	// does, the repository is watched under its new name as if the kill switch
+	// did not exist. One query, only on a host that has exclusions.
+	// A rename that has to wait for work in flight records no alias yet, so the
+	// names it leaves alone are carried into this pass's own.
+	holdOff := map[string]bool{}
+	if excluded := sortedRepoList(fleetCfg.ExcludeRepos); len(excluded) > 0 {
+		looked, lerr := s.gh.LookupRepos(ctx, nil, excluded)
+		if lerr == nil {
+			var waiting map[string]bool
+			st, waiting, lerr = s.reconcileRepos(ctx, st, looked, nil)
+			for repo := range waiting {
+				holdOff[repo] = true
+			}
+		}
+		if lerr != nil {
+			if abortsPass(lerr) {
+				return lerr
+			}
+			if s.log != nil {
+				s.log.Printf("watch: checking what the CRQ_EXCLUDE repositories are called now: %v", lerr)
+			}
+		}
+	}
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
@@ -298,7 +335,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// A repository turned off from the dashboard must stop being watched on the
 	// next pass, not on restart.
 	notEnrolled := map[string]bool{}
+	watching := make(map[string]bool, len(repos))
 	for _, repo := range repos {
+		watching[NormalizeRepo(repo)] = true
 		if !st.AutofixEnabled(repo) {
 			autofixOff[NormalizeRepo(repo)] = true
 		}
@@ -324,7 +363,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 		// "crq does not go here" has to mean that to every path, including the
 		// one that spends an agent on a fix session.
-		if notEnrolled[NormalizeRepo(repo)] {
+		if notEnrolled[NormalizeRepo(repo)] || holdOff[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
@@ -345,6 +384,45 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				failures = append(failures, fmt.Sprintf("%s: %v", repo, err))
 			}
 			continue
+		}
+		// A repository asked about by an old name still answers, through
+		// GitHub's redirect, and every pull request it lists says what the
+		// repository is called now. Carrying on under the old name tracks the
+		// same pull requests twice, and reviews them twice.
+		if current := currentRepoName(pulls); current != "" && current != NormalizeRepo(repo) {
+			// Moved first, and only then deduplicated: the records under the old
+			// name — holds, reviewer overrides, the rounds that say a head was
+			// already reviewed — are what the current name is about to be
+			// watched with, whether or not it is in this pass on its own account.
+			moved, waiting, rerr := s.reconcileRepos(ctx, st, map[string]ghapi.RepoState{NormalizeRepo(repo): {Name: current}}, nil)
+			if rerr != nil {
+				if abortsPass(rerr) {
+					return rerr
+				}
+				if s.log != nil {
+					s.log.Printf("watch: %s is now %s, and its records could not be moved: %v", repo, current, rerr)
+				}
+				continue
+			}
+			st = moved
+			if waiting[current] {
+				// Work in flight still holds the old name. Until it finishes,
+				// neither name is acted on: the same pull request would be
+				// worked from both sides.
+				holdOff[current] = true
+				continue
+			}
+			if watching[current] {
+				continue // its current name is in this pass as well
+			}
+			repo = current
+			watching[current] = true
+			if !s.reviewsRepo(st, repo) {
+				continue
+			}
+			if !st.AutofixEnabled(repo) {
+				autofixOff[repo] = true
+			}
 		}
 		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
@@ -378,6 +456,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// repository/PR order from starving the tail when dispatch capacity is full.
 	var prioritized, regular []candidate
 	for _, c := range candidates {
+		// Gathered under its current name before the rename was noticed
+		// through the old one.
+		if holdOff[NormalizeRepo(c.repo)] {
+			continue
+		}
 		if c.priority < 0 {
 			prioritized = append(prioritized, c)
 		} else {

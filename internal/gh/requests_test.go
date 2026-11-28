@@ -56,6 +56,11 @@ func TestRequestLogSeparatesCountedFreeAndLocalByCaller(t *testing.T) {
 	if report.Counted != 3 || report.Free != 2 || report.Local != 1 {
 		t.Fatalf("totals = %d counted, %d free, %d local; want 3, 2, 1", report.Counted, report.Free, report.Local)
 	}
+	// Counts are kept by the minute, so a shorter window still covers the
+	// minute it falls in rather than nothing.
+	if recent := g.Requests(30 * time.Second); recent.Counted != 3 {
+		t.Fatalf("a 30s window counted %d, want the requests just made", recent.Counted)
+	}
 	rows := map[string]RequestRow{}
 	for _, row := range report.Rows {
 		rows[row.Caller+" "+row.Method+" "+row.Route] = row

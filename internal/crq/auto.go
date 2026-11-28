@@ -328,20 +328,15 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	// there made every pass walk the organisation's whole open-PR result set for
 	// reviewsRepo to reject each row before the scan counter even advanced.
 	//
-	// A scope-wide host still searches its individually enrolled repositories by
+	// A scope-wide host still lists its individually enrolled repositories by
 	// name — scanTargets returns the ones no owner in CRQ_SCOPE covers — so the
-	// two search shapes are mixed in one pass and each target says which it is.
+	// two shapes are mixed in one pass.
 	targets, scoped := s.scanTargets(state)
-	repoTargets := make(map[string]bool, len(targets))
-	for _, target := range targets {
-		repoTargets[NormalizeRepo(target)] = true
-	}
-	byRepo := func(target string) bool { return !scoped || strings.Contains(target, "/") }
-	if scoped {
-		targets = append(targets, fleetCfg.Scope...)
-	}
-	var candidates []queueCandidate
-	var titles []queueCandidate
+	// Repositories are asked about by name in one batched lookup rather than
+	// searched one request each: the search allowance is thirty a minute, which
+	// a fleet of this size overran on every pass, and a search for a name that
+	// was renamed or deleted fails outright. The lookup answers for those too,
+	// and reconcileRepos acts on what it says before anything is scanned.
 	// The skip rules below are per-repository settings like everything else, and
 	// the enrollment preview already answers with the resolved ones. Reading
 	// s.cfg here instead made this pass enqueue — and spend the shared allowance
@@ -357,104 +352,225 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		}
 		return cfg
 	}
-	lastBeat := time.Now()
-	var targetErrs []error
-	for _, target := range targets {
-		// Per-target scan budget so one large scope can't consume the whole budget
-		// and starve later scopes when CRQ_SCOPE lists multiple owners/orgs.
-		scanned := 0
-		callbackErr := false
-		// Stream results and stop once the post-filter scan budget is spent, so
-		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
-		// limit would never reach them) while we still don't over-fetch pages.
-		err := s.gh.EachOpenPR(ctx, target, byRepo(target), func(pr ghapi.SearchPR) (bool, error) {
-			if scanned >= maxScan {
-				return true, nil
-			}
-			repo := NormalizeRepo(pr.Repo)
-			// One question, one answer: env allow/exclude, the gate repository
-			// and any enrollment record all resolve in enrollmentOf, so a scope
-			// search cannot enqueue what a by-repo search would have skipped.
-			if !s.reviewsRepo(state, repo) {
-				return false, nil
-			}
-			skips := repoSkips(repo)
-			if skips.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
-				return false, nil
-			}
-			if skips.SkipsReview(pr.Body) {
-				return false, nil
-			}
-			scanned++
-			// Heartbeat: renew the lease partway through a long pass so a standby
-			// can't steal it mid-scan and cause brief double-leadership (#4).
-			// Half of the SAME lease length renewLeader writes, so a fleet that
-			// shortens the lease starts beating faster to match.
-			if ttl := s.leaderTTL(state); ttl > 0 && time.Since(lastBeat) >= ttl/2 {
-				st, held, herr := s.renewLeader(ctx, owner, token)
-				if herr != nil {
-					callbackErr = true
-					return false, herr
-				}
-				if !held {
-					callbackErr = true
-					return false, errLostLeadership
-				}
-				state = st     // reuse the freshly written snapshot for later candidates
-				clear(skipCfg) // the memo above answers for the snapshot it was built from
-				lastBeat = time.Now()
-			}
-			// A round that already exists at this head is not a candidate, so it
-			// would never reach enqueueBatch and would never learn its title.
-			// The scan already has one; recording it here is what stops every
-			// existing round reading as a bare number for ever.
-			if pr.Title != "" {
-				titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
-			}
-			// A one-pass campaign asks whether this PR has ever received its one
-			// review, regardless of later heads. The watcher owns the single fixer
-			// and exact-head merge after that boundary.
-			reviewCfg := repoSkips(repo)
-			incremental := opts.Incremental && !reviewCfg.OnePass
-			need, head, nerr := s.reviewNeeded(ctx, state, repo, pr.Number, incremental, reviewCfg.OnePass, s.logEnqueue)
-			if nerr != nil {
-				// A throttle must abort the pass so AutoReview's outer backoff kicks
-				// in, instead of scanning the rest of the candidates under the same
-				// throttle (and skipping them until a later poll). An unreachable
-				// control plane is the same shape: skipping candidate by candidate
-				// spends the offline cap once per PR while the pass still reports
-				// success, so the outage surfaces minutes late, if at all.
-				if abortsPass(nerr) {
-					callbackErr = true
-					return false, nerr
-				}
-				if s.log != nil {
-					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, nerr)
-				}
-				return false, nil
-			}
-			if need {
-				solver := state.EffectiveSolver(repo)
-				candidates = append(candidates, queueCandidate{
-					Repo: repo, PR: pr.Number, Head: head, Title: pr.Title,
-					PolicyChecked: true, OnePass: reviewCfg.OnePass, OnePassCampaign: solver.OnePassCampaign,
-				})
-			}
-			return false, nil
-		})
+	// beat renews the lease once less than half of it is left, so a standby
+	// can't steal it mid-pass and cause brief double-leadership (#4). Half of
+	// the SAME lease length renewLeader writes, so a fleet that shortens the
+	// lease starts beating faster to match. Measured against the deadline the
+	// lease itself records, not a clock this pass started: the steps before the
+	// first beat — the host report, the state read, the repository lookup — can
+	// outlast the lease, and a renewal is the CAS that would say so.
+	beat := func() error {
+		ttl := s.leaderTTL(state)
+		lease := state.Leader
+		if ttl <= 0 || lease != nil && lease.Token == token && time.Until(lease.ExpiresAt) >= ttl/2 {
+			return nil
+		}
+		st, held, err := s.renewLeader(ctx, owner, token)
 		if err != nil {
-			// A throttle, an outage or a callback failure (lost leadership)
-			// ends the pass. A search failure for this one target does not:
-			// returning here dropped every candidate already collected, so one
-			// renamed repository (search answers 422 for the old name) kept the
-			// whole fleet from enqueueing anything.
-			if callbackErr || abortsPass(err) {
-				return err
+			return err
+		}
+		if !held {
+			return errLostLeadership
+		}
+		state = st     // reuse the freshly written snapshot from here on
+		clear(skipCfg) // the memo above answers for the snapshot it was built from
+		return nil
+	}
+	var targetErrs []error
+	listed := map[string]ghapi.RepoState{}
+	// holdOff names the repositories this pass leaves alone: a rename is known
+	// for them, but work in flight still holds the old name.
+	var holdOff map[string]bool
+	if withPRs, namesOnly := s.lookupsFor(state, targets); len(withPRs)+len(namesOnly) > 0 {
+		looked, lerr := s.gh.LookupRepos(ctx, withPRs, namesOnly)
+		if lerr == nil {
+			// The lookup can sit out a throttle. Whatever it says is applied
+			// only by a process that is still the leader.
+			if berr := beat(); berr != nil {
+				return berr
+			}
+			// And the write itself checks the lease it lands on, which catches
+			// a takeover between that heartbeat and this write.
+			state, holdOff, lerr = s.reconcileRepos(ctx, state, looked, func(st *State) error {
+				if st.Leader == nil || st.Leader.Token != token {
+					return errLostLeadership
+				}
+				return nil
+			})
+			if errors.Is(lerr, errLostLeadership) {
+				return lerr
+			}
+		}
+		if lerr != nil {
+			if abortsPass(lerr) {
+				return lerr
 			}
 			if s.log != nil {
-				s.log.Printf("warning: autoreview skipped %s: %v", target, err)
+				s.log.Printf("warning: autoreview could not list repositories: %v", lerr)
 			}
-			targetErrs = append(targetErrs, err)
+			targetErrs = append(targetErrs, lerr)
+		}
+		// A repository GitHub could not answer for is that repository's own
+		// failure: the rest are scanned, and a one-shot run still reports what
+		// was not checked. Whether it was to be scanned or only looked at makes
+		// no difference to that. One line per distinct failure, since a query
+		// that failed took all its repositories with it.
+		failed := map[string][]string{}
+		for _, asked := range append(append([]string(nil), withPRs...), namesOnly...) {
+			if found, ok := looked[asked]; ok && found.Err != nil {
+				failed[found.Err.Error()] = append(failed[found.Err.Error()], asked)
+			}
+		}
+		for _, asked := range append(append([]string(nil), withPRs...), namesOnly...) {
+			found := looked[asked]
+			if found.Err == nil || len(failed[found.Err.Error()]) == 0 {
+				continue
+			}
+			repos := failed[found.Err.Error()]
+			failed[found.Err.Error()] = nil
+			if s.log != nil {
+				s.log.Printf("warning: autoreview could not look up %s: %v", strings.Join(repos, ", "), found.Err)
+			}
+			targetErrs = append(targetErrs, fmt.Errorf("%s: %w", strings.Join(repos, ", "), found.Err))
+		}
+		for _, asked := range withPRs {
+			// Keyed by current name: a repository reached through an old one is
+			// scanned once, as what it is called now.
+			if found, ok := looked[asked]; ok && found.Err == nil && !found.Missing && !found.Archived {
+				listed[NormalizeRepo(found.Name)] = found
+			}
+		}
+		// The reconcile may have moved an enrollment to a new name.
+		targets, scoped = s.scanTargets(state)
+		fleetCfg = s.cfg.WithFleet(state.Fleet)
+	}
+	repoTargets := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		repoTargets[NormalizeRepo(target)] = true
+	}
+	var candidates []queueCandidate
+	var titles []queueCandidate
+	// Per-target scan budget so one large scope can't consume the whole budget
+	// and starve later scopes when CRQ_SCOPE lists multiple owners/orgs.
+	scanned := 0
+	callbackErr := false
+	// visit examines one open pull request. It stops once the post-filter scan
+	// budget is spent, so excluded/gate-repo results can't crowd out in-scope PRs
+	// (a fixed pre-filter limit would never reach them) while pages are still
+	// not over-fetched.
+	visit := func(pr ghapi.SearchPR) (bool, error) {
+		if scanned >= maxScan {
+			return true, nil
+		}
+		repo := NormalizeRepo(pr.Repo)
+		// One question, one answer: env allow/exclude, the gate repository
+		// and any enrollment record all resolve in enrollmentOf, so a scope
+		// search cannot enqueue what a by-repo search would have skipped.
+		if holdOff[repo] || !s.reviewsRepo(state, repo) {
+			return false, nil
+		}
+		skips := repoSkips(repo)
+		if skips.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
+			return false, nil
+		}
+		if skips.SkipsReview(pr.Body) {
+			return false, nil
+		}
+		scanned++
+		if herr := beat(); herr != nil {
+			callbackErr = true
+			return false, herr
+		}
+		// A round that already exists at this head is not a candidate, so it
+		// would never reach enqueueBatch and would never learn its title.
+		// The scan already has one; recording it here is what stops every
+		// existing round reading as a bare number for ever.
+		if pr.Title != "" {
+			titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
+		}
+		// A one-pass campaign asks whether this PR has ever received its one
+		// review, regardless of later heads. The watcher owns the single fixer
+		// and exact-head merge after that boundary.
+		reviewCfg := repoSkips(repo)
+		incremental := opts.Incremental && !reviewCfg.OnePass
+		need, head, nerr := s.reviewNeeded(ctx, state, repo, pr.Number, incremental, reviewCfg.OnePass, s.logEnqueue)
+		if nerr != nil {
+			// A throttle must abort the pass so AutoReview's outer backoff kicks
+			// in, instead of scanning the rest of the candidates under the same
+			// throttle (and skipping them until a later poll). An unreachable
+			// control plane is the same shape: skipping candidate by candidate
+			// spends the offline cap once per PR while the pass still reports
+			// success, so the outage surfaces minutes late, if at all.
+			if abortsPass(nerr) {
+				callbackErr = true
+				return false, nerr
+			}
+			if s.log != nil {
+				s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, nerr)
+			}
+			return false, nil
+		}
+		if need {
+			solver := state.EffectiveSolver(repo)
+			candidates = append(candidates, queueCandidate{
+				Repo: repo, PR: pr.Number, Head: head, Title: pr.Title,
+				PolicyChecked: true, OnePass: reviewCfg.OnePass, OnePassCampaign: solver.OnePassCampaign,
+			})
+		}
+		return false, nil
+	}
+	// scan runs one target and decides what its failure means. A throttle, an
+	// outage or a callback failure (lost leadership) ends the pass. A failure
+	// for this one target does not: returning dropped every candidate already
+	// collected, so one unreadable repository kept the whole fleet from
+	// enqueueing anything.
+	scan := func(target string, each func() error) error {
+		scanned, callbackErr = 0, false
+		err := each()
+		if err == nil {
+			return nil
+		}
+		if callbackErr || abortsPass(err) {
+			return err
+		}
+		if s.log != nil {
+			s.log.Printf("warning: autoreview skipped %s: %v", target, err)
+		}
+		targetErrs = append(targetErrs, err)
+		return nil
+	}
+	for _, target := range targets {
+		found, ok := listed[NormalizeRepo(target)]
+		if !ok || holdOff[NormalizeRepo(target)] {
+			// Missing, archived, unreadable, waiting on a rename, or enrolled by
+			// this very pass: the lookup said why, and the next pass asks again.
+			continue
+		}
+		if err := scan(target, func() error {
+			prs, next := found.PRs, found.Next
+			for {
+				for _, pr := range prs {
+					if stop, err := visit(pr); err != nil || stop {
+						return err
+					}
+				}
+				if next == "" || scanned >= maxScan {
+					return nil
+				}
+				var err error
+				if prs, next, err = s.gh.MoreOpenPRs(ctx, found.Name, next); err != nil {
+					return err
+				}
+			}
+		}); err != nil {
+			return err
+		}
+	}
+	if scoped {
+		for _, owner := range fleetCfg.Scope {
+			if err := scan(owner, func() error { return s.gh.EachOpenPR(ctx, owner, false, visit) }); err != nil {
+				return err
+			}
 		}
 	}
 	// Titles first, in one write: they change nothing about scheduling, so a
@@ -469,6 +585,16 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	})
 	if abortsPass(cleanupErr) {
 		return cleanupErr
+	}
+	if sweepErr := s.sweepMergedRecords(ctx, state); sweepErr != nil {
+		if abortsPass(sweepErr) {
+			return sweepErr
+		}
+		// Housekeeping: it is tried again on a later pass, and its failure is
+		// not a reason to call this pass's scan a failed one.
+		if s.log != nil {
+			s.log.Printf("warning: sweeping merged pull requests: %v", sweepErr)
+		}
 	}
 	// One batched write for the whole pass instead of N (#2).
 	return errors.Join(append(targetErrs, cleanupErr, s.enqueueBatch(ctx, candidates))...)

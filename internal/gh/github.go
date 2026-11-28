@@ -548,6 +548,7 @@ func (g *GitHub) graphQLResponse(ctx context.Context, body []byte) (*http.Respon
 			if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(msg, "rate limit") {
 				rl := graphQLRateLimit(resp.Header, msg)
 				rl.Method, rl.URL = http.MethodPost, g.graphBase
+				g.countRequest(ctx, http.MethodPost, g.graphBase, outcomeLimited)
 				// The reset header is always the primary window's. It is the
 				// moment this allowance returns only when the allowance is what
 				// ran out.
@@ -562,6 +563,7 @@ func (g *GitHub) graphQLResponse(ctx context.Context, body []byte) (*http.Respon
 		}
 		// Only here is the allowance known to be back: send saw a 200 either way.
 		g.clearThrottle("graphql", tw.sentAt)
+		g.countRequest(ctx, http.MethodPost, g.graphBase, strconv.Itoa(http.StatusOK))
 		resp.Body = io.NopCloser(bytes.NewReader(payload))
 		resp.ContentLength = int64(len(payload))
 		return resp, envelope, nil
@@ -889,8 +891,11 @@ func (g *GitHub) sendWith(ctx context.Context, method, fullURL string, body []by
 		}
 		g.noteQuota(resp.Header)
 		// A refused request is counted once it is known to be a rate limit and
-		// not a permission error; everything else is counted by its status.
-		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		// not a permission error, and a GraphQL 200 once its envelope has been
+		// read, since that is where GraphQL says it was refused; everything
+		// else is counted by its status.
+		refusal := resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests
+		if !refusal && !(bucket == "graphql" && resp.StatusCode == http.StatusOK) {
 			g.countRequest(ctx, method, fullURL, strconv.Itoa(resp.StatusCode))
 		}
 		// A response came back: connectivity is fine, reset the offline tracker.
@@ -1282,6 +1287,12 @@ type Pull struct {
 	Base struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
+		// Repo is the repository the pull request belongs to, under its current
+		// name. Asking by an old name still answers, through GitHub's redirect,
+		// and this is what says the name has moved on.
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"base"`
 	Merged         bool   `json:"merged"`
 	Mergeable      *bool  `json:"mergeable"`

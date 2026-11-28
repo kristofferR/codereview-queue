@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kristofferR/codereview-queue/internal/dialect"
@@ -39,6 +40,14 @@ type GitHubAPI interface {
 	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
+	// LookupRepos resolves many repositories by name in one batched query, with
+	// the open pull requests of the first list. It is how a pass learns that a
+	// repository was renamed or is gone, which a search by name cannot say.
+	LookupRepos(ctx context.Context, withPRs, namesOnly []string) (map[string]ghapi.RepoState, error)
+	// MoreOpenPRs continues one repository's open pull requests past a page.
+	MoreOpenPRs(ctx context.Context, repo, cursor string) ([]ghapi.SearchPR, string, error)
+	// MergedPRs says which of a repository's pull requests have merged.
+	MergedPRs(ctx context.Context, repo string, prs []int) (map[int]bool, error)
 	// ListOwnerRepos backs the dashboard's repository picker: it is the only
 	// call that asks about repositories crq does not already follow.
 	ListOwnerRepos(context.Context, string, int) ([]ghapi.Repo, error)
@@ -78,6 +87,13 @@ type Service struct {
 	// outlive the archive, so checking all of them on every watch pass would grow
 	// with repository age.
 	lastClosedSweep map[string]int
+	// mergedSweep rotates sweepMergedRecords through the repositories and
+	// through one repository's pull requests; in-memory only, single-writer
+	// (the autoreview pass).
+	mergedSweep map[string]mergedSweepCursor
+	// warned remembers the standing problems warnOnce has already logged. A
+	// pointer, because a Service is copied to resolve fleet settings.
+	warned *sync.Map
 	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
 	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
 	// single-writer (the watch caller).
@@ -125,6 +141,7 @@ func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service
 		log:             log,
 		lastClosedSweep: map[string]int{},
 		workOwnerCache:  &workOwnerCache{},
+		warned:          &sync.Map{},
 	}
 }
 

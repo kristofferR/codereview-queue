@@ -153,6 +153,22 @@ that the success it reported invites. Every fire gate asks `SlotHeld`, not
 
 One flow drives both the daemon and the loop:
 
+Before any of it, a pass settles what the repositories are called. `autoReviewPass`
+asks about every repository the state names in one batched lookup (`gh.LookupRepos`,
+GraphQL — no search request per repository), and `reconcileRepos` (`crq/repohealth.go`)
+acts on the answer. `State.RenameRepo` moves a renamed repository's enrollment, settings
+and every per-PR record to its current name and remembers the rename in `RepoAliases`,
+which is what leads a command still using the old name to the moved records
+(`Service.CurrentRepo`, at the CLI door) and keeps a host's `CRQ_EXCLUDE` in force under
+the new one. The move is deferred while `State.RepoBusy` — a fix session or an
+interactive loop holds the old name in its own memory — and both names are left alone
+until it has happened. A repository GitHub no longer resolves goes into `MissingRepos`:
+its rounds are taken out of scheduling, `enrollmentOf` reads it as not reviewed however
+it was enrolled, and it is dropped (`State.DropRepo`) only once it has been confirmed
+missing on seven separate days, because "not found" is also what a credential that lost
+its access sees. The watcher lists by REST, which follows a rename silently, so it reads
+the current name off the pull requests themselves and reconciles the same way.
+
 1. **observe** (`crq/observe.go`) — the single place that asks GitHub "what
    happened on this PR" and reduces it to an `engine.Observation` (head, open,
    reviews, classified `BotEvent`s, adoptable commands, reactions). It also
